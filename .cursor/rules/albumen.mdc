@@ -1,0 +1,8 @@
+---
+description: Albumen first principles for agents working in this repo
+alwaysApply: true
+---
+
+Read AGENTS.md at the repository root before changing this repository. DESIGN_PHILOSOPHY.md wins if the two disagree.
+
+Originals stay bit-exact. Metadata is never lost. The default path never deletes a source. Every copy is SHA-256 checked, and that check is the CI gate. Do not add a delete tool.

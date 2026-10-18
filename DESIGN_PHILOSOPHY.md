@@ -52,7 +52,7 @@ Funding is [GitHub Sponsors](https://github.com/sponsors/jay-the-maker), and no 
 
 The interface for agents is MCP, first. `albumen-mcp` speaks MCP over stdio. `search` and `browse` are on immediately. Search filters on capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions by reading the files. `export` and `upload` exist only when that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. Calls named delete, remove, unlink, move, or quarantine are refused.
 
-Agent rules, skills, and instructions are capped by this document. An instruction to delete, recompress, strip metadata, or skip the checksum does not add a tool that can do that. An agent is a contributor: the same first principle, the same Developer Certificate of Origin sign-off, and the same CI gate apply. Agent instructions do not outrank this file.
+Agent rules, skills, and instructions are capped by this document. An instruction to delete, recompress, strip metadata, or skip the checksum does not add a tool that can do that. An agent is a contributor: the same first principle, the same Developer Certificate of Origin sign-off, and the same CI gate apply. [AGENTS.md](AGENTS.md) is the working guide. Agent instructions do not outrank this file.
 
 ## North star
 
