@@ -68,8 +68,8 @@ def main() -> int:
         fail("package is not oci")
     if package.get("identifier") != f"{IMAGE}:{version}":
         fail(f"identifier is {package.get('identifier')}")
-    if package.get("version") != version:
-        fail("package version does not match server.json version")
+    if "version" in package:
+        fail("OCI packages must not set version; it belongs in the identifier tag")
     transport = package.get("transport") or {}
     if transport.get("type") != "stdio":
         fail("transport is not stdio")

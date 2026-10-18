@@ -15,7 +15,6 @@
     {
       "registryType": "oci",
       "identifier": "ghcr.io/jay-the-maker/albumen-mcp:0.1.0",
-      "version": "0.1.0",
       "runtimeHint": "docker",
       "transport": {
         "type": "stdio"
