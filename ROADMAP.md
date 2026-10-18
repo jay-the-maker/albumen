@@ -31,7 +31,7 @@ The iOS and Android apps are not started. The first slice is a spike that backs 
 Storage adapters beyond the local directory and the S3 API that exist now:
 
 - rclone for SMB, SFTP, WebDAV, and Backblaze B2. The adapter calls `copy_verify`; rclone is the transport.
-- Camera-to-cloud endpoints: FTP, SFTP, WebDAV, and S3, for a body that uploads as it shoots, plus tethered USB import. RAW and video included. Described in [docs/architecture.md](docs/architecture.md).
+- Camera-to-cloud: `albumen-receive` accepts WebDAV, SFTP, and FTP and stores each file with `copy_verify`. S3 upload from a camera, and tethered USB import, are still open. Described in [docs/architecture.md](docs/architecture.md).
 - Synced Google Drive and Dropbox folders stay a `LocalStore` root. No vendor API that rewrites the file on the way through.
 
 Each connector refuses to overwrite, preserves the filename and mtime, and reports done only after the SHA-256 check.

@@ -75,6 +75,17 @@ scripts/with-minio.sh cargo test --locked
 
 Fixture provenance and the CC0 dedication are in [fixtures/README.md](fixtures/README.md). The architecture outline is in [docs/architecture.md](docs/architecture.md).
 
+## Camera receiver
+
+`albumen-receive` runs on your machine and listens for a camera. WebDAV and SFTP are the first choices. FTP is there for older bodies and does not encrypt. Each finished upload is stored with `copy_verify`. An existing file is left as it is. The receiver does not delete anything in the library.
+
+```bash
+albumen-receive --to ./library --user camera --password "$ALBUMEN_RECEIVE_PASSWORD" \
+  --webdav 0.0.0.0:8080 --sftp 0.0.0.0:2222 --ftp 0.0.0.0:2121
+```
+
+The SFTP host key is generated for that process. FTP passive mode advertises the address of the control connection.
+
 ## Agents
 
 `albumen-mcp` speaks MCP over stdio. Search and browse are available immediately. Search can filter on capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions. It reads those from the files and sidecars and does not write a catalog. Export and upload are not available until that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. There is no delete tool.

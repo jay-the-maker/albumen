@@ -1,0 +1,19 @@
+[package]
+name = "albumen-receive"
+version = "0.1.0"
+description = "Camera-to-cloud receiver. WebDAV, SFTP, and FTP write only through copy_verify."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+albumen-ingest = { path = "../ingest" }
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+rand = "0.10"
+russh = "0.63"
+russh-sftp = "3.0.1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "fs", "io-std"] }
