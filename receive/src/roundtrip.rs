@@ -52,15 +52,20 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
         video_hash
     );
     let kept = std::fs::read(root.path().join("IMG_0003.dng")).unwrap();
-    http_put(webdav, "/IMG_0003.dng", b"different", "409", &raw_hash).await;
+    let other_hash = hash_bytes(b"different");
+    http_put(webdav, "/IMG_0003.dng", b"different", "201", &other_hash).await;
+    http_put(webdav, "/DCIM/IMG_0003.dng", &raw, "409", &raw_hash).await;
     http_request(webdav, "DELETE", "/IMG_0003.dng", b"", "405").await;
     assert_eq!(
         std::fs::read(root.path().join("IMG_0003.dng")).unwrap(),
         kept
     );
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_0003__2.dng")).unwrap(),
+        b"different"
+    );
 
-    std::fs::remove_file(root.path().join("IMG_0003.dng")).unwrap();
-    std::fs::remove_file(root.path().join("IMG_0006.mp4")).unwrap();
+    clear_library(root.path());
 
     sftp_put(sftp, "IMG_0003.dng", &raw).await;
     sftp_put(sftp, "folder/IMG_0006.mp4", &video).await;
@@ -72,15 +77,17 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
         sha256_hex(&root.path().join("IMG_0006.mp4")).unwrap(),
         video_hash
     );
-    let again = sftp_put_result(sftp, "IMG_0003.dng", b"nope").await;
-    assert!(again.is_err(), "sftp overwrite was accepted");
+    sftp_put(sftp, "IMG_0003.dng", b"nope").await;
     assert_eq!(
         std::fs::read(root.path().join("IMG_0003.dng")).unwrap(),
         raw
     );
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_0003__2.dng")).unwrap(),
+        b"nope"
+    );
 
-    std::fs::remove_file(root.path().join("IMG_0003.dng")).unwrap();
-    std::fs::remove_file(root.path().join("IMG_0006.mp4")).unwrap();
+    clear_library(root.path());
 
     ftp_put(ftp, "IMG_0003.dng", &raw).await;
     ftp_put(ftp, "/DCIM/IMG_0006.mp4", &video).await;
@@ -95,10 +102,14 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
     let reply = ftp_command(ftp, "DELE IMG_0003.dng").await;
     assert!(reply.starts_with("550"), "{reply}");
     let reply = ftp_store_again(ftp, "IMG_0003.dng", b"nope").await;
-    assert!(reply.starts_with("550"), "{reply}");
+    assert!(reply.starts_with("226"), "{reply}");
     assert_eq!(
         std::fs::read(root.path().join("IMG_0003.dng")).unwrap(),
         raw
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_0003__2.dng")).unwrap(),
+        b"nope"
     );
     assert_eq!(
         sha256_hex(&fixtures().join("raw-jpeg/IMG_0003.dng")).unwrap(),
@@ -106,6 +117,176 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
     );
     assert!(!root.path().join("DCIM").exists());
     assert!(root.path().join("IMG_0006.mp4").is_file());
+}
+
+#[tokio::test]
+async fn same_camera_filename_keeps_both_files_and_an_identical_retry_dedupes() {
+    let first = b"camera-roll-a";
+    let second = b"camera-roll-b";
+    let first_hash = hash_bytes(first);
+    let second_hash = hash_bytes(second);
+    let root = tempfile::tempdir().unwrap();
+    let listening = listen(
+        Settings {
+            library: root.path().to_path_buf(),
+            user: "camera".into(),
+            password: "roll".into(),
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let webdav = listening.webdav.unwrap();
+    http_put(
+        webdav,
+        "/DCIM/100CANON/IMG_9999.JPG",
+        first,
+        "201",
+        &first_hash,
+    )
+    .await;
+    http_put(
+        webdav,
+        "/DCIM/101CANON/IMG_9999.JPG",
+        second,
+        "201",
+        &second_hash,
+    )
+    .await;
+    http_put(
+        webdav,
+        "/DCIM/100CANON/IMG_9999.JPG",
+        first,
+        "409",
+        &first_hash,
+    )
+    .await;
+    assert_sidecar(
+        root.path(),
+        "IMG_9999.JPG",
+        "IMG_9999.JPG",
+        "DCIM/100CANON",
+        &first_hash,
+    );
+    assert_sidecar(
+        root.path(),
+        "IMG_9999__2.JPG",
+        "IMG_9999.JPG",
+        "DCIM/101CANON",
+        &second_hash,
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_9999.JPG")).unwrap(),
+        first
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_9999__2.JPG")).unwrap(),
+        second
+    );
+    assert_eq!(copies_of(root.path(), first), 1);
+
+    clear_library(root.path());
+    let sftp = listening.sftp.unwrap();
+    sftp_put(sftp, "/DCIM/100CANON/IMG_9999.JPG", first).await;
+    sftp_put(sftp, "/DCIM/101CANON/IMG_9999.JPG", second).await;
+    sftp_put(sftp, "/DCIM/100CANON/IMG_9999.JPG", first).await;
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_9999.JPG")).unwrap(),
+        first
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_9999__2.JPG")).unwrap(),
+        second
+    );
+    assert_eq!(copies_of(root.path(), first), 1);
+    assert_sidecar(
+        root.path(),
+        "IMG_9999.JPG",
+        "IMG_9999.JPG",
+        "DCIM/100CANON",
+        &sha256_hex(&root.path().join("IMG_9999.JPG")).unwrap(),
+    );
+
+    clear_library(root.path());
+    let ftp = listening.ftp.unwrap();
+    ftp_put(ftp, "/DCIM/100CANON/IMG_9999.JPG", first).await;
+    ftp_put(ftp, "/DCIM/101CANON/IMG_9999.JPG", second).await;
+    ftp_put(ftp, "/DCIM/100CANON/IMG_9999.JPG", first).await;
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_9999.JPG")).unwrap(),
+        first
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_9999__2.JPG")).unwrap(),
+        second
+    );
+    assert_eq!(copies_of(root.path(), first), 1);
+    assert_eq!(
+        sha256_hex(&root.path().join("IMG_9999.JPG")).unwrap(),
+        first_hash
+    );
+    assert_eq!(
+        sha256_hex(&root.path().join("IMG_9999__2.JPG")).unwrap(),
+        second_hash
+    );
+    assert_sidecar(
+        root.path(),
+        "IMG_9999__2.JPG",
+        "IMG_9999.JPG",
+        "DCIM/101CANON",
+        &second_hash,
+    );
+    assert!(!root.path().join("DCIM").exists());
+}
+
+fn assert_sidecar(
+    root: &std::path::Path,
+    stored_name: &str,
+    camera_filename: &str,
+    directory: &str,
+    sha256: &str,
+) {
+    let text = std::fs::read_to_string(root.join(format!("{stored_name}.albumen.json"))).unwrap();
+    assert!(
+        text.contains(&format!("\"camera_filename\":\"{camera_filename}\"")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\"directory\":\"{directory}\"")),
+        "{text}"
+    );
+    assert!(text.contains(&format!("\"sha256\":\"{sha256}\"")), "{text}");
+    assert!(
+        text.contains(&format!("\"stored_name\":\"{stored_name}\"")),
+        "{text}"
+    );
+}
+
+fn copies_of(root: &std::path::Path, bytes: &[u8]) -> usize {
+    std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| std::fs::read(entry.path()).ok().as_deref() == Some(bytes))
+        .count()
+}
+
+fn clear_library(root: &std::path::Path) {
+    for entry in std::fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blob");
+    std::fs::write(&path, bytes).unwrap();
+    sha256_hex(&path).unwrap()
 }
 
 async fn http_put(addr: SocketAddr, path: &str, body: &[u8], status: &str, sha256: &str) {

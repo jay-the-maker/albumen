@@ -13,7 +13,9 @@ public struct VerifiedUpload: Equatable, Sendable {
 }
 
 public enum UploadVerdict: Equatable, Sendable {
-    /// 201 with the client's digest, or 409 because those same bytes are already stored.
+    /// 201 with the client's digest, including a collision-safe path for a
+    /// different file that shared the camera filename. 409 with the same digest
+    /// means those bytes were already stored and the retry was deduped.
     case verified(sha256: String)
     case conflict(client: String, server: String)
     case missingServerHash
@@ -31,8 +33,9 @@ public enum UploadFailure: Error, Equatable, Sendable {
 
 public enum UploadCheck {
     /// Accept the upload only when `X-Albumen-Sha256` equals the digest of the
-    /// bytes the client sent. A 409 is success when that header is the digest
-    /// of the file already in the library, and a conflict when it is not.
+    /// bytes the client sent. 201 is a new object, even when the camera filename
+    /// collided and the server stored it under another name. 409 is success only
+    /// when that header is the digest of the identical bytes already stored.
     public static func verdict(
         clientSha256: String,
         status: Int,

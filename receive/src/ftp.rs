@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::store::{stored_name, Library, Spool};
+use crate::store::{Arrival, Commit, Library, Spool};
 
 pub async fn spawn(
     addr: SocketAddr,
@@ -188,7 +188,7 @@ async fn handle_line(
         }
         "SIZE" => {
             if session.require_login().await? {
-                match stored_name(arg) {
+                match Arrival::parse(arg).map(|arrival| arrival.camera_filename) {
                     Ok(name) if session.library.has(&name) => {
                         let len = std::fs::metadata(session.library.root().join(&name))
                             .map(|meta| meta.len())
@@ -275,13 +275,10 @@ impl Session {
     }
 
     async fn store(&mut self, arg: &str) -> std::io::Result<()> {
-        let name = match stored_name(arg) {
-            Ok(name) => name,
+        let arrival = match Arrival::parse(arg) {
+            Ok(arrival) => arrival,
             Err(err) => return self.reply(553, &err).await,
         };
-        if self.library.has(&name) {
-            return self.reply(550, "refusing to overwrite").await;
-        }
         if self.pasv.is_none() && self.port_target.is_none() {
             return self.reply(425, "use PASV or PORT first").await;
         }
@@ -290,7 +287,7 @@ impl Session {
             Ok(data) => data,
             Err(err) => return self.reply(425, &err.to_string()).await,
         };
-        let mut spool = match Spool::create(&name) {
+        let mut spool = match Spool::create(&arrival.camera_filename) {
             Ok(spool) => spool,
             Err(err) => return self.reply(451, &err).await,
         };
@@ -310,8 +307,10 @@ impl Session {
         if let Err(err) = spool.finish() {
             return self.reply(451, &err).await;
         }
-        match self.library.commit(&spool) {
-            Ok(_) => self.reply(226, "transfer complete").await,
+        match self.library.commit(&mut spool, &arrival) {
+            Ok(Commit::Stored { .. } | Commit::Deduped { .. }) => {
+                self.reply(226, "transfer complete").await
+            }
             Err(err) => self.reply(550, &err).await,
         }
     }

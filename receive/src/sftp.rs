@@ -18,7 +18,7 @@ use russh_sftp::protocol::{
 };
 use tokio::net::TcpListener;
 
-use crate::store::{stored_name, Library, Spool};
+use crate::store::{Arrival, Commit, Library, Spool};
 
 pub async fn spawn(
     addr: SocketAddr,
@@ -132,7 +132,7 @@ struct SftpSession {
 }
 
 enum OpenHandle {
-    Writing(Spool),
+    Writing { spool: Spool, arrival: Arrival },
     Reading(File),
 }
 
@@ -158,7 +158,7 @@ impl russh_sftp::server::Handler for SftpSession {
         pflags: OpenFlags,
         attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
-        let name = stored_name(&filename).map_err(|_| StatusCode::Failure)?;
+        let arrival = Arrival::parse(&filename).map_err(|_| StatusCode::Failure)?;
         let writing = pflags.contains(OpenFlags::WRITE)
             || pflags.contains(OpenFlags::CREATE)
             || pflags.contains(OpenFlags::APPEND)
@@ -166,18 +166,15 @@ impl russh_sftp::server::Handler for SftpSession {
         let handle = self.next_handle.to_string();
         self.next_handle += 1;
         if writing {
-            if self.library.has(&name) {
-                return Err(StatusCode::Failure);
-            }
-            let spool = Spool::create(&name).map_err(|_| StatusCode::Failure)?;
+            let spool = Spool::create(&arrival.camera_filename).map_err(|_| StatusCode::Failure)?;
             if let Some(mtime) = attrs.mtime {
                 let _ = spool.set_mtime(u64::from(mtime));
             }
             self.handles
-                .insert(handle.clone(), OpenHandle::Writing(spool));
+                .insert(handle.clone(), OpenHandle::Writing { spool, arrival });
         } else if pflags.contains(OpenFlags::READ) {
-            let file =
-                File::open(self.library.root().join(&name)).map_err(|_| StatusCode::NoSuchFile)?;
+            let file = File::open(self.library.root().join(&arrival.camera_filename))
+                .map_err(|_| StatusCode::NoSuchFile)?;
             self.handles
                 .insert(handle.clone(), OpenHandle::Reading(file));
         } else {
@@ -194,7 +191,7 @@ impl russh_sftp::server::Handler for SftpSession {
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
         match self.handles.get_mut(&handle) {
-            Some(OpenHandle::Writing(spool)) => {
+            Some(OpenHandle::Writing { spool, .. }) => {
                 spool
                     .write_at(offset, &data)
                     .map_err(|_| StatusCode::Failure)?;
@@ -227,12 +224,11 @@ impl russh_sftp::server::Handler for SftpSession {
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         match self.handles.remove(&handle) {
-            Some(OpenHandle::Writing(mut spool)) => {
-                spool.finish().map_err(|_| StatusCode::Failure)?;
-                self.library
-                    .commit(&spool)
-                    .map_err(|_| StatusCode::Failure)?;
-                Ok(status_ok(id))
+            Some(OpenHandle::Writing { mut spool, arrival }) => {
+                match self.library.commit(&mut spool, &arrival) {
+                    Ok(Commit::Stored { .. } | Commit::Deduped { .. }) => Ok(status_ok(id)),
+                    Err(_) => Err(StatusCode::Failure),
+                }
             }
             Some(OpenHandle::Reading(_)) => Ok(status_ok(id)),
             None => {
@@ -271,7 +267,12 @@ impl russh_sftp::server::Handler for SftpSession {
         let shown = if path.is_empty() || path == "." || path == "/" {
             "/".to_string()
         } else {
-            format!("/{}", stored_name(&path).map_err(|_| StatusCode::Failure)?)
+            format!(
+                "/{}",
+                Arrival::parse(&path)
+                    .map_err(|_| StatusCode::Failure)?
+                    .camera_filename
+            )
         };
         Ok(Name {
             id,
@@ -324,7 +325,7 @@ impl russh_sftp::server::Handler for SftpSession {
         handle: String,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        if let (Some(OpenHandle::Writing(spool)), Some(mtime)) =
+        if let (Some(OpenHandle::Writing { spool, .. }), Some(mtime)) =
             (self.handles.get(&handle), attrs.mtime)
         {
             let _ = spool.set_mtime(u64::from(mtime));
@@ -358,7 +359,9 @@ impl SftpSession {
                 attrs: FileAttributes::dummy(),
             });
         }
-        let name = stored_name(path).map_err(|_| StatusCode::NoSuchFile)?;
+        let name = Arrival::parse(path)
+            .map_err(|_| StatusCode::NoSuchFile)?
+            .camera_filename;
         let meta = std::fs::metadata(self.library.root().join(name))
             .map_err(|_| StatusCode::NoSuchFile)?;
         Ok(Attrs {
