@@ -29,6 +29,7 @@ public enum UploadFailure: Error, Equatable, Sendable {
     case transport(String)
     case badFilename(String)
     case noOriginal
+    case missingPassword
 }
 
 public enum UploadCheck {

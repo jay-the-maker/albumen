@@ -36,6 +36,22 @@ final class UploadCheckTests: XCTestCase {
         XCTAssertThrowsError(try UploadCheck.requireVerified(.missingServerHash))
     }
 
+    func testKeychainLookupOmitsThePassword() throws {
+        let secret = "receiver-password-not-in-the-lookup"
+        let query = ReceiverPassword.lookupQuery()
+        let rendered = query.values.map { String(describing: $0) }.joined(separator: " ")
+        XCTAssertFalse(rendered.contains(secret))
+        XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
+        try ReceiverPassword.save(secret)
+        XCTAssertEqual(try ReceiverPassword.read(), secret)
+        let loaded = try WebDavUploader.fromKeychain(
+            endpoint: URL(string: "https://albumen.example")!,
+            user: "camera"
+        )
+        XCTAssertEqual(loaded.password, secret)
+        XCTAssertEqual(loaded.user, "camera")
+    }
+
     func testSourceMtimeHeaderIsUnixSeconds() {
         let date = Date(timeIntervalSince1970: 1_000_000_000)
         XCTAssertEqual(SourceMtime.headerValue(modificationDate: date), "1000000000")

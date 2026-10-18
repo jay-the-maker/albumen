@@ -3,8 +3,11 @@
 package photos.albumen.backup
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import java.io.File
 
 class UploadCheckTest {
     @Test
@@ -45,6 +48,26 @@ class UploadCheckTest {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             Sha256.hex("abc".toByteArray(Charsets.UTF_8)),
         )
+    }
+
+    @Test
+    fun workManagerInputOmitsTheReceiverPassword() {
+        val secret = "receiver-password-not-for-workmanager"
+        val data = backupInput("https://albumen.example", "camera", secret)
+        assertEquals("https://albumen.example", data.getString(CameraRollBackupWorker.KEY_ENDPOINT))
+        assertEquals("camera", data.getString(CameraRollBackupWorker.KEY_USER))
+        assertNull(data.getString("password"))
+        for ((key, value) in data.keyValueMap) {
+            assertFalse(key.contains(secret))
+            assertFalse(value.toString().contains(secret))
+        }
+        val worker = File("src/main/kotlin/photos/albumen/backup/CameraRollBackupWorker.kt").readText()
+        val input = File("src/main/kotlin/photos/albumen/backup/BackupWorkInput.kt").readText()
+        assertFalse(worker.contains("KEY_PASSWORD"))
+        assertFalse(worker.contains("workDataOf"))
+        assertFalse(input.contains("KEY_PASSWORD"))
+        assertFalse(input.contains("to password"))
+        assertFalse(input.contains("\"$secret\""))
     }
 
     @Test

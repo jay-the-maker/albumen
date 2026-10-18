@@ -16,6 +16,7 @@ Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one 
 
 - `mobile/ios` reads PhotoKit `PHAssetResource` originals. A Live Photo is the still plus the paired video. An edited asset prefers the full-size unadjusted resource when PhotoKit has one. Adjustment data is kept as `{filename}.adjustment`. `PHImageManager.requestImage` is not used.
 - The package builds with `swift test` on a macOS runner. PhotoKit is present there.
+- The receiver password is stored in the Keychain.
 - Still open: an iOS 26.1 background upload extension, so new photos and videos leave the device without the app staying in the foreground. That target needs an Xcode project and a signing identity, which this package does not have.
 - Still open: a host that requests PhotoKit access without a version that strips GPS.
 
@@ -24,7 +25,8 @@ Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one 
 - `mobile/android` reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor`. The manifest requests `READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, and `ACCESS_MEDIA_LOCATION`. The host app still has to grant those at runtime. Without location permission, MediaStore removes GPS.
 - `CameraRollBackupWorker` schedules the backup with WorkManager while the device is idle and charging, so a killed process resumes the same queue.
 - A motion photo is one JPEG with the video still appended. The worker copies that file whole.
-- Still open: an application module, a credential store for the receiver password, and the runtime permission request. The skeleton keeps the password in WorkManager's local input data.
+- The receiver password is in Keystore-backed storage. WorkManager input does not contain it.
+- Still open: an application module and the runtime permission request.
 
 ## Connectors
 

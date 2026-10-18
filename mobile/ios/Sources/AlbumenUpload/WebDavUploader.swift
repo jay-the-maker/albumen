@@ -14,6 +14,14 @@ public struct WebDavUploader: Sendable {
         self.password = password
     }
 
+    /// Build an uploader from the password stored in the Keychain.
+    public static func fromKeychain(endpoint: URL, user: String) throws -> WebDavUploader {
+        guard let password = try ReceiverPassword.read() else {
+            throw UploadFailure.missingPassword
+        }
+        return WebDavUploader(endpoint: endpoint, user: user, password: password)
+    }
+
     public func putOriginal(filename: String, file: URL) async throws -> UploadVerdict {
         let name = try StoredName.require(filename)
         let client = try Sha256File.hex(file)
