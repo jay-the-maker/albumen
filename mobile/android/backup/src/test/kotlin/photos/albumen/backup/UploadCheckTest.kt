@@ -8,7 +8,7 @@ import org.junit.Test
 
 class UploadCheckTest {
     @Test
-    fun matchingCreatedAndExistingAreVerified() {
+    fun createdCollisionAndIdenticalRetry() {
         assertEquals(
             UploadVerdict.Verified("ab"),
             UploadCheck.verdict("Ab", 201, "ab"),

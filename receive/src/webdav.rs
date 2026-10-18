@@ -2,8 +2,8 @@
 
 //! WebDAV for cameras and card writers. PUT commits through `copy_verify`.
 //! A 201 response carries `X-Albumen-Sha256`, the digest `copy_verify` checked.
-//! A 409 for an existing file carries the digest of the bytes already stored.
-//! DELETE and MOVE are refused. Only the filename is stored.
+//! A different file with the same camera filename is stored under another name.
+//! A 409 means those exact bytes are already stored. DELETE and MOVE are refused.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::store::{stored_name, Library, Spool};
+use crate::store::{Arrival, Commit, Library, Spool};
 
 #[derive(Clone)]
 pub struct Auth {
@@ -142,32 +142,21 @@ async fn put(
     target: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
-    let name = match stored_name(&percent_decode(target)) {
-        Ok(name) => name,
+    let arrival = match Arrival::parse(&percent_decode(target)) {
+        Ok(arrival) => arrival,
         Err(err) => return write_status(socket, 400, &err, &[]).await,
     };
-    if library.has(&name) {
-        return existing(socket, library, &name).await;
-    }
-    let mut spool = match Spool::create(&name) {
+    let mut spool = match Spool::create(&arrival.camera_filename) {
         Ok(spool) => spool,
         Err(err) => return write_status(socket, 400, &err, &[]).await,
     };
     if let Err(err) = spool.write_at(0, body) {
         return write_status(socket, 500, &err, &[]).await;
     }
-    if let Err(err) = spool.finish() {
-        return write_status(socket, 500, &err, &[]).await;
-    }
-    match library.commit(&spool) {
-        Ok(verified) => created(socket, &verified.sha256).await,
-        Err(err) => {
-            if err.contains("refusing to overwrite") {
-                existing(socket, library, &name).await
-            } else {
-                write_status(socket, 500, &err, &[]).await
-            }
-        }
+    match library.commit(&mut spool, &arrival) {
+        Ok(Commit::Stored { sha256, .. }) => created(socket, &sha256).await,
+        Ok(Commit::Deduped { sha256, .. }) => deduped(socket, &sha256).await,
+        Err(err) => write_status(socket, 500, &err, &[]).await,
     }
 }
 
@@ -176,21 +165,15 @@ async fn created(socket: &mut TcpStream, sha256: &str) -> std::io::Result<()> {
     write_status(socket, 201, "Created", &[("X-Albumen-Sha256", &sha256)]).await
 }
 
-async fn existing(socket: &mut TcpStream, library: &Library, name: &str) -> std::io::Result<()> {
-    let path = library.root().join(name);
-    match albumen_ingest::sha256_hex(&path) {
-        Ok(sha256) => {
-            let sha256 = sha256.replace(['\r', '\n'], "");
-            write_status(
-                socket,
-                409,
-                "refusing to overwrite",
-                &[("X-Albumen-Sha256", &sha256)],
-            )
-            .await
-        }
-        Err(err) => write_status(socket, 500, &err.to_string(), &[]).await,
-    }
+async fn deduped(socket: &mut TcpStream, sha256: &str) -> std::io::Result<()> {
+    let sha256 = sha256.replace(['\r', '\n'], "");
+    write_status(
+        socket,
+        409,
+        "identical bytes already stored",
+        &[("X-Albumen-Sha256", &sha256)],
+    )
+    .await
 }
 
 async fn get(
@@ -199,7 +182,8 @@ async fn get(
     target: &str,
     send_body: bool,
 ) -> std::io::Result<()> {
-    let name = match stored_name(&percent_decode(target)) {
+    let name = match Arrival::parse(&percent_decode(target)).map(|arrival| arrival.camera_filename)
+    {
         Ok(name) => name,
         Err(_) => return write_status(socket, 404, "not found", &[]).await,
     };

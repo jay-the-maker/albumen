@@ -5,7 +5,7 @@ import XCTest
 @testable import AlbumenUpload
 
 final class UploadCheckTests: XCTestCase {
-    func testMatchingCreatedAndExistingAreVerified() {
+    func testCreatedCollisionAndIdenticalRetry() {
         XCTAssertEqual(
             UploadCheck.verdict(clientSha256: "Ab", status: 201, serverSha256: "ab"),
             .verified(sha256: "ab")
