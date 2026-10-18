@@ -30,6 +30,8 @@ public enum UploadFailure: Error, Equatable, Sendable {
     case badFilename(String)
     case noOriginal
     case missingPassword
+    /// PhotoKit offered only a derivative. The full original was not uploaded.
+    case derivativeOnly(String)
 }
 
 public enum UploadCheck {

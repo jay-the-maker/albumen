@@ -21,15 +21,27 @@ data class Spool(val file: File, val sha256: String, val filename: String)
  * is the call that returns the file MediaStore has, including a motion photo's
  * embedded video. `openInputStream` is not used: the original flag is defined
  * for `openFileDescriptor`. GPS stays only when the host app also holds
- * `ACCESS_MEDIA_LOCATION`.
+ * `ACCESS_MEDIA_LOCATION`. The host requests [requiredPermissions] first.
+ * This object does not show a permission dialog.
  */
 object CameraRoll {
-    fun requiredPermissions(): Array<String> = arrayOf(
-        Manifest.permission.READ_MEDIA_IMAGES,
-        Manifest.permission.READ_MEDIA_VIDEO,
-        Manifest.permission.ACCESS_MEDIA_LOCATION,
-        Manifest.permission.READ_EXTERNAL_STORAGE,
-    )
+    /**
+     * Runtime permissions the host app requests before enqueueing backup.
+     * API 33 and newer use the media permissions. API 30 through 32 use
+     * `READ_EXTERNAL_STORAGE`. Location is always requested with them.
+     * This library has no Activity, so it does not show the dialog.
+     */
+    fun requiredPermissions(sdkInt: Int = android.os.Build.VERSION.SDK_INT): Array<String> {
+        val media = if (sdkInt >= 33) {
+            listOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+            )
+        } else {
+            listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        return (media + Manifest.permission.ACCESS_MEDIA_LOCATION).toTypedArray()
+    }
 
     fun list(resolver: ContentResolver): List<RollItem> {
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
