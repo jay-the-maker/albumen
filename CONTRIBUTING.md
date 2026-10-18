@@ -69,6 +69,20 @@ scripts/with-minio.sh cargo test --locked
 
 ExifTool and MinIO are pinned by exact version and SHA-256 in those scripts. Do not replace the gate with an unpinned distro package.
 
+## Real-device corpus
+
+This check is local. CI does not set `ALBUMEN_REAL_CORPUS`. When the variable is unset, `real_device_corpus_round_trip` prints a skip message and passes. The CC0 files under `fixtures/` are a different corpus and stay as they are.
+
+Set the variable to a directory on the machine that contains the media files and a `sanitized.sha256` manifest in sha256sum form. Each line is a SHA-256, then two spaces or a space and an asterisk, then a relative path. The test checks that checksum, then runs `copy_verify` through the local filesystem and through MinIO. It compares SHA-256, filename, mtime, and an ExifTool dump. Live Photo pairs are files in the same directory that share a ContentIdentifier. Sidecars are the generic XMP and AAE names beside a file. The test does not carry a list of device filenames.
+
+Do not commit the directory, a filename from it, a checksum from it, or a GPS value from it. `real-corpus/`, `fixtures/real-device/`, and `*.real-corpus` are gitignored.
+
+```bash
+export PATH="$(scripts/install-exiftool.sh):$PATH"
+ALBUMEN_REAL_CORPUS=/path/to/local/corpus \
+  scripts/with-minio.sh cargo test --locked -p albumen-ingest --test real_corpus
+```
+
 ## Code we do not copy
 
 Immich, Ente, and other AGPL photo libraries are ideas only. Do not paste their source, translate it, or retype it from memory into this Apache-2.0 tree. MinIO is run as an external CI process and is not vendored.
