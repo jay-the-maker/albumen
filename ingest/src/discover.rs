@@ -189,6 +189,7 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
             &mut seen_ids,
         )?;
     }
+    files[1..].sort_by(|left, right| left.path.file_name().cmp(&right.path.file_name()));
 
     let mut pairs = Vec::new();
     for entry in fs::read_dir(parent).map_err(|err| IngestError::io(parent, err))? {
