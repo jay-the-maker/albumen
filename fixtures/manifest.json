@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "id": "jpeg-gps",
+      "primary": "jpeg-gps/IMG_0001.jpg",
+      "companions": []
+    },
+    {
+      "id": "heic",
+      "primary": "heic/IMG_0002.heic",
+      "companions": []
+    },
+    {
+      "id": "raw-jpeg",
+      "primary": "raw-jpeg/IMG_0003.dng",
+      "companions": ["raw-jpeg/IMG_0003.jpg"]
+    },
+    {
+      "id": "xmp",
+      "primary": "xmp/IMG_0004.jpg",
+      "companions": ["xmp/IMG_0004.xmp"]
+    },
+    {
+      "id": "live-photo",
+      "primary": "live-photo/IMG_0005.heic",
+      "companions": ["live-photo/IMG_0005.mov"]
+    },
+    {
+      "id": "video",
+      "primary": "video/IMG_0006.mp4",
+      "companions": []
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Albumen Fixture Generator">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:exif="http://ns.adobe.com/exif/1.0/"
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">
+   <dc:description>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">Albumen CC0 sidecar fixture. Not a photograph.</rdf:li>
+    </rdf:Alt>
+   </dc:description>
+   <dc:rights>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">CC0 1.0 Universal</rdf:li>
+    </rdf:Alt>
+   </dc:rights>
+   <xmp:Rating>5</xmp:Rating>
+   <xmp:Label>albumen-fixture</xmp:Label>
+   <xmp:CreatorTool>albumen fixtures/generate.sh</xmp:CreatorTool>
+   <photoshop:DateCreated>2016-03-21T09:15:00</photoshop:DateCreated>
+   <exif:GPSLatitude>48,51.400000N</exif:GPSLatitude>
+   <exif:GPSLongitude>2,21.133333E</exif:GPSLongitude>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>
