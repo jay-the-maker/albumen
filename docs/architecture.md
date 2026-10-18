@@ -16,7 +16,7 @@ This is the outline of the system. The ingest crate, the export command, and the
 | Catalog / search index | No on-disk catalog. MCP search reads files and sidecars into a process-local cache |
 | macOS, iOS, and Android apps | Not started |
 | MCP server (`albumen-mcp`, stdio) | Here |
-| Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | Not started |
+| Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | `albumen-receive` speaks WebDAV, SFTP, and FTP into `copy_verify`. S3 upload and USB are not started |
 | Export-everything command (`albumen export`) | Here |
 | rclone-backed SMB, SFTP, WebDAV, B2 | Not started |
 
@@ -103,7 +103,7 @@ iCloud is import-only. A user can copy photos out of iCloud into the library. Al
 
 Phone camera rolls are not the only ingest path. Dedicated cameras deliver RAW and video the same way, through `copy_verify`.
 
-- Wireless. A camera uploads each finished file to an FTP, SFTP, WebDAV, or S3 endpoint (the usual "FTP upload" mode on a body, or a card that writes to a share). Albumen accepts the file only after the upload is complete, then ingests it. A partial file is not reported done. The filename the camera sent is the filename stored. JPEG, RAW, and video share this path.
+- Wireless. `albumen-receive` is the process the user runs on their own machine. It listens for WebDAV, SFTP, and plain FTP. A camera uploads each finished file. The receiver stores it only after the upload is complete, through `copy_verify`. A partial file is not reported done. The filename the camera sent is the filename stored; directory names in the upload path are not. JPEG, RAW, and video share this path. FTP is unencrypted and is there for older bodies. S3 upload from a camera and tethered USB import are not in this receiver.
 - Tethered. USB import, whether PTP/MTP or a mounted card, copies each selected file with `copy_verify`. Ingest does not erase the card.
 
 Both paths refuse to overwrite an existing original. Success is the verified destination, not the moment the socket closed.
