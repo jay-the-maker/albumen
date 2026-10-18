@@ -95,6 +95,6 @@ jobs:
       - name: Check the entrypoint, label, and ExifTool
         run: |
           docker run --rm albumen-mcp:ci --help
-          docker image inspect albumen-mcp:ci --format '{{index .Config.Labels "io.modelcontextprotocol.server.name"}}' | grep -qx 'io.github.jay-the-maker/albumen'
-          docker image inspect albumen-mcp:ci --format '{{json .Config.Entrypoint}}' | grep -qx '["albumen-mcp","--library","/library"]'
+          docker image inspect albumen-mcp:ci --format '{{index .Config.Labels "io.modelcontextprotocol.server.name"}}' | grep -Fxq 'io.github.jay-the-maker/albumen'
+          docker image inspect albumen-mcp:ci --format '{{json .Config.Entrypoint}}' | grep -Fxq '["albumen-mcp","--library","/library"]'
           docker run --rm --entrypoint exiftool albumen-mcp:ci -ver
