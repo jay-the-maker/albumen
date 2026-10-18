@@ -103,7 +103,7 @@ Details are in [docs/architecture.md](docs/architecture.md). What is not built y
 
 ## Support
 
-Buy Me a Coffee: coming soon. No page exists yet.
+Albumen will be funded through GitHub Sponsors (profile pending), and no other platforms.
 
 ## Not Immich, and not Ente
 
