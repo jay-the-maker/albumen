@@ -265,8 +265,10 @@ pub fn parse_manifest(text: &str) -> Result<Vec<ManifestEntry>, IngestError> {
 
 /// Write the manifest by renaming a temporary file in the same directory.
 ///
-/// This replaces a previous manifest. It is the generated checksum list, not
-/// an original. Callers must not point it at a library file.
+/// The previous manifest is never unlinked first. The temporary file is
+/// fsynced, renamed over the old name, and the directory is fsynced. This is
+/// the generated checksum list, not an original. Callers must not point it
+/// at a library file.
 pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), IngestError> {
     let parent = path
         .parent()
@@ -288,6 +290,9 @@ pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), Inge
             .map_err(|err| IngestError::io(&tmp, err))?;
         file.sync_all().map_err(|err| IngestError::io(&tmp, err))?;
         fs::rename(&tmp, path).map_err(|err| IngestError::io(path, err))?;
+        File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|err| IngestError::io(parent, err))?;
         Ok(())
     })();
     if write_result.is_err() {

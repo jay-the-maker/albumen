@@ -321,7 +321,10 @@ impl Session {
         if let Err(err) = spool.finish() {
             return self.reply(451, &err).await;
         }
-        match self.library.commit(&mut spool, &arrival) {
+        match self
+            .library
+            .commit(&mut spool, &arrival, crate::store::MtimeProtocol::Ftp)
+        {
             Ok(Commit::Stored { .. } | Commit::Deduped { .. }) => {
                 self.reply(226, "transfer complete").await
             }
@@ -368,7 +371,11 @@ impl Session {
             Ok(arrival) => arrival,
             Err(err) => return self.reply(550, &err).await,
         };
-        if self.library.note_source_mtime(path, seconds).is_ok() {
+        if self
+            .library
+            .note_source_mtime(path, seconds, crate::store::MtimeProtocol::Ftp)
+            .is_ok()
+        {
             return self.reply(213, time).await;
         }
         self.pending_mtime = Some((arrival.camera_filename, arrival.directory, seconds));

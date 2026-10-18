@@ -5,11 +5,17 @@
 //! The camera filename and its directory are written to a sidecar. An identical
 //! byte string is not stored twice. A failed upload deletes only the spool,
 //! and a sidecar failure deletes the destination this call just wrote.
+//!
+//! `source_mtime` and the stored file's mtime are written once, inside the
+//! upload that created the file. A later offer is appended to the sidecar and
+//! does not replace the first. A sidecar is replaced by an fsynced rename in
+//! the same directory, never by deleting it first.
 
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use albumen_ingest::{copy_verify_file, sha256_hex, VerifiedObject};
 
@@ -66,7 +72,12 @@ impl Library {
     /// The same SHA-256 is returned as [`Commit::Deduped`] and nothing new is
     /// written. A different file whose camera filename is already taken is
     /// stored under a free name, and the camera filename stays in the sidecar.
-    pub fn commit(&self, spool: &mut Spool, arrival: &Arrival) -> Result<Commit, String> {
+    pub fn commit(
+        &self,
+        spool: &mut Spool,
+        arrival: &Arrival,
+        protocol: MtimeProtocol,
+    ) -> Result<Commit, String> {
         let _guard = self
             .commit_lock
             .lock()
@@ -75,12 +86,17 @@ impl Library {
         let digest = sha256_hex(spool.path()).map_err(|err| err.to_string())?;
         if let Some(stored_name) = self.matching_store(&digest)? {
             if let Some(seconds) = spool.source_mtime {
-                self.apply_stored_mtime_locked(&stored_name, seconds)?;
+                self.append_mtime_conflict_locked(&stored_name, seconds, protocol)?;
             }
             return Ok(Commit::Deduped {
                 sha256: digest,
                 stored_name,
             });
+        }
+        // Writes during the upload refresh the inode mtime. Stamp the session
+        // value again so the verified copy keeps the camera time.
+        if let Some(seconds) = spool.source_mtime {
+            spool.set_mtime(seconds)?;
         }
         let stored_name = self.collision_safe_name(&arrival.camera_filename)?;
         spool.refile(&stored_name)?;
@@ -95,6 +111,7 @@ impl Library {
             directory: arrival.directory.clone(),
             source_mtime,
             received_at: unix_now(),
+            mtime_conflicts: Vec::new(),
         };
         if let Err(err) = self.write_sidecar(&record) {
             let _ = fs::remove_file(self.root.join(&verified.filename));
@@ -175,40 +192,79 @@ impl Library {
         copy_verify_file(&path, &self.root).map_err(|err| err.to_string())
     }
 
-    /// Set the stored file's mtime from FTP MFMT/MDTM or SFTP setstat.
-    /// The photo bytes stay. `received_at` in the sidecar stays.
-    pub fn note_source_mtime(&self, path: &str, seconds: u64) -> Result<(), String> {
+    /// Record a camera mtime offered after the file was committed.
+    ///
+    /// The stored file's mtime and the first `source_mtime` stay. A different
+    /// value is appended. The same value as the first is ignored.
+    pub fn note_source_mtime(
+        &self,
+        path: &str,
+        seconds: u64,
+        protocol: MtimeProtocol,
+    ) -> Result<(), String> {
         let _guard = self
             .commit_lock
             .lock()
             .map_err(|_| "receive commit lock was poisoned".to_string())?;
-        self.apply_source_mtime_locked(path, seconds)
-    }
-
-    fn apply_source_mtime_locked(&self, path: &str, seconds: u64) -> Result<(), String> {
         let record = self.find_record(path)?;
-        self.apply_stored_mtime_locked(&record.stored_name, seconds)
+        self.append_mtime_conflict_locked(&record.stored_name, seconds, protocol)
     }
 
-    fn apply_stored_mtime_locked(&self, stored_name: &str, seconds: u64) -> Result<(), String> {
+    fn append_mtime_conflict_locked(
+        &self,
+        stored_name: &str,
+        seconds: u64,
+        protocol: MtimeProtocol,
+    ) -> Result<(), String> {
         let mut record = self
             .records()?
             .into_iter()
             .find(|record| record.stored_name == stored_name)
             .ok_or_else(|| format!("no sidecar for {stored_name}"))?;
-        let stored = self.root.join(&record.stored_name);
-        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-        fs::File::options()
-            .write(true)
-            .open(&stored)
-            .and_then(|file| file.set_modified(when))
-            .map_err(|err| err.to_string())?;
-        record.source_mtime = seconds;
+        if record.source_mtime == seconds {
+            return Ok(());
+        }
+        record.mtime_conflicts.push(MtimeConflict {
+            value: seconds,
+            protocol: protocol.as_str().to_string(),
+            received_at: unix_now(),
+        });
+        self.replace_sidecar(&record)
+    }
+
+    /// Replace a sidecar without unlinking it first.
+    ///
+    /// The new bytes are written to a temporary file in the library directory,
+    /// fsynced, and renamed over the old sidecar. The directory is then
+    /// fsynced. A failure before the rename leaves the previous sidecar in
+    /// place and removes the temporary file.
+    fn replace_sidecar(&self, record: &Record) -> Result<(), String> {
         let name = format!("{}{SIDECAR_SUFFIX}", record.stored_name);
-        let sidecar = self.root.join(&name);
-        fs::remove_file(&sidecar).map_err(|err| err.to_string())?;
-        self.write_sidecar(&record)?;
-        Ok(())
+        let dest = self.root.join(&name);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let tmp = self
+            .root
+            .join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
+        let result = (|| {
+            let mut file = File::create(&tmp).map_err(|err| err.to_string())?;
+            file.write_all(record.json().as_bytes())
+                .map_err(|err| err.to_string())?;
+            file.sync_all().map_err(|err| err.to_string())?;
+            drop(file);
+            if sidecar_rename_should_fail(&dest) {
+                return Err("injected failure before sidecar rename".to_string());
+            }
+            fs::rename(&tmp, &dest).map_err(|err| err.to_string())?;
+            sync_dir(&self.root)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
 
     fn find_record(&self, path: &str) -> Result<Record, String> {
@@ -242,16 +298,51 @@ impl Library {
 fn file_mtime_secs(verified: &VerifiedObject) -> u64 {
     verified
         .mtime
-        .duration_since(std::time::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn sync_dir(dir: &Path) -> Result<(), String> {
+    File::open(dir)
+        .and_then(|file| file.sync_all())
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+static FAIL_SIDECAR_RENAME: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn arm_fail_before_sidecar_rename(sidecar: PathBuf) {
+    *FAIL_SIDECAR_RENAME
+        .lock()
+        .expect("sidecar rename hook lock") = Some(sidecar);
+}
+
+fn sidecar_rename_should_fail(dest: &Path) -> bool {
+    #[cfg(test)]
+    {
+        let mut armed = FAIL_SIDECAR_RENAME
+            .lock()
+            .expect("sidecar rename hook lock");
+        if armed.as_deref() == Some(dest) {
+            *armed = None;
+            return true;
+        }
+        false
+    }
+    #[cfg(not(test))]
+    {
+        let _ = dest;
+        false
+    }
 }
 
 fn name_is_free(taken: &std::collections::BTreeSet<String>, stored_name: &str) -> bool {
@@ -319,6 +410,31 @@ fn validate_filename(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Which upload path offered a camera mtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtimeProtocol {
+    Ftp,
+    Sftp,
+    WebDav,
+}
+
+impl MtimeProtocol {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ftp => "ftp",
+            Self::Sftp => "sftp",
+            Self::WebDav => "webdav",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MtimeConflict {
+    value: u64,
+    protocol: String,
+    received_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Commit {
     Stored { sha256: String, stored_name: String },
@@ -341,14 +457,16 @@ struct Record {
     directory: String,
     source_mtime: u64,
     received_at: u64,
+    mtime_conflicts: Vec<MtimeConflict>,
 }
 
 impl Record {
     fn json(&self) -> String {
         format!(
-            "{{\"camera_filename\":{},\"directory\":{},\"received_at\":{},\"sha256\":{},\"source_mtime\":{},\"stored_name\":{}}}\n",
+            "{{\"camera_filename\":{},\"directory\":{},\"mtime_conflicts\":{},\"received_at\":{},\"sha256\":{},\"source_mtime\":{},\"stored_name\":{}}}\n",
             json_string(&self.camera_filename),
             json_string(&self.directory),
+            conflicts_json(&self.mtime_conflicts),
             json_string(&self.received_at.to_string()),
             json_string(&self.sha256),
             json_string(&self.source_mtime.to_string()),
@@ -360,12 +478,30 @@ impl Record {
         Some(Self {
             camera_filename: json_field(text, "camera_filename")?,
             directory: json_field(text, "directory")?,
+            mtime_conflicts: parse_conflicts(text).ok()?,
             received_at: json_field(text, "received_at")?.parse().ok()?,
             sha256: json_field(text, "sha256")?,
             source_mtime: json_field(text, "source_mtime")?.parse().ok()?,
             stored_name: json_field(text, "stored_name")?,
         })
     }
+}
+
+fn conflicts_json(conflicts: &[MtimeConflict]) -> String {
+    let mut out = String::from("[");
+    for (index, conflict) in conflicts.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"protocol\":{},\"received_at\":{},\"value\":{}}}",
+            json_string(&conflict.protocol),
+            json_string(&conflict.received_at.to_string()),
+            json_string(&conflict.value.to_string()),
+        ));
+    }
+    out.push(']');
+    out
 }
 
 fn json_string(value: &str) -> String {
@@ -383,11 +519,142 @@ fn json_string(value: &str) -> String {
 }
 
 fn json_field(text: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\":");
-    let index = text.find(&needle)?;
-    let rest = text[index + needle.len()..].trim_start();
-    let rest = rest.strip_prefix('"')?;
+    let value = top_level_value(text, key)?;
+    let rest = value.trim_start().strip_prefix('"')?;
     unescape_string(rest)
+}
+
+/// Value text of a top-level object field, so a nested `received_at` inside
+/// `mtime_conflicts` is not read as the record's own receive time.
+fn top_level_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let mut rest = text.trim().strip_prefix('{')?.trim_start();
+    loop {
+        rest = rest.trim_start();
+        if rest.starts_with('}') {
+            return None;
+        }
+        let name = unescape_string(rest.strip_prefix('"')?)?;
+        rest = skip_json_string(rest)?;
+        rest = rest.trim_start().strip_prefix(':')?.trim_start();
+        if name == key {
+            return Some(rest);
+        }
+        rest = skip_json_value(rest)?;
+        rest = rest.trim_start();
+        if let Some(next) = rest.strip_prefix(',') {
+            rest = next;
+            continue;
+        }
+        return None;
+    }
+}
+
+fn parse_conflicts(text: &str) -> Result<Vec<MtimeConflict>, ()> {
+    let Some(value) = top_level_value(text, "mtime_conflicts") else {
+        return Ok(Vec::new());
+    };
+    let mut rest = value.trim_start().strip_prefix('[').ok_or(())?;
+    let mut found = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        if rest.starts_with(']') {
+            return Ok(found);
+        }
+        if !rest.starts_with('{') {
+            return Err(());
+        }
+        let after = skip_json_value(rest).ok_or(())?;
+        let object = &rest[..rest.len() - after.len()];
+        found.push(MtimeConflict {
+            protocol: json_field(object, "protocol").ok_or(())?,
+            received_at: json_field(object, "received_at")
+                .ok_or(())?
+                .parse()
+                .map_err(|_| ())?,
+            value: json_field(object, "value")
+                .ok_or(())?
+                .parse()
+                .map_err(|_| ())?,
+        });
+        rest = after.trim_start();
+        if let Some(next) = rest.strip_prefix(',') {
+            rest = next;
+            continue;
+        }
+        if rest.starts_with(']') {
+            return Ok(found);
+        }
+        return Err(());
+    }
+}
+
+fn skip_json_string(text: &str) -> Option<&str> {
+    let body = text.strip_prefix('"')?;
+    let mut escaped = false;
+    for (index, ch) in body.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            return Some(&body[index + ch.len_utf8()..]);
+        }
+    }
+    None
+}
+
+fn skip_json_value(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    if text.starts_with('"') {
+        return skip_json_string(text);
+    }
+    if text.starts_with('[') {
+        return skip_brackets(text, '[', ']');
+    }
+    if text.starts_with('{') {
+        return skip_brackets(text, '{', '}');
+    }
+    let end = text.find([',', '}', ']']).unwrap_or(text.len());
+    Some(&text[end..])
+}
+
+fn skip_brackets(text: &str, open: char, close: char) -> Option<&str> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            continue;
+        }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&text[index + ch.len_utf8()..]);
+            }
+        }
+    }
+    None
 }
 
 fn unescape_string(text: &str) -> Option<String> {
@@ -491,7 +758,11 @@ impl Spool {
 
 #[cfg(test)]
 mod tests {
-    use super::{disambiguated, Arrival};
+    use super::{
+        arm_fail_before_sidecar_rename, disambiguated, Arrival, Library, MtimeProtocol, Record,
+        Spool,
+    };
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn arrival_keeps_the_camera_filename_and_directory() {
@@ -505,5 +776,105 @@ mod tests {
     fn disambiguated_name_keeps_the_extension() {
         assert_eq!(disambiguated("IMG_9999.JPG", 2), "IMG_9999__2.JPG");
         assert_eq!(disambiguated("IMG_9999", 2), "IMG_9999__2");
+    }
+
+    #[test]
+    fn sidecar_without_conflicts_still_parses() {
+        let text = "{\"camera_filename\":\"a.jpg\",\"directory\":\"DCIM\",\"received_at\":\"2\",\"sha256\":\"ab\",\"source_mtime\":\"1\",\"stored_name\":\"a.jpg\"}\n";
+        let record = Record::parse(text).unwrap();
+        assert!(record.mtime_conflicts.is_empty());
+        assert_eq!(record.source_mtime, 1);
+        assert_eq!(record.received_at, 2);
+    }
+
+    #[test]
+    fn conflict_fields_do_not_replace_the_first_record_fields() {
+        let record = Record {
+            sha256: "ab".into(),
+            stored_name: "a.jpg".into(),
+            camera_filename: "a.jpg".into(),
+            directory: "DCIM".into(),
+            source_mtime: 1,
+            received_at: 2,
+            mtime_conflicts: vec![super::MtimeConflict {
+                value: 9,
+                protocol: "ftp".into(),
+                received_at: 8,
+            }],
+        };
+        let parsed = Record::parse(&record.json()).unwrap();
+        assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn injected_rename_failure_leaves_a_valid_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let mut spool = Spool::create("IMG_0001.JPG").unwrap();
+        spool.write_at(0, b"original-bytes").unwrap();
+        spool.set_mtime(1_000_000_000).unwrap();
+        library
+            .commit(
+                &mut spool,
+                &Arrival {
+                    camera_filename: "IMG_0001.JPG".into(),
+                    directory: "DCIM".into(),
+                },
+                MtimeProtocol::Ftp,
+            )
+            .unwrap();
+        let photo = root.path().join("IMG_0001.JPG");
+        let sidecar = root.path().join("IMG_0001.JPG.albumen.json");
+        let before = std::fs::read(&sidecar).unwrap();
+        let mtime_before = std::fs::metadata(&photo).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime_before.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            1_000_000_000
+        );
+
+        library
+            .note_source_mtime("DCIM/IMG_0001.JPG", 1_000_000_000, MtimeProtocol::Ftp)
+            .unwrap();
+        assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+
+        arm_fail_before_sidecar_rename(sidecar.clone());
+        let err = library.note_source_mtime("IMG_0001.JPG", 1_000_000_060, MtimeProtocol::Ftp);
+        assert!(err.is_err(), "{err:?}");
+        assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&photo).unwrap().modified().unwrap(),
+            mtime_before
+        );
+        let names: Vec<String> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.ends_with(".tmp")),
+            "{names:?}"
+        );
+        let parsed = Record::parse(&String::from_utf8(before.clone()).unwrap()).unwrap();
+        assert_eq!(parsed.source_mtime, 1_000_000_000);
+        assert!(parsed.mtime_conflicts.is_empty());
+
+        library
+            .note_source_mtime("IMG_0001.JPG", 1_000_000_060, MtimeProtocol::Sftp)
+            .unwrap();
+        library
+            .note_source_mtime("IMG_0001.JPG", 1_000_000_060, MtimeProtocol::WebDav)
+            .unwrap();
+        let text = std::fs::read_to_string(&sidecar).unwrap();
+        let updated = Record::parse(&text).unwrap();
+        assert_eq!(updated.source_mtime, 1_000_000_000);
+        assert_eq!(updated.received_at, parsed.received_at);
+        assert_eq!(updated.mtime_conflicts.len(), 2);
+        assert_eq!(updated.mtime_conflicts[0].value, 1_000_000_060);
+        assert_eq!(updated.mtime_conflicts[0].protocol, "sftp");
+        assert_eq!(updated.mtime_conflicts[1].protocol, "webdav");
+        assert_ne!(updated.mtime_conflicts[0].received_at, updated.source_mtime);
+        assert_eq!(
+            std::fs::metadata(&photo).unwrap().modified().unwrap(),
+            mtime_before
+        );
     }
 }
