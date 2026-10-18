@@ -231,9 +231,6 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
     if search_items == 0 || copy_files == 0 || copy_bytes_each == 0 {
         return Err("search items, copy files, and copy size must be at least 1".to_string());
     }
-    if copy_bytes_each > 64 * 1024 * 1024 {
-        return Err("copy file size is capped at 64 MiB".to_string());
-    }
     require_exiftool()?;
     let root = TempDir::new()?;
     let library = root.path.join("library");
@@ -254,8 +251,10 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
     let mut warm_p50_ratio = Vec::with_capacity(REPEATS);
     let mut warm_p95_ratio = Vec::with_capacity(REPEATS);
     let mut browse_ratio = Vec::with_capacity(REPEATS);
-    let search_args = json!({"caption": CAPTION, "limit": 1});
-    let browse_args = json!({"limit": 1});
+    // Ask for the whole synthetic library. A page of one would stop at the
+    // first match, and this job measures a full read against a full-read reference.
+    let search_args = json!({"caption": CAPTION, "limit": search_items.saturating_mul(2)});
+    let browse_args = json!({"limit": search_items.saturating_mul(2)});
 
     for repeat in 0..REPEATS {
         let plain = plain_copy_mb_s(&copies, &root.path.join(format!("plain-{repeat}")))?;
@@ -462,7 +461,7 @@ fn browse_reference_ms(root: &Path) -> Result<f64, String> {
 
 fn exif_pass_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
     let started = Instant::now();
-    for chunk in relative.chunks(64) {
+    for chunk in relative.chunks(albumen_mcp::metadata::exiftool_batch()) {
         let output = Command::new("exiftool")
             .current_dir(root)
             .arg("-json")
@@ -526,18 +525,24 @@ fn write_library(dir: &Path, items: u64) -> Result<Vec<String>, String> {
 }
 
 fn write_copies(dir: &Path, files: u64, bytes_each: u64) -> Result<Vec<PathBuf>, String> {
-    let size = usize::try_from(bytes_each).map_err(|_| "copy file is too large".to_string())?;
-    let mut payload = vec![0u8; size];
-    for (index, byte) in payload.iter_mut().enumerate() {
-        *byte = u8::try_from(index % 251).unwrap_or(0);
-    }
     let mut paths = Vec::with_capacity(usize::try_from(files).unwrap_or(0));
+    let mut chunk = vec![0u8; 1024 * 1024];
     for index in 0..files {
         let path = dir.join(format!("c{index:04}.bin"));
         let mut file =
             File::create(&path).map_err(|err| format!("create {}: {err}", path.display()))?;
-        file.write_all(&payload)
-            .map_err(|err| format!("write {}: {err}", path.display()))?;
+        let mut remaining = bytes_each;
+        let mut offset = 0u64;
+        while remaining > 0 {
+            let n = usize::try_from(remaining.min(chunk.len() as u64)).unwrap_or(chunk.len());
+            for (index, byte) in chunk[..n].iter_mut().enumerate() {
+                *byte = ((offset + index as u64) % 251) as u8;
+            }
+            file.write_all(&chunk[..n])
+                .map_err(|err| format!("write {}: {err}", path.display()))?;
+            remaining -= n as u64;
+            offset += n as u64;
+        }
         file.sync_all()
             .map_err(|err| format!("sync {}: {err}", path.display()))?;
         paths.push(path);

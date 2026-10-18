@@ -186,12 +186,121 @@ impl Cache {
             )?;
             for (relative, sha, len) in missing {
                 let record = fresh.get(&relative).cloned().unwrap_or_else(Record::empty);
-                self.entries
-                    .insert(relative.clone(), (sha, len, record.clone()));
+                self.remember(relative.clone(), sha, len, record.clone());
                 digests.insert(relative, record);
             }
         }
         Ok(digests)
+    }
+
+    fn remember(&mut self, relative: String, sha: String, len: u64, record: Record) {
+        let replacing = self.entries.contains_key(&relative);
+        if let Some(limit) = cache_item_limit() {
+            if !replacing && self.entries.len() >= limit {
+                return;
+            }
+        }
+        self.entries.insert(relative, (sha, len, record));
+    }
+}
+
+/// How many files one ExifTool process reads.
+///
+/// `ALBUMEN_EXIFTOOL_BATCH` overrides the soft default of 64. It is a process
+/// batch, not a limit on the library or on a page.
+pub fn exiftool_batch() -> usize {
+    positive_env("ALBUMEN_EXIFTOOL_BATCH").unwrap_or(64)
+}
+
+/// Soft cap on records kept in this process.
+///
+/// Unset means 16384. `ALBUMEN_METADATA_CACHE_ITEMS=0` keeps every record the
+/// process has read. A full library larger than the cache is still searchable;
+/// a miss reads the file again.
+pub fn cache_item_limit() -> Option<usize> {
+    match std::env::var("ALBUMEN_METADATA_CACHE_ITEMS") {
+        Ok(text) if text == "0" => None,
+        Ok(text) => match text.parse::<usize>() {
+            Ok(value) if value > 0 => Some(value),
+            _ => Some(16_384),
+        },
+        Err(_) => Some(16_384),
+    }
+}
+
+fn positive_env(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|text| text.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+}
+
+/// Sidecar paths that sit beside `relative` and exist on disk.
+pub fn existing_sidecars(root: &Path, relative: &str) -> Vec<String> {
+    if is_sidecar(relative) {
+        return Vec::new();
+    }
+    let (parent, name) = split_relative(relative);
+    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+    let candidates = [
+        format!("{stem}.xmp"),
+        format!("{name}.xmp"),
+        format!("{stem}.aae"),
+        format!("{name}.aae"),
+    ];
+    let mut found = Vec::new();
+    let mut missing = Vec::new();
+    for candidate in &candidates {
+        let relative_sidecar = join_relative(parent, candidate);
+        if root
+            .join(PathBuf::from_iter(relative_sidecar.split('/')))
+            .is_file()
+        {
+            if !found.contains(&relative_sidecar) {
+                found.push(relative_sidecar);
+            }
+        } else {
+            missing.push(candidate.clone());
+        }
+    }
+    if missing.is_empty() {
+        return found;
+    }
+    let dir = if parent.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(PathBuf::from_iter(parent.split('/')))
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let raw = entry.file_name();
+        let Some(name) = raw.to_str() else {
+            continue;
+        };
+        if !missing
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        {
+            continue;
+        }
+        if !entry.path().is_file() {
+            continue;
+        }
+        let relative_sidecar = join_relative(parent, name);
+        if !found.contains(&relative_sidecar) {
+            found.push(relative_sidecar);
+        }
+    }
+    found
+}
+
+fn join_relative(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
     }
 }
 
@@ -279,7 +388,7 @@ fn read_exiftool(
     relative_paths: &[String],
 ) -> Result<HashMap<String, Record>, String> {
     let mut out = HashMap::new();
-    for chunk in relative_paths.chunks(64) {
+    for chunk in relative_paths.chunks(exiftool_batch()) {
         let output = Command::new("exiftool")
             .current_dir(root)
             .arg("-json")

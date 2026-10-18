@@ -6,7 +6,22 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::Value;
 
-const MAX_MESSAGE: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_MESSAGE: usize = 8 * 1024 * 1024;
+
+/// Protocol bound on one inbound MCP message.
+///
+/// This stays so an unauthenticated client cannot make the process allocate
+/// an unbounded body. `ALBUMEN_MCP_MAX_MESSAGE` overrides the 8 MiB default.
+/// There is no library-size ceiling here. Outbound pages are not cut to fit.
+pub fn max_message_bytes() -> usize {
+    match std::env::var("ALBUMEN_MCP_MAX_MESSAGE") {
+        Ok(text) => match text.parse::<usize>() {
+            Ok(value) if value >= 1 => value,
+            _ => DEFAULT_MAX_MESSAGE,
+        },
+        Err(_) => DEFAULT_MAX_MESSAGE,
+    }
+}
 
 pub fn write_message(out: &mut impl Write, message: &Value) -> io::Result<()> {
     let body = serde_json::to_vec(message).map_err(io::Error::other)?;
@@ -52,10 +67,11 @@ pub fn read_message(input: &mut impl BufRead) -> io::Result<Option<Value>> {
             "missing Content-Length",
         ));
     };
-    if length > MAX_MESSAGE {
+    let max_message = max_message_bytes();
+    if length > max_message {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "message exceeds 8 MiB",
+            format!("message exceeds {max_message} bytes"),
         ));
     }
     let mut body = vec![0u8; length];
@@ -79,5 +95,14 @@ mod tests {
         let read = read_message(&mut cursor).unwrap().unwrap();
         assert_eq!(read, message);
         assert!(read_message(&mut cursor).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_inbound_message_over_the_default_is_refused_before_the_body() {
+        let mut header = format!("Content-Length: {}\r\n\r\n", 8 * 1024 * 1024 + 1);
+        header.push('x');
+        let mut cursor = Cursor::new(header.into_bytes());
+        let err = read_message(&mut cursor).unwrap_err();
+        assert!(err.to_string().contains("message exceeds"));
     }
 }

@@ -17,6 +17,7 @@ use std::process::{Command, Output};
 use crate::checksum::sha256_hex;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
+use crate::export::scratch_name_chars;
 use crate::local::finalize_verified;
 use crate::mtime::{from_unix_nanos_string, mtime_of, set_mtime, to_unix_nanos_string};
 use crate::store::{BlobStore, VerifiedObject};
@@ -528,7 +529,7 @@ fn temp_path(filename: &str) -> PathBuf {
                 '_'
             }
         })
-        .take(80)
+        .take(scratch_name_chars())
         .collect();
     std::env::temp_dir().join(format!(
         "albumen-rclone-{nanos}-{n}-{}-{safe}",

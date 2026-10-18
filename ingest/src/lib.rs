@@ -23,8 +23,8 @@ pub use checksum::{sha256_file, sha256_hex};
 pub use discover::{discover, Asset, AssetFile, Role};
 pub use error::IngestError;
 pub use export::{
-    export_tree, format_manifest, parse_manifest, verify_tree, write_manifest, DirectoryTree,
-    ExportDest, ManifestEntry, Placed,
+    export_tree, format_manifest, parse_manifest, verify_tree, walk_sorted, write_manifest,
+    DirectoryTree, ExportDest, ManifestEntry, Placed, WalkControl,
 };
 pub use local::{copy_verify_file, LocalStore};
 pub use rclone::RcloneStore;

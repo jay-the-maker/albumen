@@ -62,7 +62,7 @@ async fn handle(
             return Ok(());
         }
         header.extend_from_slice(&buf[..n]);
-        if header.len() > 64 * 1024 {
+        if header.len() > max_header_bytes() {
             return write_status(&mut socket, 431, "headers too large", &[]).await;
         }
         if let Some(index) = find_header_end(&header) {
@@ -105,18 +105,21 @@ async fn handle(
     if leftover.len() as u64 > length {
         return write_status(&mut socket, 400, "bad body", &[]).await;
     }
-    let mut body = leftover;
-    while (body.len() as u64) < length {
-        let n = socket.read(&mut buf).await?;
-        if n == 0 {
-            return write_status(&mut socket, 400, "truncated body", &[]).await;
-        }
-        body.extend_from_slice(&buf[..n]);
-        if body.len() as u64 > length {
-            return write_status(&mut socket, 400, "body longer than Content-Length", &[]).await;
-        }
+
+    if method == "PUT" {
+        return put(
+            &mut socket,
+            &library,
+            target,
+            &leftover,
+            length,
+            source_mtime,
+        )
+        .await;
     }
-    body.truncate(length as usize);
+    if let Err(err) = discard_body(&mut socket, &leftover, length).await {
+        return write_status(&mut socket, 400, &err, &[]).await;
+    }
 
     match method {
         "OPTIONS" => {
@@ -131,7 +134,6 @@ async fn handle(
         "MKCOL" => write_status(&mut socket, 201, "Created", &[]).await,
         "PROPFIND" => propfind(&mut socket, &library).await,
         "HEAD" | "GET" => get(&mut socket, &library, target, method == "GET").await,
-        "PUT" => put(&mut socket, &library, target, &body, source_mtime).await,
         "DELETE" | "MOVE" | "COPY" => {
             write_status(&mut socket, 405, "albumen does not delete or rename", &[]).await
         }
@@ -139,11 +141,40 @@ async fn handle(
     }
 }
 
+/// Header DoS bound. `ALBUMEN_RECEIVE_MAX_HEADER` overrides 64 KiB.
+fn max_header_bytes() -> usize {
+    match std::env::var("ALBUMEN_RECEIVE_MAX_HEADER") {
+        Ok(text) => match text.parse::<usize>() {
+            Ok(value) if value >= 1 => value,
+            _ => 64 * 1024,
+        },
+        Err(_) => 64 * 1024,
+    }
+}
+
+async fn discard_body(socket: &mut TcpStream, leftover: &[u8], length: u64) -> Result<(), String> {
+    let mut written = leftover.len() as u64;
+    let mut buf = [0u8; 64 * 1024];
+    while written < length {
+        let n = socket.read(&mut buf).await.map_err(|err| err.to_string())?;
+        if n == 0 {
+            return Err("truncated body".to_string());
+        }
+        let room = (length - written) as usize;
+        if n > room {
+            return Err("body longer than Content-Length".to_string());
+        }
+        written += n as u64;
+    }
+    Ok(())
+}
+
 async fn put(
     socket: &mut TcpStream,
     library: &Library,
     target: &str,
-    body: &[u8],
+    leftover: &[u8],
+    length: u64,
     source_mtime: Option<u64>,
 ) -> std::io::Result<()> {
     let arrival = match Arrival::parse(&percent_decode(target)) {
@@ -154,8 +185,8 @@ async fn put(
         Ok(spool) => spool,
         Err(err) => return write_status(socket, 400, &err, &[]).await,
     };
-    if let Err(err) = spool.write_at(0, body) {
-        return write_status(socket, 500, &err, &[]).await;
+    if let Err(err) = write_body_to_spool(socket, &mut spool, leftover, length).await {
+        return write_status(socket, 400, &err, &[]).await;
     }
     if let Some(seconds) = source_mtime {
         if let Err(err) = spool.set_mtime(seconds) {
@@ -167,6 +198,33 @@ async fn put(
         Ok(Commit::Deduped { sha256, .. }) => deduped(socket, &sha256).await,
         Err(err) => write_status(socket, 500, &err, &[]).await,
     }
+}
+
+async fn write_body_to_spool(
+    socket: &mut TcpStream,
+    spool: &mut Spool,
+    leftover: &[u8],
+    length: u64,
+) -> Result<(), String> {
+    if !leftover.is_empty() {
+        spool.write_at(0, leftover)?;
+    }
+    let mut written = leftover.len() as u64;
+    let mut buf = [0u8; 64 * 1024];
+    while written < length {
+        let n = socket.read(&mut buf).await.map_err(|err| err.to_string())?;
+        if n == 0 {
+            return Err("truncated body".to_string());
+        }
+        let room = (length - written) as usize;
+        let take = n.min(room);
+        spool.write_at(written, &buf[..take])?;
+        written += take as u64;
+        if n > room {
+            return Err("body longer than Content-Length".to_string());
+        }
+    }
+    Ok(())
 }
 
 async fn created(socket: &mut TcpStream, sha256: &str) -> std::io::Result<()> {
@@ -197,38 +255,74 @@ async fn get(
         Err(_) => return write_status(socket, 404, "not found", &[]).await,
     };
     let path = library.root().join(&name);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
         Err(_) => return write_status(socket, 404, "not found", &[]).await,
     };
+    let len = match file.metadata().await {
+        Ok(meta) if meta.is_file() => meta.len(),
+        _ => return write_status(socket, 404, "not found", &[]).await,
+    };
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
-        bytes.len()
+        "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
     );
     socket.write_all(header.as_bytes()).await?;
     if send_body {
-        socket.write_all(&bytes).await?;
+        tokio::io::copy(&mut file, socket).await?;
     }
     Ok(())
 }
 
 async fn propfind(socket: &mut TcpStream, library: &Library) -> std::io::Result<()> {
-    let names = library.files().unwrap_or_default();
-    let mut xml =
-        String::from(r#"<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">"#);
-    xml.push_str("<d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>");
-    for name in names {
-        xml.push_str("<d:response><d:href>/");
+    let entries = match std::fs::read_dir(library.root()) {
+        Ok(entries) => entries,
+        Err(err) => return write_status(socket, 500, &err.to_string(), &[]).await,
+    };
+    socket
+        .write_all(
+            b"HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        )
+        .await?;
+    write_chunk(
+        socket,
+        r#"<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#,
+    )
+    .await?;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !Library::is_listed_file(&name) {
+            continue;
+        }
+        let mut xml = String::from("<d:response><d:href>/");
         xml.push_str(&xml_escape(&name));
         xml.push_str("</d:href><d:propstat><d:prop><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>");
+        write_chunk(socket, &xml).await?;
     }
-    xml.push_str("</d:multistatus>");
-    let header = format!(
-        "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        xml.len()
-    );
-    socket.write_all(header.as_bytes()).await?;
-    socket.write_all(xml.as_bytes()).await?;
+    write_chunk(socket, "</d:multistatus>").await?;
+    socket.write_all(b"0\r\n\r\n").await?;
+    Ok(())
+}
+
+async fn write_chunk(socket: &mut TcpStream, data: &str) -> std::io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    socket
+        .write_all(format!("{:X}\r\n", data.len()).as_bytes())
+        .await?;
+    socket.write_all(data.as_bytes()).await?;
+    socket.write_all(b"\r\n").await?;
     Ok(())
 }
 

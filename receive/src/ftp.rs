@@ -77,7 +77,7 @@ async fn session(
             return Ok(());
         }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > 16 * 1024 {
+        if buf.len() > max_control_line() {
             session.reply(500, "line too long").await?;
             return Ok(());
         }
@@ -88,6 +88,17 @@ async fn session(
                 return Ok(());
             }
         }
+    }
+}
+
+/// Control-connection DoS bound. `ALBUMEN_RECEIVE_MAX_LINE` overrides 16 KiB.
+fn max_control_line() -> usize {
+    match std::env::var("ALBUMEN_RECEIVE_MAX_LINE") {
+        Ok(text) => match text.parse::<usize>() {
+            Ok(value) if value >= 1 => value,
+            _ => 16 * 1024,
+        },
+        Err(_) => 16 * 1024,
     }
 }
 

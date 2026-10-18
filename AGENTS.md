@@ -10,7 +10,7 @@ Metadata and original quality are never lost. Originals stay bit-exact. EXIF, XM
 
 The default path never deletes a source. Leaving is one command: `albumen export`, then `albumen verify-manifest`. Storage is the user's. There are no dark patterns, upsell nags, or hidden scans. MCP is the agent interface, and agent instructions cannot add a tool the philosophy forbids.
 
-The metrics are reliability, fidelity, respect, control, scale, and the measured performance and friction budgets. Cost is outside those metrics. The numbers are in [docs/performance-budgets.md](docs/performance-budgets.md). The step count is in [docs/friction.md](docs/friction.md). Scale means no hard-coded ceiling on library size, file size, concurrency, or item counts: soft defaults the user can override, streaming and pagination, and constant memory as the library grows.
+The metrics are reliability, fidelity, respect, control, scale, and the measured performance and friction budgets. Cost is outside those metrics. The numbers are in [docs/performance-budgets.md](docs/performance-budgets.md). The step count is in [docs/friction.md](docs/friction.md). Scale means no hard-coded ceiling on library size, file size, concurrency, or item counts: soft defaults the user can override, streaming and pagination, and constant memory as the library grows. The soft defaults and the safety bounds that stay are in [docs/scale.md](docs/scale.md).
 
 ## Where to start
 
@@ -25,6 +25,7 @@ Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md), then the crate you are changi
 | iOS camera roll | `mobile/ios`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
 | Android camera roll | `mobile/android`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
 | Benchmarks | `bench/`, [docs/performance-budgets.md](docs/performance-budgets.md) |
+| Scale, page size, safety bounds | [docs/scale.md](docs/scale.md), `mcp/src/page.rs` |
 | What is not built | [ROADMAP.md](ROADMAP.md) |
 
 Workspace members are `ingest` (`albumen-ingest`), `cli` (`albumen`), `mcp` (`albumen-mcp`), `receive` (`albumen-receive`), and `bench` (`albumen-bench`). Rust edition 2021, `rust-version` 1.94. CI uses toolchain 1.99.1.

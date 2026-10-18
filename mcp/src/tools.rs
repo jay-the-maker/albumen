@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use albumen_ingest::{
-    copy_verify, discover, export_tree, write_manifest, DirectoryTree, ExportDest, IngestError,
-    LocalStore, S3Config, S3Store,
+    copy_verify, discover, export_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest,
+    IngestError, LocalStore, S3Config, S3Store, WalkControl,
 };
 use serde_json::{json, Value};
 
 use crate::metadata::{self, Filters, GeoBox};
+use crate::page::{Hit, Page};
 
 pub struct Library {
     root: PathBuf,
@@ -78,20 +79,6 @@ impl Library {
         }
     }
 
-    fn files(&self) -> Result<Vec<Value>, String> {
-        let tree = DirectoryTree::new(&self.root);
-        let relative = tree.list().map_err(show)?;
-        let mut files = Vec::with_capacity(relative.len());
-        for path in relative {
-            let full = self.root.join(PathBuf::from_iter(path.split('/')));
-            let bytes = fs::metadata(&full)
-                .map_err(|err| format!("{path}: {err}"))?
-                .len();
-            files.push(json!({"path": path, "bytes": bytes}));
-        }
-        Ok(files)
-    }
-
     fn search(&self, arguments: &Value) -> Result<Value, String> {
         reject_unknown_search_keys(arguments)?;
         let query = optional_string(arguments, "query")?;
@@ -103,40 +90,78 @@ impl Library {
             return Err("search needs a query or a metadata filter".to_string());
         }
         let query = query.map(str::to_lowercase);
-        let mut files = self.files()?;
-        if let Some(filters) = filters {
-            let paths = files
-                .iter()
-                .map(|file| file["path"].as_str().unwrap_or("").to_string())
-                .collect::<Vec<_>>();
-            let mut cache = self.metadata.lock().unwrap_or_else(|err| err.into_inner());
-            let read = cache.load(&self.root, &paths)?;
-            drop(cache);
-            files.retain(|file| {
-                let path = file["path"].as_str().unwrap_or("");
-                let Some(own) = read.get(path) else {
-                    return false;
+        let limit = optional_limit(arguments)?.unwrap_or(default_page("ALBUMEN_SEARCH_PAGE", 1000));
+        let after = optional_cursor(arguments)?;
+        let mut page = Page::default();
+        let mut pending: Vec<(String, u64)> = Vec::new();
+        let batch = metadata::exiftool_batch();
+        let mut cache = self.metadata.lock().unwrap_or_else(|err| err.into_inner());
+        let mut failed: Option<String> = None;
+        let walked = walk_sorted(&self.root, after.as_deref(), &mut |relative| {
+            if query
+                .as_ref()
+                .is_some_and(|query| !relative.to_lowercase().contains(query))
+            {
+                return WalkControl::Continue;
+            }
+            let bytes = match file_len(&self.root, relative) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    failed = Some(err);
+                    return WalkControl::Stop;
+                }
+            };
+            if filters.is_none() {
+                let stop = page.consider(
+                    limit,
+                    Hit {
+                        path: relative.to_string(),
+                        bytes,
+                        record: None,
+                    },
+                );
+                return if stop {
+                    WalkControl::Stop
+                } else {
+                    WalkControl::Continue
                 };
-                filters.matches(&metadata::with_sidecars(path, own, &read))
-            });
-            for file in &mut files {
-                let path = file["path"].as_str().unwrap_or("");
-                if let Some(own) = read.get(path) {
-                    attach_metadata(file, &metadata::with_sidecars(path, own, &read));
+            }
+            pending.push((relative.to_string(), bytes));
+            if pending.len() >= batch {
+                if let Err(err) = flush_metadata(
+                    &self.root,
+                    &mut cache,
+                    filters.as_ref().unwrap(),
+                    limit,
+                    &mut pending,
+                    &mut page,
+                ) {
+                    failed = Some(err);
+                    return WalkControl::Stop;
+                }
+                if page.truncated {
+                    return WalkControl::Stop;
                 }
             }
+            WalkControl::Continue
+        });
+        walked.map_err(show)?;
+        if let Some(err) = failed {
+            return Err(err);
         }
-        if let Some(query) = &query {
-            files.retain(|file| {
-                file["path"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(query)
-            });
+        if !pending.is_empty() && !page.truncated {
+            if let Some(filters) = filters.as_ref() {
+                flush_metadata(
+                    &self.root,
+                    &mut cache,
+                    filters,
+                    limit,
+                    &mut pending,
+                    &mut page,
+                )?;
+            }
         }
-        let truncated = truncate(&mut files, optional_limit(arguments)?.unwrap_or(1000))?;
-        Ok(json!({"files": files, "truncated": truncated}))
+        Ok(page_value(&page))
     }
 
     fn browse(&self, arguments: &Value) -> Result<Value, String> {
@@ -144,19 +169,40 @@ impl Library {
             .unwrap_or_default()
             .trim_end_matches('/')
             .to_string();
-        let mut files = self
-            .files()?
-            .into_iter()
-            .filter(|file| {
-                if prefix.is_empty() {
-                    return true;
+        let limit = optional_limit(arguments)?.unwrap_or(default_page("ALBUMEN_BROWSE_PAGE", 200));
+        let after = optional_cursor(arguments)?;
+        let mut page = Page::default();
+        let mut failed: Option<String> = None;
+        walk_sorted(&self.root, after.as_deref(), &mut |relative| {
+            if !under_prefix(relative, &prefix) {
+                return WalkControl::Continue;
+            }
+            let bytes = match file_len(&self.root, relative) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    failed = Some(err);
+                    return WalkControl::Stop;
                 }
-                let path = file["path"].as_str().unwrap_or("");
-                path == prefix || path.starts_with(&format!("{prefix}/"))
-            })
-            .collect::<Vec<_>>();
-        let truncated = truncate(&mut files, optional_limit(arguments)?.unwrap_or(200))?;
-        Ok(json!({"files": files, "truncated": truncated}))
+            };
+            let stop = page.consider(
+                limit,
+                Hit {
+                    path: relative.to_string(),
+                    bytes,
+                    record: None,
+                },
+            );
+            if stop {
+                WalkControl::Stop
+            } else {
+                WalkControl::Continue
+            }
+        })
+        .map_err(show)?;
+        if let Some(err) = failed {
+            return Err(err);
+        }
+        Ok(page_value(&page))
     }
 
     fn export(&self, arguments: &Value) -> Result<Value, String> {
@@ -219,6 +265,82 @@ fn show(err: IngestError) -> String {
     err.to_string()
 }
 
+fn file_len(root: &Path, relative: &str) -> Result<u64, String> {
+    let full = root.join(PathBuf::from_iter(relative.split('/')));
+    fs::metadata(&full)
+        .map(|meta| meta.len())
+        .map_err(|err| format!("{relative}: {err}"))
+}
+
+fn under_prefix(path: &str, prefix: &str) -> bool {
+    prefix.is_empty() || path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+fn flush_metadata(
+    root: &Path,
+    cache: &mut metadata::Cache,
+    filters: &Filters,
+    limit: u64,
+    pending: &mut Vec<(String, u64)>,
+    page: &mut Page,
+) -> Result<(), String> {
+    let mut load_paths: Vec<String> = pending.iter().map(|(path, _)| path.clone()).collect();
+    for (path, _) in pending.iter() {
+        for sidecar in metadata::existing_sidecars(root, path) {
+            if !load_paths.iter().any(|item| item == &sidecar) {
+                load_paths.push(sidecar);
+            }
+        }
+    }
+    let read = cache.load(root, &load_paths)?;
+    for (path, bytes) in pending.drain(..) {
+        let Some(own) = read.get(&path) else {
+            continue;
+        };
+        let merged = metadata::with_sidecars(&path, own, &read);
+        if !filters.matches(&merged) {
+            continue;
+        }
+        if page.consider(
+            limit,
+            Hit {
+                path,
+                bytes,
+                record: Some(merged),
+            },
+        ) {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn page_value(page: &Page) -> Value {
+    let files = page
+        .hits
+        .iter()
+        .map(|hit| {
+            let mut file = json!({"path": hit.path, "bytes": hit.bytes});
+            if let Some(record) = &hit.record {
+                attach_metadata(&mut file, record);
+            }
+            file
+        })
+        .collect::<Vec<_>>();
+    let mut value = json!({"files": files, "truncated": page.truncated});
+    if let Some(cursor) = page.next_cursor() {
+        value["next_cursor"] = Value::String(cursor.to_string());
+    }
+    value
+}
+
+fn default_page(name: &str, fallback: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .unwrap_or(fallback)
+}
+
 fn open_target(spec: &str) -> Result<Box<dyn ExportDest>, String> {
     if let Some(rest) = spec.strip_prefix("s3://") {
         let rest = rest.trim_end_matches('/');
@@ -266,13 +388,6 @@ fn relative_text(path: &Path) -> String {
         .join("/")
 }
 
-fn truncate(files: &mut Vec<Value>, limit: u64) -> Result<bool, String> {
-    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-    let truncated = files.len() > limit;
-    files.truncate(limit);
-    Ok(truncated)
-}
-
 fn arguments_object(arguments: &Value) -> Result<&serde_json::Map<String, Value>, String> {
     match arguments {
         Value::Object(map) => Ok(map),
@@ -294,6 +409,14 @@ fn optional_string<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value)),
         Some(_) => Err(format!("{key} must be a string")),
+    }
+}
+
+fn optional_cursor(arguments: &Value) -> Result<Option<String>, String> {
+    match optional_string(arguments, "cursor")? {
+        None => Ok(None),
+        Some("") => Err("cursor must not be empty".to_string()),
+        Some(text) => Ok(Some(text.to_string())),
     }
 }
 
@@ -339,6 +462,7 @@ fn reject_unknown_search_keys(arguments: &Value) -> Result<(), String> {
     const ALLOWED: &[&str] = &[
         "query",
         "limit",
+        "cursor",
         "captured_after",
         "captured_before",
         "camera",
@@ -429,7 +553,7 @@ fn required_f64(map: &serde_json::Map<String, Value>, key: &str) -> Result<f64, 
 fn search_def() -> Value {
     json!({
         "name": "search",
-        "description": "Find library files by path, capture date, camera, lens, GPS box, keyword, or caption. Metadata is read from the files and their XMP/AAE sidecars. Nothing is written.",
+        "description": "Find library files by path, capture date, camera, lens, GPS box, keyword, or caption. Metadata is read from the files and their XMP/AAE sidecars. Results are one page. Pass next_cursor to read the next page. Nothing is written.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -452,7 +576,8 @@ fn search_def() -> Value {
                     "required": ["south", "north", "west", "east"],
                     "additionalProperties": false
                 },
-                "limit": {"type": "integer", "minimum": 0}
+                "limit": {"type": "integer", "minimum": 0, "description": "Page size. Soft default is 1000, or ALBUMEN_SEARCH_PAGE. There is no maximum."},
+                "cursor": {"type": "string", "description": "Return matches strictly after this relative path."}
             },
             "additionalProperties": false
         }
@@ -462,12 +587,13 @@ fn search_def() -> Value {
 fn browse_def() -> Value {
     json!({
         "name": "browse",
-        "description": "List library files under an optional relative prefix. Reads only. Does not modify the library.",
+        "description": "List library files under an optional relative prefix. Results are one page. Pass next_cursor to read the next page. Reads only. Does not modify the library.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "prefix": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 0}
+                "limit": {"type": "integer", "minimum": 0, "description": "Page size. Soft default is 200, or ALBUMEN_BROWSE_PAGE. There is no maximum."},
+                "cursor": {"type": "string", "description": "Return files strictly after this relative path."}
             },
             "additionalProperties": false
         }
@@ -503,4 +629,52 @@ fn upload_def() -> Value {
             "additionalProperties": false
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browse_and_search_pages_cover_every_file_once() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..25 {
+            fs::write(root.path().join(format!("f{index:02}.jpg")), b"x").unwrap();
+        }
+        let library = Library::new(root.path().to_path_buf(), false, false).unwrap();
+        let seen = collect_pages(&library, "browse", 10);
+        assert_eq!(seen.len(), 25, "{seen:?}");
+        let mut unique = seen.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique, seen);
+        let found = collect_pages(&library, "search", 10);
+        assert_eq!(found, seen);
+    }
+
+    fn collect_pages(library: &Library, tool: &str, limit: u64) -> Vec<String> {
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            let mut args = json!({"limit": limit});
+            if tool == "search" {
+                args["query"] = json!("f");
+            }
+            if let Some(cursor) = &cursor {
+                args["cursor"] = json!(cursor);
+            }
+            let page = library.call(tool, &args).unwrap();
+            let files = page["files"].as_array().unwrap();
+            assert!(files.len() as u64 <= limit);
+            for file in files {
+                seen.push(file["path"].as_str().unwrap().to_string());
+            }
+            if !page["truncated"].as_bool().unwrap() {
+                assert!(page.get("next_cursor").is_none());
+                return seen;
+            }
+            cursor = Some(page["next_cursor"].as_str().unwrap().to_string());
+        }
+        panic!("pagination did not finish: {seen:?}");
+    }
 }
