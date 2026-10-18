@@ -1,5 +1,7 @@
 # Albumen
 
+The commitment is [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). Read it before changing this repository.
+
 **First principle: metadata and original quality are never lost.**
 
 Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy is checked with SHA-256 and fails loudly on mismatch. The default path never removes or alters a source.
