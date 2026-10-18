@@ -80,8 +80,10 @@ pub(crate) fn companion_names(primary: &Path) -> Result<(Vec<String>, Vec<String
     };
     let mut sidecars = Vec::new();
     for name in sidecar_candidates(&file_name, stem) {
-        if name != file_name && is_regular_file(&parent.join(&name)) {
-            sidecars.push(name);
+        if let Some(actual) = on_disk_name(parent, &name) {
+            if actual != file_name {
+                sidecars.push(actual);
+            }
         }
     }
     sidecars.sort();
@@ -93,11 +95,11 @@ pub(crate) fn companion_names(primary: &Path) -> Result<(Vec<String>, Vec<String
                 format!("{stem}.{ext}"),
                 format!("{stem}.{}", ext.to_ascii_uppercase()),
             ] {
-                if name != file_name
-                    && !sidecars.iter().any(|existing| existing == &name)
-                    && is_regular_file(&parent.join(&name))
-                {
-                    pairs.push(name);
+                let Some(actual) = on_disk_name(parent, &name) else {
+                    continue;
+                };
+                if actual != file_name && !sidecars.iter().any(|existing| existing == &actual) {
+                    pairs.push(actual);
                 }
             }
         }
@@ -107,10 +109,20 @@ pub(crate) fn companion_names(primary: &Path) -> Result<(Vec<String>, Vec<String
     Ok((sidecars, pairs))
 }
 
-fn is_regular_file(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_file())
-        .unwrap_or(false)
+/// The directory entry's own name when `parent/name` is a regular file.
+///
+/// On a case-insensitive volume, probing `Photo.XMP` finds `Photo.xmp`.
+/// The returned name is the one stored on disk, so the two probes collapse.
+fn on_disk_name(parent: &Path, name: &str) -> Option<String> {
+    let path = parent.join(name);
+    let meta = fs::symlink_metadata(&path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    fs::canonicalize(&path)
+        .ok()
+        .and_then(|canon| canon.file_name()?.to_str().map(str::to_string))
+        .or_else(|| Some(name.to_string()))
 }
 
 fn pair_extensions(class: Class) -> Vec<&'static str> {
@@ -225,8 +237,11 @@ fn consider_companion(
     seen_names: &mut BTreeSet<String>,
     seen_ids: &mut BTreeSet<(u64, u64)>,
 ) -> Result<(), IngestError> {
-    check_filename(name)?;
-    let path = parent.join(name);
+    let Some(actual) = on_disk_name(parent, name) else {
+        return Ok(());
+    };
+    check_filename(&actual)?;
+    let path = parent.join(&actual);
     if !path.is_file() {
         return Ok(());
     }
@@ -235,7 +250,7 @@ fn consider_companion(
             return Ok(());
         }
     }
-    if !seen_names.insert(name.to_string()) {
+    if !seen_names.insert(actual) {
         return Ok(());
     }
     files.push(AssetFile { path, role });
