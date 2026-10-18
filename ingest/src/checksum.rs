@@ -9,11 +9,15 @@ use sha2::{Digest, Sha256};
 use crate::error::IngestError;
 
 pub fn sha256_file(path: &Path) -> Result<[u8; 32], IngestError> {
-    let mut file = File::open(path).map_err(|err| IngestError::io(path, err))?;
+    let file = File::open(path).map_err(|err| IngestError::io(path, err))?;
+    sha256_reader(file, path)
+}
+
+pub(crate) fn sha256_reader<R: Read>(mut reader: R, path: &Path) -> Result<[u8; 32], IngestError> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1024 * 1024];
     loop {
-        let n = file
+        let n = reader
             .read(&mut buf)
             .map_err(|err| IngestError::io(path, err))?;
         if n == 0 {

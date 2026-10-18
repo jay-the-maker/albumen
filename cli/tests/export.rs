@@ -26,10 +26,19 @@ fn source_unchanged(root: &Path) {
     let mut count = 0;
     for line in sums.lines().filter(|line| !line.is_empty()) {
         let (hash, name) = line.split_once("  ").unwrap();
+        let path = root.join(name);
         let output = Command::new("sha256sum")
-            .arg(root.join(name))
+            .arg(&path)
             .output()
-            .expect("sha256sum");
+            .ok()
+            .filter(|output| output.status.success())
+            .unwrap_or_else(|| {
+                Command::new("shasum")
+                    .args(["-a", "256"])
+                    .arg(&path)
+                    .output()
+                    .expect("sha256sum or shasum")
+            });
         assert!(output.status.success(), "{name}");
         let actual = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -137,6 +146,12 @@ fn export_and_verify_local_fixture_corpus() {
 
 #[test]
 fn export_and_verify_s3_fixture_corpus() {
+    if std::env::var("ALBUMEN_S3_UNAVAILABLE").ok().as_deref() == Some("1") {
+        eprintln!(
+            "skipping S3: ALBUMEN_S3_UNAVAILABLE=1. Docker is not used. Local filesystem only."
+        );
+        return;
+    }
     if std::env::var("ALBUMEN_S3_ENDPOINT").is_err() {
         panic!("S3 export requires MinIO. Run scripts/with-minio.sh cargo test --locked");
     }

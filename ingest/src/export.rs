@@ -719,6 +719,12 @@ mod tests {
     #[test]
     fn s3_export_skips_identical_objects_and_verifies() {
         use crate::{S3Config, S3Store};
+        if std::env::var("ALBUMEN_S3_UNAVAILABLE").ok().as_deref() == Some("1") {
+            eprintln!(
+                "skipping S3: ALBUMEN_S3_UNAVAILABLE=1. Docker is not used. Local filesystem only."
+            );
+            return;
+        }
         let mut config = S3Config::from_env().unwrap_or_else(|err| {
             panic!(
                 "S3 export requires MinIO ({err}). Run scripts/with-minio.sh cargo test --locked"

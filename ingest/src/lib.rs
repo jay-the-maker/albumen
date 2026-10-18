@@ -17,6 +17,7 @@ mod local;
 mod mtime;
 mod rclone;
 mod s3;
+mod scan;
 mod store;
 
 pub use checksum::{sha256_file, sha256_hex};
@@ -29,6 +30,7 @@ pub use export::{
 pub use local::{copy_verify_file, LocalStore};
 pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};
+pub use scan::{scan_tree, verify_scan_manifest, ScanDrift, ScanStats};
 pub use store::{
     copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,
     VerifiedObject,

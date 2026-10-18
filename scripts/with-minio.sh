@@ -2,6 +2,10 @@
 # Start a pinned MinIO server and run a command with ALBUMEN_S3_* set.
 # MinIO is AGPL and is not part of Albumen. This downloads a released binary
 # and runs it as a separate process. The credentials are disposable test values.
+#
+# Docker is not used. Linux amd64 and macOS arm64 have pinned binaries. Any
+# other OS prints that and runs the command with ALBUMEN_S3_UNAVAILABLE=1 so
+# the suite stays on the local filesystem.
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
@@ -9,18 +13,62 @@ if [[ $# -eq 0 ]]; then
   exit 2
 fi
 
+check_sha256() {
+  local sum="$1"
+  local file="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "${sum}  ${file}" | sha256sum -c - >&2
+  elif command -v shasum >/dev/null 2>&1; then
+    echo "${sum}  ${file}" | shasum -a 256 -c - >&2
+  else
+    echo "sha256sum or shasum is required" >&2
+    exit 1
+  fi
+}
+
+sha256_ok() {
+  local sum="$1"
+  local file="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "${sum}  ${file}" | sha256sum -c - >/dev/null 2>&1
+  else
+    echo "${sum}  ${file}" | shasum -a 256 -c - >/dev/null 2>&1
+  fi
+}
+
 RELEASE="RELEASE.2025-09-07T16-13-09Z"
-SHA256="7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f"
-URL="https://github.com/minio/minio/releases/download/${RELEASE}/minio.linux-amd64.${RELEASE}"
+OS_NAME="$(uname -s)"
+ARCH_NAME="$(uname -m)"
+case "${OS_NAME}-${ARCH_NAME}" in
+  Linux-x86_64|Linux-amd64)
+    ASSET="minio.linux-amd64.${RELEASE}"
+    SHA256="7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f"
+    ;;
+  Darwin-arm64)
+    ASSET="minio.darwin-arm64.${RELEASE}"
+    SHA256="7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4"
+    ;;
+  *)
+    echo "Docker is not used. No pinned MinIO binary for ${OS_NAME}-${ARCH_NAME}. S3 will not run; the suite is local filesystem only." >&2
+    export ALBUMEN_S3_UNAVAILABLE=1
+    exec "$@"
+    ;;
+esac
+
+URL="https://github.com/minio/minio/releases/download/${RELEASE}/${ASSET}"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/albumen"
-BIN="${CACHE}/minio-${RELEASE}"
+BIN="${CACHE}/${ASSET}"
 
 mkdir -p "$CACHE"
-if [[ ! -x "$BIN" ]] || ! echo "${SHA256}  ${BIN}" | sha256sum -c - >/dev/null 2>&1; then
+if [[ ! -x "$BIN" ]] || ! sha256_ok "$SHA256" "$BIN"; then
   curl -fsSL -o "${BIN}.partial" "$URL"
-  echo "${SHA256}  ${BIN}.partial" | sha256sum -c -
+  check_sha256 "$SHA256" "${BIN}.partial"
   chmod +x "${BIN}.partial"
   mv "${BIN}.partial" "$BIN"
+fi
+
+if [[ "$OS_NAME" == "Darwin" ]]; then
+  xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
 fi
 
 DATA="$(mktemp -d)"

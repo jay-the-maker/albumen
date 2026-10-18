@@ -65,6 +65,9 @@ fn local_round_trip_preserves_bytes_metadata_mtime_and_filename() {
 
 #[test]
 fn s3_round_trip_preserves_bytes_metadata_mtime_and_filename() {
+    if s3_unavailable() {
+        return;
+    }
     let mut config = S3Config::from_env().unwrap_or_else(|err| {
         panic!(
             "S3 round-trip requires MinIO and ALBUMEN_S3_* env vars ({err}). \
@@ -99,6 +102,9 @@ const RCLONE_PASS: &str = "albumen-ci-not-a-secret";
 
 #[test]
 fn rclone_sftp_webdav_and_b2_round_trip() {
+    if s3_unavailable() {
+        return;
+    }
     let bin = rclone_bin();
     let sftp = start_serve("sftp", &bin);
     let sftp_store = RcloneStore::sftp(&bin, "127.0.0.1", sftp.port, RCLONE_USER, RCLONE_PASS)
@@ -240,6 +246,17 @@ fn start_serve(kind: &str, bin: &Path) -> RcloneServe {
         "rclone serve {kind} did not listen on {port}\n{}",
         fs::read_to_string(&log_path).unwrap_or_default()
     );
+}
+
+fn s3_unavailable() -> bool {
+    if std::env::var("ALBUMEN_S3_UNAVAILABLE").ok().as_deref() == Some("1") {
+        eprintln!(
+            "skipping S3: ALBUMEN_S3_UNAVAILABLE=1. Docker is not used. Local filesystem only."
+        );
+        true
+    } else {
+        false
+    }
 }
 
 fn rclone_bin() -> PathBuf {

@@ -48,6 +48,12 @@ fn real_device_corpus_round_trip() {
         "ALBUMEN_REAL_CORPUS is not a directory: {}",
         root.display()
     );
+    if std::env::var("ALBUMEN_S3_UNAVAILABLE").ok().as_deref() == Some("1") {
+        eprintln!(
+            "skipping S3: ALBUMEN_S3_UNAVAILABLE=1. Docker is not used. Local filesystem only."
+        );
+        return;
+    }
     let mut config = S3Config::from_env().unwrap_or_else(|err| {
         panic!(
             "real-device corpus S3 round-trip needs MinIO ({err}). \

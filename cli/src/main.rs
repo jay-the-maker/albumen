@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `albumen export` and `albumen verify-manifest`.
+//! `albumen export`, `albumen scan`, and `albumen verify-manifest`.
 //!
 //! Export is `copy_verify` across a library. It does not modify sources and
-//! it does not overwrite a destination that differs.
+//! it does not overwrite a destination that differs. Scan only reads the
+//! source and writes a JSONL manifest outside that tree.
 
 // IngestError is the library's error. The CLI prints it; it does not reshape it.
 #![allow(clippy::result_large_err)]
@@ -12,13 +13,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use albumen_ingest::{
-    export_tree, parse_manifest, verify_tree, write_manifest, DirectoryTree, ExportDest,
-    IngestError, ManifestEntry, S3Config, S3Store,
+    export_tree, parse_manifest, scan_tree, verify_scan_manifest, verify_tree, write_manifest,
+    DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
 };
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "albumen", about = "Bit-exact photo library export")]
+#[command(
+    name = "albumen",
+    about = "Bit-exact photo library export and read-only scan"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -38,11 +42,24 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
-    /// Hash the exported files and compare them to a manifest.
+    /// Read a library and write a JSONL manifest outside it.
+    ///
+    /// The source is opened read-only. The manifest is refused when it
+    /// resolves inside the library. Running the command again continues
+    /// after the last complete line.
+    Scan {
+        /// Library root.
+        dir: PathBuf,
+        /// JSONL manifest to write. Must not resolve inside the library.
+        #[arg(long)]
+        manifest: PathBuf,
+    },
+    /// Hash the exported files, or a scan manifest, and compare them.
     VerifyManifest {
         #[arg(long)]
         manifest: PathBuf,
-        /// Directory or s3://bucket/prefix that was exported.
+        /// Directory or s3://bucket/prefix that was exported. Scan manifests
+        /// are compared with a local directory.
         #[arg(long)]
         against: String,
     },
@@ -74,7 +91,32 @@ fn run() -> Result<(), IngestError> {
             println!("manifest {}", manifest_path.display());
             Ok(())
         }
+        Command::Scan { dir, manifest } => {
+            let stats = scan_tree(&dir, &manifest)?;
+            println!(
+                "scanned {} files ({} bytes) into {}",
+                stats.files,
+                stats.bytes,
+                manifest.display()
+            );
+            Ok(())
+        }
         Command::VerifyManifest { manifest, against } => {
+            if manifest_is_jsonl(&manifest)? {
+                if against.starts_with("s3://") {
+                    return Err(IngestError::Store {
+                        operation: "verify-manifest",
+                        filename: against,
+                        message: "a scan manifest is verified against a local directory"
+                            .to_string(),
+                    });
+                }
+                verify_scan_manifest(&manifest, Path::new(&against), &mut |drift| {
+                    println!("{} {} {}", drift.kind, drift.path, drift.detail);
+                })?;
+                println!("verified scan manifest against {against}");
+                return Ok(());
+            }
             let text = std::fs::read_to_string(&manifest).map_err(|err| IngestError::Io {
                 path: manifest.clone(),
                 source: err,
@@ -87,6 +129,20 @@ fn run() -> Result<(), IngestError> {
             Ok(())
         }
     }
+}
+
+fn manifest_is_jsonl(path: &Path) -> Result<bool, IngestError> {
+    let mut file = std::fs::File::open(path).map_err(|err| IngestError::Io {
+        path: path.to_path_buf(),
+        source: err,
+    })?;
+    let mut buf = [0u8; 64];
+    let n = std::io::Read::read(&mut file, &mut buf).map_err(|err| IngestError::Io {
+        path: path.to_path_buf(),
+        source: err,
+    })?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    Ok(text.trim_start().starts_with('{'))
 }
 
 fn open_target(spec: &str) -> Result<Box<dyn ExportDest>, IngestError> {

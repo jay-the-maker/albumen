@@ -102,6 +102,17 @@ pub enum IngestError {
 
     #[error("could not parse manifest line {line_number}: {line}")]
     ManifestParse { line_number: usize, line: String },
+
+    #[error(
+        "refusing to write the manifest inside the source tree: {manifest} is inside {source_tree}"
+    )]
+    ManifestInsideSource {
+        manifest: String,
+        source_tree: String,
+    },
+
+    #[error("scan manifest drift: {count} difference(s)")]
+    ManifestDrift { count: u64 },
 }
 
 impl IngestError {

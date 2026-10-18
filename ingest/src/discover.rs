@@ -62,6 +62,89 @@ impl Asset {
     }
 }
 
+/// Names of sidecars and pairs that sit beside `primary`.
+///
+/// This stats the known sibling names. It does not read the rest of the
+/// directory. The returned names are file names, not relative paths.
+pub(crate) fn companion_names(primary: &Path) -> Result<(Vec<String>, Vec<String>), IngestError> {
+    let file_name = file_name_str(primary)?;
+    let stem = primary
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| IngestError::NonUtf8Filename {
+            path: primary.to_path_buf(),
+        })?;
+    let parent = match primary.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut sidecars = Vec::new();
+    for name in sidecar_candidates(&file_name, stem) {
+        if let Some(actual) = on_disk_name(parent, &name) {
+            if actual != file_name {
+                sidecars.push(actual);
+            }
+        }
+    }
+    sidecars.sort();
+    sidecars.dedup();
+    let mut pairs = Vec::new();
+    if let Some(class) = class_of(&extension_lower(primary)) {
+        for ext in pair_extensions(class) {
+            for name in [
+                format!("{stem}.{ext}"),
+                format!("{stem}.{}", ext.to_ascii_uppercase()),
+            ] {
+                let Some(actual) = on_disk_name(parent, &name) else {
+                    continue;
+                };
+                if actual != file_name && !sidecars.iter().any(|existing| existing == &actual) {
+                    pairs.push(actual);
+                }
+            }
+        }
+    }
+    pairs.sort();
+    pairs.dedup();
+    Ok((sidecars, pairs))
+}
+
+/// The directory entry's own name when `parent/name` is a regular file.
+///
+/// On a case-insensitive volume, probing `Photo.XMP` finds `Photo.xmp`.
+/// The returned name is the one stored on disk, so the two probes collapse.
+fn on_disk_name(parent: &Path, name: &str) -> Option<String> {
+    let path = parent.join(name);
+    let meta = fs::symlink_metadata(&path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    fs::canonicalize(&path)
+        .ok()
+        .and_then(|canon| canon.file_name()?.to_str().map(str::to_string))
+        .or_else(|| Some(name.to_string()))
+}
+
+fn pair_extensions(class: Class) -> Vec<&'static str> {
+    const STILLS: &[&str] = &[
+        "jpg", "jpeg", "heic", "heif", "hif", "png", "tif", "tiff", "avif", "webp",
+    ];
+    const RAWS: &[&str] = &[
+        "dng", "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef", "srw",
+        "raw", "3fr", "fff", "mef", "mos", "erf", "kdc", "dcr", "mrw", "x3f",
+    ];
+    const VIDEOS: &[&str] = &["mov", "mp4", "m4v"];
+    match class {
+        Class::Still => {
+            let mut out = Vec::with_capacity(RAWS.len() + VIDEOS.len());
+            out.extend_from_slice(RAWS);
+            out.extend_from_slice(VIDEOS);
+            out
+        }
+        Class::Raw | Class::Video => STILLS.to_vec(),
+    }
+}
+
 /// Discover sidecars and known pairs that sit beside `primary`.
 ///
 /// Sidecars are `{stem}.xmp`, `{filename}.xmp`, and the same patterns for
@@ -106,6 +189,7 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
             &mut seen_ids,
         )?;
     }
+    files[1..].sort_by(|left, right| left.path.file_name().cmp(&right.path.file_name()));
 
     let mut pairs = Vec::new();
     for entry in fs::read_dir(parent).map_err(|err| IngestError::io(parent, err))? {
@@ -154,8 +238,11 @@ fn consider_companion(
     seen_names: &mut BTreeSet<String>,
     seen_ids: &mut BTreeSet<(u64, u64)>,
 ) -> Result<(), IngestError> {
-    check_filename(name)?;
-    let path = parent.join(name);
+    let Some(actual) = on_disk_name(parent, name) else {
+        return Ok(());
+    };
+    check_filename(&actual)?;
+    let path = parent.join(&actual);
     if !path.is_file() {
         return Ok(());
     }
@@ -164,7 +251,7 @@ fn consider_companion(
             return Ok(());
         }
     }
-    if !seen_names.insert(name.to_string()) {
+    if !seen_names.insert(actual) {
         return Ok(());
     }
     files.push(AssetFile { path, role });
@@ -329,6 +416,19 @@ mod tests {
         assert_eq!(asset.files().len(), 2);
         assert_eq!(asset.files()[1].role, Role::Pair);
         assert_eq!(asset.files()[1].path.file_name().unwrap(), "IMG_0005.MOV");
+    }
+
+    #[test]
+    fn companion_names_stat_known_siblings_only() {
+        let tmp = Tmp::new();
+        let dir = tmp.path();
+        touch(dir, "IMG_0005.HEIC");
+        touch(dir, "IMG_0005.MOV");
+        touch(dir, "IMG_0005.xmp");
+        touch(dir, "unrelated.jpg");
+        let (sidecars, pairs) = companion_names(&dir.join("IMG_0005.HEIC")).unwrap();
+        assert_eq!(sidecars, vec!["IMG_0005.xmp".to_string()]);
+        assert_eq!(pairs, vec!["IMG_0005.MOV".to_string()]);
     }
 
     #[test]
