@@ -9,6 +9,7 @@
 
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -50,7 +51,7 @@ fn run() -> Result<(), String> {
                 return Err(mismatch.join("\n"));
             }
             let observed = measure(search_items, copy_files, copy_bytes)?;
-            println!("{}", pretty(&observed)?);
+            print_report(&observed)?;
             let problems = regression_problems(&baseline, &observed);
             if !problems.is_empty() {
                 return Err(problems.join("\n"));
@@ -62,14 +63,14 @@ fn run() -> Result<(), String> {
         }
         Mode::Measure => {
             let observed = measure(search_items, copy_files, copy_bytes)?;
-            println!("{}", pretty(&observed)?);
+            print_report(&observed)?;
         }
         Mode::Write => {
             let observed = measure(search_items, copy_files, copy_bytes)?;
             let text = pretty(&observed)?;
             fs::write(&invocation.baseline, format!("{text}\n"))
                 .map_err(|err| format!("write {}: {err}", invocation.baseline.display()))?;
-            println!("{text}");
+            print_report(&observed)?;
             eprintln!("wrote {}", invocation.baseline.display());
         }
     }
@@ -146,4 +147,9 @@ fn env_u64(name: &str, default: u64) -> Result<u64, String> {
 
 fn pretty(report: &Report) -> Result<String, String> {
     serde_json::to_string_pretty(&to_json(report)).map_err(|err| err.to_string())
+}
+
+fn print_report(report: &Report) -> Result<(), String> {
+    println!("{}", pretty(report)?);
+    io::stdout().flush().map_err(|err| err.to_string())
 }
