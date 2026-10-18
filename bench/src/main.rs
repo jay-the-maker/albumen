@@ -45,6 +45,11 @@ fn run() -> Result<(), String> {
                 search_warm_p50_ms: 0.0,
                 search_warm_p95_ms: 0.0,
                 mcp_browse_p50_ms: 0.0,
+                copy_verify_vs_plain: 0.0,
+                search_cold_vs_exif: 0.0,
+                search_warm_p50_vs_hash: 0.0,
+                search_warm_p95_vs_hash: 0.0,
+                browse_vs_walk: 0.0,
             };
             let mismatch = scale_problems(&baseline, &probe);
             if !mismatch.is_empty() {

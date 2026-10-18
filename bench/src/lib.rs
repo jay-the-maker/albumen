@@ -3,9 +3,16 @@
 //! Repeated-sample gate for the paths that exist today.
 //!
 //! This is a criterion-style harness: several repeats, a median, and a stored
-//! baseline. A noisy repeat is dropped before the median. Throughput fails
-//! when it falls below 90 percent of the baseline. Latency fails when it
-//! rises above 110 percent. The criterion crate is not a dependency.
+//! baseline. A noisy repeat is dropped before the median. The criterion crate
+//! is not a dependency.
+//!
+//! GitHub-hosted runners differ by more than 10 percent from job to job, so
+//! the gate does not compare raw MB/s or milliseconds with a laptop. Each
+//! repeat also times a same-run reference: a plain fsynced copy, one ExifTool read,
+//! one SHA-256 pass, and one directory walk. Throughput is Albumen's MB/s
+//! divided by the plain copy. Latency is the reference time divided by
+//! Albumen's time. Higher is better, and the score fails when it drops by
+//! more than 10 percent. Raw MB/s and milliseconds are still reported.
 
 #![forbid(unsafe_code)]
 
@@ -16,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use albumen_ingest::{copy_verify, Asset, AssetFile, LocalStore, Role};
+use albumen_ingest::{copy_verify, sha256_hex, Asset, AssetFile, LocalStore, Role};
 use albumen_mcp::Library;
 use serde_json::{json, Value};
 
@@ -47,6 +54,16 @@ pub struct Report {
     pub search_warm_p50_ms: f64,
     pub search_warm_p95_ms: f64,
     pub mcp_browse_p50_ms: f64,
+    /// `copy_verify` MB/s divided by a plain copy of the same bytes.
+    pub copy_verify_vs_plain: f64,
+    /// ExifTool's own read time divided by cold search time.
+    pub search_cold_vs_exif: f64,
+    /// One SHA-256 pass divided by warm search p50.
+    pub search_warm_p50_vs_hash: f64,
+    /// One SHA-256 pass divided by warm search p95.
+    pub search_warm_p95_vs_hash: f64,
+    /// A directory walk divided by browse p50.
+    pub browse_vs_walk: f64,
 }
 
 /// More than 10 percent worse. The boundary is exact at thousandths.
@@ -169,6 +186,11 @@ pub fn to_json(report: &Report) -> Value {
         "search_warm_p50_ms": report.search_warm_p50_ms,
         "search_warm_p95_ms": report.search_warm_p95_ms,
         "mcp_browse_p50_ms": report.mcp_browse_p50_ms,
+        "copy_verify_vs_plain": report.copy_verify_vs_plain,
+        "search_cold_vs_exif": report.search_cold_vs_exif,
+        "search_warm_p50_vs_hash": report.search_warm_p50_vs_hash,
+        "search_warm_p95_vs_hash": report.search_warm_p95_vs_hash,
+        "browse_vs_walk": report.browse_vs_walk,
     })
 }
 
@@ -183,6 +205,11 @@ pub fn from_json(value: &Value) -> Result<Report, String> {
         search_warm_p50_ms: required_f64(value, "search_warm_p50_ms")?,
         search_warm_p95_ms: required_f64(value, "search_warm_p95_ms")?,
         mcp_browse_p50_ms: required_f64(value, "mcp_browse_p50_ms")?,
+        copy_verify_vs_plain: required_f64(value, "copy_verify_vs_plain")?,
+        search_cold_vs_exif: required_f64(value, "search_cold_vs_exif")?,
+        search_warm_p50_vs_hash: required_f64(value, "search_warm_p50_vs_hash")?,
+        search_warm_p95_vs_hash: required_f64(value, "search_warm_p95_vs_hash")?,
+        browse_vs_walk: required_f64(value, "browse_vs_walk")?,
     })
 }
 
@@ -209,7 +236,7 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
     let sources = root.path.join("sources");
     fs::create_dir_all(&library).map_err(|err| format!("create library: {err}"))?;
     fs::create_dir_all(&sources).map_err(|err| format!("create sources: {err}"))?;
-    write_library(&library, search_items)?;
+    let relative = write_library(&library, search_items)?;
     let copies = write_copies(&sources, copy_files, copy_bytes_each)?;
 
     let mut mb_s = Vec::with_capacity(REPEATS);
@@ -218,23 +245,39 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
     let mut warm_p50 = Vec::with_capacity(REPEATS);
     let mut warm_p95 = Vec::with_capacity(REPEATS);
     let mut browse_p50 = Vec::with_capacity(REPEATS);
+    let mut copy_ratio = Vec::with_capacity(REPEATS);
+    let mut cold_ratio = Vec::with_capacity(REPEATS);
+    let mut warm_p50_ratio = Vec::with_capacity(REPEATS);
+    let mut warm_p95_ratio = Vec::with_capacity(REPEATS);
+    let mut browse_ratio = Vec::with_capacity(REPEATS);
     let search_args = json!({"caption": CAPTION, "limit": 1});
     let browse_args = json!({"limit": 1});
 
     for repeat in 0..REPEATS {
-        let dest = root.path.join(format!("dest-{repeat}"));
-        let (mb, items) = copy_once(&copies, &dest)?;
+        let plain = plain_copy_mb_s(&copies, &root.path.join(format!("plain-{repeat}")))?;
+        let (mb, items) = copy_once(&copies, &root.path.join(format!("dest-{repeat}")))?;
         mb_s.push(mb);
         items_s.push(items);
+        copy_ratio.push(ratio(mb, plain)?);
 
         let library_handle = Library::new(library.clone(), false, false)?;
         let (value, ms) = timed(|| library_handle.call("search", &search_args));
         assert_hit(&value?, "cold search")?;
         cold.push(ms);
+        let exif_ms = exif_pass_ms(&library, &relative)?;
+        cold_ratio.push(ratio(exif_ms, ms)?);
+
         let (p50, p95) = warm_search(&library_handle, &search_args)?;
         warm_p50.push(p50);
         warm_p95.push(p95);
-        browse_p50.push(warm_browse(&library_handle, &browse_args)?);
+        let hash_ms = hash_pass_ms(&library, &relative)?;
+        warm_p50_ratio.push(ratio(hash_ms, p50)?);
+        warm_p95_ratio.push(ratio(hash_ms, p95)?);
+
+        let browse_ms = warm_browse(&library_handle, &browse_args)?;
+        browse_p50.push(browse_ms);
+        let walk_ms = walk_ms(&library)?;
+        browse_ratio.push(ratio(walk_ms, browse_ms)?);
     }
 
     Ok(Report {
@@ -247,46 +290,52 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
         search_warm_p50_ms: settle(&warm_p50, false)?,
         search_warm_p95_ms: settle(&warm_p95, false)?,
         mcp_browse_p50_ms: settle(&browse_p50, false)?,
+        copy_verify_vs_plain: settle(&copy_ratio, true)?,
+        search_cold_vs_exif: settle(&cold_ratio, true)?,
+        search_warm_p50_vs_hash: settle(&warm_p50_ratio, true)?,
+        search_warm_p95_vs_hash: settle(&warm_p95_ratio, true)?,
+        browse_vs_walk: settle(&browse_ratio, true)?,
     })
 }
 
-fn metric_rows(baseline: &Report, observed: &Report) -> [(&'static str, bool, f64, f64); 6] {
+fn ratio(reference: f64, observed: f64) -> Result<f64, String> {
+    if !(reference.is_finite() && reference > 0.0 && observed.is_finite() && observed > 0.0) {
+        return Err("a reference or a measurement was not a positive number".to_string());
+    }
+    Ok(reference / observed)
+}
+
+fn metric_rows(baseline: &Report, observed: &Report) -> [(&'static str, bool, f64, f64); 5] {
     [
         (
-            "copy_verify_mb_s",
+            "copy_verify_vs_plain",
             true,
-            baseline.copy_verify_mb_s,
-            observed.copy_verify_mb_s,
+            baseline.copy_verify_vs_plain,
+            observed.copy_verify_vs_plain,
         ),
         (
-            "copy_verify_items_s",
+            "search_cold_vs_exif",
             true,
-            baseline.copy_verify_items_s,
-            observed.copy_verify_items_s,
+            baseline.search_cold_vs_exif,
+            observed.search_cold_vs_exif,
         ),
         (
-            "search_cold_ms",
-            false,
-            baseline.search_cold_ms,
-            observed.search_cold_ms,
+            "search_warm_p50_vs_hash",
+            true,
+            baseline.search_warm_p50_vs_hash,
+            observed.search_warm_p50_vs_hash,
         ),
         (
-            "search_warm_p50_ms",
-            false,
-            baseline.search_warm_p50_ms,
-            observed.search_warm_p50_ms,
+            "search_warm_p95_vs_hash",
+            true,
+            baseline.search_warm_p95_vs_hash,
+            observed.search_warm_p95_vs_hash,
         ),
         (
-            "search_warm_p95_ms",
-            false,
-            baseline.search_warm_p95_ms,
-            observed.search_warm_p95_ms,
-        ),
-        (
-            "mcp_browse_p50_ms",
-            false,
-            baseline.mcp_browse_p50_ms,
-            observed.mcp_browse_p50_ms,
+            "browse_vs_walk",
+            true,
+            baseline.browse_vs_walk,
+            observed.browse_vs_walk,
         ),
     ]
 }
@@ -326,6 +375,81 @@ fn assert_hit(value: &Value, tool: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn plain_copy_mb_s(sources: &[PathBuf], dest: &Path) -> Result<f64, String> {
+    fs::create_dir_all(dest).map_err(|err| format!("create plain dest: {err}"))?;
+    let started = Instant::now();
+    let mut bytes = 0u64;
+    for source in sources {
+        let name = source
+            .file_name()
+            .ok_or_else(|| format!("missing file name {}", source.display()))?;
+        let mut input =
+            File::open(source).map_err(|err| format!("open {}: {err}", source.display()))?;
+        let mut output = File::create(dest.join(name))
+            .map_err(|err| format!("create plain copy of {}: {err}", source.display()))?;
+        let copied = std::io::copy(&mut input, &mut output)
+            .map_err(|err| format!("plain copy {}: {err}", source.display()))?;
+        output
+            .sync_all()
+            .map_err(|err| format!("sync plain copy of {}: {err}", source.display()))?;
+        black_box(copied);
+        bytes += copied;
+    }
+    let seconds = started.elapsed().as_secs_f64().max(1e-9);
+    Ok((bytes as f64) / 1_000_000.0 / seconds)
+}
+
+fn hash_pass_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
+    let started = Instant::now();
+    for name in relative {
+        let digest = sha256_hex(&root.join(name)).map_err(|err| err.to_string())?;
+        black_box(digest);
+    }
+    Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn walk_ms(root: &Path) -> Result<f64, String> {
+    let started = Instant::now();
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    for entry in fs::read_dir(root).map_err(|err| format!("walk library: {err}"))? {
+        let entry = entry.map_err(|err| format!("walk library: {err}"))?;
+        let len = entry
+            .metadata()
+            .map_err(|err| format!("stat {}: {err}", entry.path().display()))?
+            .len();
+        bytes += len;
+        count += 1;
+    }
+    black_box((count, bytes));
+    Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn exif_pass_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
+    let started = Instant::now();
+    for chunk in relative.chunks(64) {
+        let output = Command::new("exiftool")
+            .current_dir(root)
+            .arg("-json")
+            .arg("-n")
+            .arg("-G1")
+            .arg("-s")
+            .arg("-api")
+            .arg("largefilesupport=1")
+            .args(chunk)
+            .output()
+            .map_err(|err| format!("exiftool reference: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "exiftool reference failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        black_box(output.stdout.len());
+    }
+    Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
 fn copy_once(sources: &[PathBuf], dest: &Path) -> Result<(f64, f64), String> {
     fs::create_dir_all(dest).map_err(|err| format!("create dest: {err}"))?;
     let started = Instant::now();
@@ -350,16 +474,20 @@ fn copy_once(sources: &[PathBuf], dest: &Path) -> Result<(f64, f64), String> {
     Ok((mb_s, items_s))
 }
 
-fn write_library(dir: &Path, items: u64) -> Result<(), String> {
+fn write_library(dir: &Path, items: u64) -> Result<Vec<String>, String> {
     let sidecar = xmp(CAPTION);
+    let mut relative = Vec::with_capacity(usize::try_from(items).unwrap_or(0) * 2);
     for index in 0..items {
         let stem = format!("b{index:06}");
-        fs::write(dir.join(format!("{stem}.jpg")), JPEG)
-            .map_err(|err| format!("write {stem}.jpg: {err}"))?;
-        fs::write(dir.join(format!("{stem}.xmp")), sidecar.as_bytes())
-            .map_err(|err| format!("write {stem}.xmp: {err}"))?;
+        let jpeg = format!("{stem}.jpg");
+        let xmp_name = format!("{stem}.xmp");
+        fs::write(dir.join(&jpeg), JPEG).map_err(|err| format!("write {jpeg}: {err}"))?;
+        fs::write(dir.join(&xmp_name), sidecar.as_bytes())
+            .map_err(|err| format!("write {xmp_name}: {err}"))?;
+        relative.push(jpeg);
+        relative.push(xmp_name);
     }
-    Ok(())
+    Ok(relative)
 }
 
 fn write_copies(dir: &Path, files: u64, bytes_each: u64) -> Result<Vec<PathBuf>, String> {
@@ -532,6 +660,11 @@ mod tests {
             search_warm_p50_ms: 5.0,
             search_warm_p95_ms: 8.0,
             mcp_browse_p50_ms: 1.0,
+            copy_verify_vs_plain: 0.5,
+            search_cold_vs_exif: 0.8,
+            search_warm_p50_vs_hash: 0.9,
+            search_warm_p95_vs_hash: 0.7,
+            browse_vs_walk: 0.4,
         }
     }
 }

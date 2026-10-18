@@ -43,26 +43,35 @@ The default scale, and the scale stored in [bench/baseline.json](../bench/baseli
 - 8 files copied through `copy_verify`, 4 MiB each, into a fresh destination directory per repeat.
 - Search and browse go through `Library::call`, which is the MCP tool path. Export and upload stay off.
 
-| Field | Meaning | Worse when |
-| --- | --- | --- |
-| `copy_verify_mb_s` | MB/s of the eight-file copy, 1 MB = 1,000,000 bytes | lower |
-| `copy_verify_items_s` | files per second of that copy | lower |
-| `search_cold_ms` | first `search` on a new library, including ExifTool | higher |
-| `search_warm_p50_ms` | nearest-rank p50 of 20 warm searches, then the median across repeats | higher |
-| `search_warm_p95_ms` | nearest-rank p95 of those 20, then the median across repeats | higher |
-| `mcp_browse_p50_ms` | nearest-rank p50 of 20 `browse` calls, then the median across repeats | higher |
+The report always prints raw rates and latencies: `copy_verify_mb_s` and `copy_verify_items_s` (1 MB = 1,000,000 bytes), `search_cold_ms`, nearest-rank `search_warm_p50_ms` and `search_warm_p95_ms` over 20 warm searches, and `mcp_browse_p50_ms` over 20 browse calls.
+
+Those raw numbers are not the CI gate. Two `ubuntu-24.04` runners can differ by more than 10 percent on the same commit, which is machine noise, not a code change. Each repeat also times a reference on that same machine:
+
+- a plain copy of the same bytes, fsynced, without hashing or reading the destination back
+- one ExifTool read of the same library
+- one SHA-256 pass over the same files
+- one directory walk that stats every file
+
+The gated fields are Albumen divided into that reference. Higher is better. A slower Albumen lowers the ratio even when the runner is faster or slower than the last job.
+
+| Field | Ratio |
+| --- | --- |
+| `copy_verify_vs_plain` | `copy_verify` MB/s ÷ plain-copy MB/s |
+| `search_cold_vs_exif` | ExifTool read time ÷ cold search time |
+| `search_warm_p50_vs_hash` | SHA-256 pass ÷ warm search p50 |
+| `search_warm_p95_vs_hash` | SHA-256 pass ÷ warm search p95 |
+| `browse_vs_walk` | directory walk ÷ browse p50 |
 
 `--check` reads the baseline first and refuses to compare a different `search_items`, `copy_files`, or `copy_bytes_each`. A 380,000-item run must not be checked against this file.
 
-Noise handling, applied to the five repeat scores before the comparison:
+Noise handling, applied to the five repeat ratios before the comparison:
 
-- If `(max - min) / median` is above 0.25, drop the worst sample. For throughput that is the lowest sample. For latency that is the highest.
+- If `(max - min) / median` is above 0.25, drop the worst sample. That is the lowest ratio.
 - The score is then the median of what remains.
-- Throughput fails when the score is below 90 percent of the baseline.
-- Latency fails when the score is above 110 percent of the baseline.
+- The score fails when it is below 90 percent of the baseline.
 - Exactly 10 percent is inside the gate. The comparison is exact at thousandths.
 
-The committed baseline is the `ubuntu-24.04` measurement. A laptop uses `--measure`, which prints JSON and does not compare. `--write-baseline` replaces the file. Do not replace it to hide a real regression. Replace it when the runner itself moved, or when a change is an intentional speed trade that still keeps every byte and tag.
+The committed ratios are the `ubuntu-24.04` measurement. A laptop uses `--measure`, which prints JSON and does not compare. `--write-baseline` replaces the file. Do not replace it to hide a real regression. Replace it when the relationship to the reference moved for a reason other than the code, or when a change is an intentional speed trade that still keeps every byte and tag.
 
 ## Local 380,000-item run
 
