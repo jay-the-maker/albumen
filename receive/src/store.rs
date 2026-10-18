@@ -74,6 +74,9 @@ impl Library {
         spool.finish()?;
         let digest = sha256_hex(spool.path()).map_err(|err| err.to_string())?;
         if let Some(stored_name) = self.matching_store(&digest)? {
+            if let Some(seconds) = spool.source_mtime {
+                self.apply_stored_mtime_locked(&stored_name, seconds)?;
+            }
             return Ok(Commit::Deduped {
                 sha256: digest,
                 stored_name,
@@ -82,11 +85,16 @@ impl Library {
         let stored_name = self.collision_safe_name(&arrival.camera_filename)?;
         spool.refile(&stored_name)?;
         let verified = copy_verify_file(spool.path(), &self.root).map_err(|err| err.to_string())?;
+        let source_mtime = spool
+            .source_mtime
+            .unwrap_or_else(|| file_mtime_secs(&verified));
         let record = Record {
             sha256: verified.sha256.clone(),
             stored_name: verified.filename.clone(),
             camera_filename: arrival.camera_filename.clone(),
             directory: arrival.directory.clone(),
+            source_mtime,
+            received_at: unix_now(),
         };
         if let Err(err) = self.write_sidecar(&record) {
             let _ = fs::remove_file(self.root.join(&verified.filename));
@@ -166,6 +174,84 @@ impl Library {
         file.sync_all().map_err(|err| err.to_string())?;
         copy_verify_file(&path, &self.root).map_err(|err| err.to_string())
     }
+
+    /// Set the stored file's mtime from FTP MFMT/MDTM or SFTP setstat.
+    /// The photo bytes stay. `received_at` in the sidecar stays.
+    pub fn note_source_mtime(&self, path: &str, seconds: u64) -> Result<(), String> {
+        let _guard = self
+            .commit_lock
+            .lock()
+            .map_err(|_| "receive commit lock was poisoned".to_string())?;
+        self.apply_source_mtime_locked(path, seconds)
+    }
+
+    fn apply_source_mtime_locked(&self, path: &str, seconds: u64) -> Result<(), String> {
+        let record = self.find_record(path)?;
+        self.apply_stored_mtime_locked(&record.stored_name, seconds)
+    }
+
+    fn apply_stored_mtime_locked(&self, stored_name: &str, seconds: u64) -> Result<(), String> {
+        let mut record = self
+            .records()?
+            .into_iter()
+            .find(|record| record.stored_name == stored_name)
+            .ok_or_else(|| format!("no sidecar for {stored_name}"))?;
+        let stored = self.root.join(&record.stored_name);
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        fs::File::options()
+            .write(true)
+            .open(&stored)
+            .and_then(|file| file.set_modified(when))
+            .map_err(|err| err.to_string())?;
+        record.source_mtime = seconds;
+        let name = format!("{}{SIDECAR_SUFFIX}", record.stored_name);
+        let sidecar = self.root.join(&name);
+        fs::remove_file(&sidecar).map_err(|err| err.to_string())?;
+        self.write_sidecar(&record)?;
+        Ok(())
+    }
+
+    fn find_record(&self, path: &str) -> Result<Record, String> {
+        let arrival = Arrival::parse(path)?;
+        let records = self.records()?;
+        let mut by_path: Vec<&Record> = records
+            .iter()
+            .filter(|record| {
+                record.camera_filename == arrival.camera_filename
+                    && record.directory == arrival.directory
+            })
+            .collect();
+        if by_path.len() == 1 {
+            return Ok(by_path.remove(0).clone());
+        }
+        if by_path.is_empty() {
+            if let Some(record) = records
+                .iter()
+                .find(|record| record.stored_name == arrival.camera_filename)
+            {
+                return Ok(record.clone());
+            }
+        }
+        Err(format!(
+            "no stored file for {}/{}",
+            arrival.directory, arrival.camera_filename
+        ))
+    }
+}
+
+fn file_mtime_secs(verified: &VerifiedObject) -> u64 {
+    verified
+        .mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn name_is_free(taken: &std::collections::BTreeSet<String>, stored_name: &str) -> bool {
@@ -253,15 +339,19 @@ struct Record {
     stored_name: String,
     camera_filename: String,
     directory: String,
+    source_mtime: u64,
+    received_at: u64,
 }
 
 impl Record {
     fn json(&self) -> String {
         format!(
-            "{{\"camera_filename\":{},\"directory\":{},\"sha256\":{},\"stored_name\":{}}}\n",
+            "{{\"camera_filename\":{},\"directory\":{},\"received_at\":{},\"sha256\":{},\"source_mtime\":{},\"stored_name\":{}}}\n",
             json_string(&self.camera_filename),
             json_string(&self.directory),
+            json_string(&self.received_at.to_string()),
             json_string(&self.sha256),
+            json_string(&self.source_mtime.to_string()),
             json_string(&self.stored_name),
         )
     }
@@ -270,7 +360,9 @@ impl Record {
         Some(Self {
             camera_filename: json_field(text, "camera_filename")?,
             directory: json_field(text, "directory")?,
+            received_at: json_field(text, "received_at")?.parse().ok()?,
             sha256: json_field(text, "sha256")?,
+            source_mtime: json_field(text, "source_mtime")?.parse().ok()?,
             stored_name: json_field(text, "stored_name")?,
         })
     }
@@ -329,6 +421,7 @@ pub struct Spool {
     path: PathBuf,
     file: File,
     len: u64,
+    source_mtime: Option<u64>,
 }
 
 impl Spool {
@@ -342,6 +435,7 @@ impl Spool {
             path,
             file,
             len: 0,
+            source_mtime: None,
         })
     }
 
@@ -360,9 +454,13 @@ impl Spool {
         Ok(())
     }
 
-    pub fn set_mtime(&self, seconds: u64) -> Result<(), String> {
+    pub fn set_mtime(&mut self, seconds: u64) -> Result<(), String> {
         let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-        self.file.set_modified(when).map_err(|err| err.to_string())
+        self.file
+            .set_modified(when)
+            .map_err(|err| err.to_string())?;
+        self.source_mtime = Some(seconds);
+        Ok(())
     }
 
     pub fn finish(&mut self) -> Result<(), String> {

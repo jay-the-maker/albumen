@@ -80,12 +80,15 @@ async fn handle(
     let target = parts.next().unwrap_or("/");
     let mut content_length = None;
     let mut authorization = None;
+    let mut source_mtime = None;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             if name.eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse::<u64>().ok();
             } else if name.eq_ignore_ascii_case("authorization") {
                 authorization = Some(value.trim().to_string());
+            } else if name.eq_ignore_ascii_case("x-albumen-mtime") {
+                source_mtime = value.trim().parse::<u64>().ok();
             }
         }
     }
@@ -128,7 +131,7 @@ async fn handle(
         "MKCOL" => write_status(&mut socket, 201, "Created", &[]).await,
         "PROPFIND" => propfind(&mut socket, &library).await,
         "HEAD" | "GET" => get(&mut socket, &library, target, method == "GET").await,
-        "PUT" => put(&mut socket, &library, target, &body).await,
+        "PUT" => put(&mut socket, &library, target, &body, source_mtime).await,
         "DELETE" | "MOVE" | "COPY" => {
             write_status(&mut socket, 405, "albumen does not delete or rename", &[]).await
         }
@@ -141,6 +144,7 @@ async fn put(
     library: &Library,
     target: &str,
     body: &[u8],
+    source_mtime: Option<u64>,
 ) -> std::io::Result<()> {
     let arrival = match Arrival::parse(&percent_decode(target)) {
         Ok(arrival) => arrival,
@@ -152,6 +156,11 @@ async fn put(
     };
     if let Err(err) = spool.write_at(0, body) {
         return write_status(socket, 500, &err, &[]).await;
+    }
+    if let Some(seconds) = source_mtime {
+        if let Err(err) = spool.set_mtime(seconds) {
+            return write_status(socket, 500, &err, &[]).await;
+        }
     }
     match library.commit(&mut spool, &arrival) {
         Ok(Commit::Stored { sha256, .. }) => created(socket, &sha256).await,

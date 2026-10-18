@@ -48,6 +48,11 @@ class UploadCheckTest {
     }
 
     @Test
+    fun sourceMtimeHeaderIsUnixSeconds() {
+        assertEquals("1000000000", sourceMtimeSeconds(1_000_000_000_000L))
+    }
+
+    @Test
     fun storedNameKeepsTheCameraFilename() {
         assertEquals("IMG_0001.JPG", StoredName.require("/DCIM/IMG_0001.JPG"))
         assertThrows(IllegalArgumentException::class.java) {

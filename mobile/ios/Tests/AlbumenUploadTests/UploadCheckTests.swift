@@ -36,6 +36,11 @@ final class UploadCheckTests: XCTestCase {
         XCTAssertThrowsError(try UploadCheck.requireVerified(.missingServerHash))
     }
 
+    func testSourceMtimeHeaderIsUnixSeconds() {
+        let date = Date(timeIntervalSince1970: 1_000_000_000)
+        XCTAssertEqual(SourceMtime.headerValue(modificationDate: date), "1000000000")
+    }
+
     func testFileDigestMatchesTheKnownVector() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try Data("abc".utf8).write(to: url)

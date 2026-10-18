@@ -242,6 +242,112 @@ async fn same_camera_filename_keeps_both_files_and_an_identical_retry_dedupes() 
     assert!(!root.path().join("DCIM").exists());
 }
 
+const CAMERA_MTIME: u64 = 1_000_000_000;
+const CAMERA_FTP_TIME: &str = "20010909014640";
+
+#[tokio::test]
+async fn mtime_round_trips_on_webdav_ftp_and_sftp() {
+    let web_body = b"mtime-web";
+    let mfmt_body = b"mtime-mfmt";
+    let mdtm_body = b"mtime-mdtm";
+    let sftp_body = b"mtime-sftp";
+    let root = tempfile::tempdir().unwrap();
+    let listening = listen(
+        Settings {
+            library: root.path().to_path_buf(),
+            user: "camera".into(),
+            password: "roll".into(),
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let webdav = listening.webdav.unwrap();
+    let hash = hash_bytes(web_body);
+    http_put_with_mtime(
+        webdav,
+        "/DCIM/100CANON/IMG_WEB.JPG",
+        web_body,
+        CAMERA_MTIME,
+        "201",
+        &hash,
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_WEB.JPG")).unwrap(),
+        web_body
+    );
+    assert_mtime(root.path(), "IMG_WEB.JPG", CAMERA_MTIME);
+
+    let ftp = listening.ftp.unwrap();
+    ftp_put_with_time(ftp, "MFMT", "/DCIM/100CANON/IMG_MFMT.JPG", mfmt_body).await;
+    let mdtm = ftp_command(ftp, "MDTM IMG_MFMT.JPG").await;
+    assert_eq!(mdtm, format!("213 {CAMERA_FTP_TIME}"));
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_MFMT.JPG")).unwrap(),
+        mfmt_body
+    );
+    assert_mtime(root.path(), "IMG_MFMT.JPG", CAMERA_MTIME);
+
+    ftp_put_with_time(ftp, "MDTM", "IMG_MDTM.JPG", mdtm_body).await;
+    let mdtm = ftp_command(ftp, "MDTM IMG_MDTM.JPG").await;
+    assert_eq!(mdtm, format!("213 {CAMERA_FTP_TIME}"));
+    assert_mtime(root.path(), "IMG_MDTM.JPG", CAMERA_MTIME);
+
+    let sftp = listening.sftp.unwrap();
+    let session = sftp_session(sftp).await;
+    session
+        .write("/DCIM/100CANON/IMG_SFTP.JPG", sftp_body)
+        .await
+        .unwrap();
+    session
+        .set_metadata(
+            "/DCIM/100CANON/IMG_SFTP.JPG",
+            russh_sftp::client::fs::Metadata {
+                mtime: Some(u32::try_from(CAMERA_MTIME).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let remote = session
+        .metadata("/DCIM/100CANON/IMG_SFTP.JPG")
+        .await
+        .unwrap();
+    assert_eq!(remote.mtime, Some(u32::try_from(CAMERA_MTIME).unwrap()));
+    assert_eq!(
+        std::fs::read(root.path().join("IMG_SFTP.JPG")).unwrap(),
+        sftp_body
+    );
+    assert_mtime(root.path(), "IMG_SFTP.JPG", CAMERA_MTIME);
+}
+
+fn assert_mtime(root: &std::path::Path, stored_name: &str, seconds: u64) {
+    let modified = std::fs::metadata(root.join(stored_name))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(modified, seconds);
+    let text = std::fs::read_to_string(root.join(format!("{stored_name}.albumen.json"))).unwrap();
+    assert!(
+        text.contains(&format!("\"source_mtime\":\"{seconds}\"")),
+        "{text}"
+    );
+    let received = text
+        .split("\"received_at\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("received_at missing in {text}"));
+    assert_ne!(received, seconds, "{text}");
+}
+
 fn assert_sidecar(
     root: &std::path::Path,
     stored_name: &str,
@@ -290,7 +396,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 async fn http_put(addr: SocketAddr, path: &str, body: &[u8], status: &str, sha256: &str) {
-    let text = http_exchange(addr, "PUT", path, body).await;
+    let text = http_exchange(addr, "PUT", path, body, None).await;
     assert!(
         text.starts_with(&format!("HTTP/1.1 {status}")),
         "PUT {path}: {text}"
@@ -314,19 +420,48 @@ fn header_value(response: &str, name: &str) -> Option<String> {
     None
 }
 
+async fn http_put_with_mtime(
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    mtime: u64,
+    status: &str,
+    sha256: &str,
+) {
+    let text = http_exchange(addr, "PUT", path, body, Some(mtime)).await;
+    assert!(
+        text.starts_with(&format!("HTTP/1.1 {status}")),
+        "PUT {path}: {text}"
+    );
+    assert_eq!(
+        header_value(&text, "X-Albumen-Sha256").as_deref(),
+        Some(sha256),
+        "PUT {path}: {text}"
+    );
+}
+
 async fn http_request(addr: SocketAddr, method: &str, path: &str, body: &[u8], status: &str) {
-    let text = http_exchange(addr, method, path, body).await;
+    let text = http_exchange(addr, method, path, body, None).await;
     assert!(
         text.starts_with(&format!("HTTP/1.1 {status}")),
         "{method} {path}: {text}"
     );
 }
 
-async fn http_exchange(addr: SocketAddr, method: &str, path: &str, body: &[u8]) -> String {
+async fn http_exchange(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    mtime: Option<u64>,
+) -> String {
     let mut socket = TcpStream::connect(addr).await.unwrap();
     let token = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"camera:roll");
+    let mtime_header = mtime
+        .map(|seconds| format!("X-Albumen-Mtime: {seconds}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {token}\r\n{mtime_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     socket.write_all(request.as_bytes()).await.unwrap();
@@ -380,6 +515,23 @@ async fn sftp_put_result(addr: SocketAddr, path: &str, body: &[u8]) -> Result<()
 async fn ftp_put(addr: SocketAddr, name: &str, body: &[u8]) {
     let reply = ftp_transfer(addr, name, body, true).await;
     assert!(reply.starts_with("226"), "{reply}");
+}
+
+async fn ftp_put_with_time(addr: SocketAddr, verb: &str, name: &str, body: &[u8]) {
+    let mut control = ftp_login(addr).await;
+    let timed = ftp_cmd(&mut control, &format!("{verb} {CAMERA_FTP_TIME} {name}")).await;
+    assert!(timed.starts_with("213"), "{timed}");
+    let pasv = ftp_cmd(&mut control, "PASV").await;
+    assert!(pasv.starts_with("227"), "{pasv}");
+    let data_addr = parse_pasv(&pasv);
+    let early = ftp_cmd(&mut control, &format!("STOR {name}")).await;
+    assert!(early.starts_with("150"), "{early}");
+    let mut data = TcpStream::connect(data_addr).await.unwrap();
+    data.write_all(body).await.unwrap();
+    drop(data);
+    let done = ftp_read_line(&mut control).await;
+    assert!(done.starts_with("226"), "{done}");
+    let _ = ftp_cmd(&mut control, "QUIT").await;
 }
 
 async fn ftp_store_again(addr: SocketAddr, name: &str, body: &[u8]) -> String {

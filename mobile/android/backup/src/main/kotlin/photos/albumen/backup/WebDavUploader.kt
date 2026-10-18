@@ -23,6 +23,10 @@ class WebDavUploader(
             connection.doOutput = true
             connection.setFixedLengthStreamingMode(file.length())
             connection.setRequestProperty("Content-Type", "application/octet-stream")
+            connection.setRequestProperty(
+                "X-Albumen-Mtime",
+                sourceMtimeSeconds(file.lastModified()),
+            )
             val token = Base64.getEncoder().encodeToString("$user:$password".toByteArray(Charsets.UTF_8))
             connection.setRequestProperty("Authorization", "Basic $token")
             file.inputStream().use { input ->
@@ -38,6 +42,10 @@ class WebDavUploader(
         }
     }
 }
+
+/** Unix seconds for `X-Albumen-Mtime`. Milliseconds from the file are truncated. */
+internal fun sourceMtimeSeconds(lastModifiedMillis: Long): String =
+    (lastModifiedMillis / 1_000L).toString()
 
 internal fun endpointUrl(endpoint: String, filename: String): URL {
     val base = if (endpoint.endsWith("/")) endpoint else "$endpoint/"

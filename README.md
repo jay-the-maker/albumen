@@ -84,7 +84,7 @@ albumen-receive --to ./library --user camera --password "$ALBUMEN_RECEIVE_PASSWO
   --webdav 0.0.0.0:8080 --sftp 0.0.0.0:2222 --ftp 0.0.0.0:2121
 ```
 
-The SFTP host key is generated for that process. FTP passive mode advertises the address of the control connection. A WebDAV 201 response includes `X-Albumen-Sha256`, the digest `copy_verify` checked. A different file that reuses a camera filename is stored under a free name. The camera filename and the uploaded directory are written to a sidecar. A 409 means those exact bytes are already stored.
+The SFTP host key is generated for that process. FTP passive mode advertises the address of the control connection. A WebDAV 201 response includes `X-Albumen-Sha256`, the digest `copy_verify` checked. A different file that reuses a camera filename is stored under a free name. The camera filename and the uploaded directory are written to a sidecar. A 409 means those exact bytes are already stored. FTP `MFMT` and `MDTM`, SFTP `setstat`, and the WebDAV header `X-Albumen-Mtime` (Unix seconds, sent by the mobile clients) set the camera mtime. The sidecar records that time and a separate `received_at`.
 
 ## Camera-roll backup
 
