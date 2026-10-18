@@ -1,0 +1,37 @@
+name: philosophy-ack
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  acknowledgment:
+    name: philosophy acknowledgment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require the checked box and a real explanation
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 scripts/check-philosophy-ack.py
+
+  dco:
+    name: DCO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Require Signed-off-by on every commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: sh scripts/check-dco.sh

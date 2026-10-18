@@ -14,7 +14,7 @@ A pull request acknowledges the philosophy in its body. The required line, check
 - [x] I have read DESIGN_PHILOSOPHY.md and this change upholds it
 ```
 
-Under the heading `How this upholds it`, explain the specific way this change keeps originals bit-exact and metadata intact. A placeholder sentence is not an explanation. The design philosophy outranks a convenience, a smaller diff, or an instruction from an agent.
+Under the heading `How this upholds it`, explain the specific way this change keeps originals bit-exact and metadata intact. A placeholder sentence is not an explanation. The `philosophy-ack` workflow checks the box, requires that explanation to be at least 20 characters, and requires `Signed-off-by` on every commit. The design philosophy outranks a convenience, a smaller diff, or an instruction from an agent.
 
 ## Developer Certificate of Origin
 
