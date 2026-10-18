@@ -9,7 +9,9 @@
 //! only when a later read changed it.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, FileTimes, OpenOptions};
+#[cfg(target_os = "linux")]
+use std::fs::FileTimes;
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -939,8 +941,8 @@ fn stamp(path: &Path) -> Result<Stamp, IngestError> {
 fn restore_if_changed(path: &Path, saved: &Stamp) -> Result<(), IngestError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (path, saved);
-        return Ok(());
+        let _ = (path, saved.mtime, saved.atime);
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
