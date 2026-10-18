@@ -54,13 +54,15 @@ Those raw numbers are not the CI gate. Two `ubuntu-24.04` runners can differ by 
 
 The gated fields are Albumen divided into that reference. Higher is better. A slower Albumen lowers the ratio even when the runner is faster or slower than the last job.
 
-| Field | Ratio |
-| --- | --- |
-| `copy_verify_vs_plain` | `copy_verify` MB/s ÷ reference copy MB/s |
-| `search_cold_vs_exif` | ExifTool read time ÷ cold search time |
-| `search_warm_p50_vs_hash` | stat-and-hash pass ÷ warm search p50 |
-| `search_warm_p95_vs_hash` | stat-and-hash pass ÷ warm search p95 |
-| `browse_vs_walk` | directory walk ÷ browse p50 |
+| Field | Ratio | CI failure |
+| --- | --- | --- |
+| `copy_verify_vs_plain` | `copy_verify` MB/s ÷ reference copy MB/s | yes |
+| `search_cold_vs_exif` | ExifTool read time ÷ cold search time | yes |
+| `browse_vs_walk` | directory walk ÷ browse p50 | yes |
+| `search_warm_p50_vs_hash` | stat-and-hash pass ÷ warm search p50 | no |
+| `search_warm_p95_vs_hash` | stat-and-hash pass ÷ warm search p95 | no |
+
+Warm p50 and p95 are still printed on every run, including the local 380,000-item run. They are not a CI failure. On `ubuntu-24.04` that ratio has come out near 0.13 and near 0.61 for this same benchmark. That spread is the runner, not a code change. Cold search, the copy, and browse stay inside 10 percent on those same runners, so those three are the gate.
 
 `--check` reads the baseline first and refuses to compare a different `search_items`, `copy_files`, or `copy_bytes_each`. A 380,000-item run must not be checked against this file.
 

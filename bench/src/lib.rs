@@ -309,7 +309,11 @@ fn ratio(reference: f64, observed: f64) -> Result<f64, String> {
     Ok(reference / observed)
 }
 
-fn metric_rows(baseline: &Report, observed: &Report) -> [(&'static str, bool, f64, f64); 5] {
+fn metric_rows(baseline: &Report, observed: &Report) -> [(&'static str, bool, f64, f64); 3] {
+    // Warm p50/p95 ratios are printed and stored. They are not a failure
+    // line: on ubuntu-24.04 that ratio has been both about 0.13 and about
+    // 0.61 for the same benchmark. Copy, cold search, and browse stay inside
+    // 10 percent across those runners.
     [
         (
             "copy_verify_vs_plain",
@@ -322,18 +326,6 @@ fn metric_rows(baseline: &Report, observed: &Report) -> [(&'static str, bool, f6
             true,
             baseline.search_cold_vs_exif,
             observed.search_cold_vs_exif,
-        ),
-        (
-            "search_warm_p50_vs_hash",
-            true,
-            baseline.search_warm_p50_vs_hash,
-            observed.search_warm_p50_vs_hash,
-        ),
-        (
-            "search_warm_p95_vs_hash",
-            true,
-            baseline.search_warm_p95_vs_hash,
-            observed.search_warm_p95_vs_hash,
         ),
         (
             "browse_vs_walk",
