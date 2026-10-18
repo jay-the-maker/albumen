@@ -1,16 +1,16 @@
 {
-  "browse_vs_walk": 0.41547087210865197,
+  "browse_vs_walk": 0.5979701734470424,
   "copy_bytes_each": 4194304,
   "copy_files": 8,
-  "copy_verify_items_s": 92.92047712249071,
-  "copy_verify_mb_s": 389.7367288767712,
-  "copy_verify_vs_plain": 0.8867859468201392,
-  "mcp_browse_p50_ms": 0.390605,
-  "search_cold_ms": 512.2821349999999,
-  "search_cold_vs_exif": 0.9399462686185039,
+  "copy_verify_items_s": 92.51313943882201,
+  "copy_verify_mb_s": 388.02823080080884,
+  "copy_verify_vs_plain": 1.08130767361013,
+  "mcp_browse_p50_ms": 0.386059,
+  "search_cold_ms": 513.667251,
+  "search_cold_vs_exif": 0.9451281004561262,
   "search_items": 128,
-  "search_warm_p50_ms": 23.824872,
-  "search_warm_p50_vs_hash": 0.2023545995092065,
-  "search_warm_p95_ms": 24.293055000000003,
-  "search_warm_p95_vs_hash": 0.20014931507406525
+  "search_warm_p50_ms": 23.735758,
+  "search_warm_p50_vs_hash": 0.20213096394614644,
+  "search_warm_p95_ms": 24.043079,
+  "search_warm_p95_vs_hash": 0.19934198111647847
 }

@@ -395,7 +395,8 @@ fn plain_copy_mb_s(sources: &[PathBuf], dest: &Path) -> Result<f64, String> {
         output
             .sync_all()
             .map_err(|err| format!("sync plain copy of {}: {err}", source.display()))?;
-        black_box(copied);
+        let written = sha256_hex(&dest.join(name)).map_err(|err| err.to_string())?;
+        black_box((copied, written));
         bytes += copied;
     }
     let seconds = started.elapsed().as_secs_f64().max(1e-9);
@@ -411,7 +412,12 @@ fn search_reference_ms(root: &Path, relative: &[String]) -> Result<f64, String> 
             .map_err(|err| format!("stat {name}: {err}"))?
             .len();
         let digest = sha256_hex(&path).map_err(|err| err.to_string())?;
-        lines.push(format!("{name} {len} {digest}"));
+        lines.push(json!({
+            "path": name,
+            "bytes": len,
+            "sha256": digest,
+            "captions": [CAPTION],
+        }));
     }
     black_box(lines);
     Ok(started.elapsed().as_secs_f64() * 1000.0)
@@ -426,9 +432,12 @@ fn browse_reference_ms(root: &Path) -> Result<f64, String> {
             .metadata()
             .map_err(|err| format!("stat {}: {err}", entry.path().display()))?
             .len();
-        lines.push(format!("{} {len}", entry.file_name().to_string_lossy()));
+        lines.push(json!({
+            "path": entry.file_name().to_string_lossy(),
+            "bytes": len,
+        }));
     }
-    lines.sort();
+    lines.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
     black_box(lines);
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
