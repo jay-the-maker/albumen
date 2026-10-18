@@ -22,6 +22,14 @@ public struct WebDavUploader: Sendable {
         let token = Data("\(user):\(password)".utf8).base64EncodedString()
         request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        if let modified = try file.resourceValues(forKeys: [.contentModificationDateKey])
+            .contentModificationDate
+        {
+            request.setValue(
+                SourceMtime.headerValue(modificationDate: modified),
+                forHTTPHeaderField: "X-Albumen-Mtime"
+            )
+        }
         let delegate = IgnoreRedirects()
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
@@ -39,6 +47,13 @@ public struct WebDavUploader: Sendable {
             status: http.statusCode,
             serverSha256: http.value(forHTTPHeaderField: "X-Albumen-Sha256")
         )
+    }
+}
+
+enum SourceMtime {
+    /// Unix seconds for `X-Albumen-Mtime`.
+    static func headerValue(modificationDate: Date) -> String {
+        String(Int(modificationDate.timeIntervalSince1970))
     }
 }
 

@@ -166,9 +166,12 @@ impl russh_sftp::server::Handler for SftpSession {
         let handle = self.next_handle.to_string();
         self.next_handle += 1;
         if writing {
-            let spool = Spool::create(&arrival.camera_filename).map_err(|_| StatusCode::Failure)?;
+            let mut spool =
+                Spool::create(&arrival.camera_filename).map_err(|_| StatusCode::Failure)?;
             if let Some(mtime) = attrs.mtime {
-                let _ = spool.set_mtime(u64::from(mtime));
+                spool
+                    .set_mtime(u64::from(mtime))
+                    .map_err(|_| StatusCode::Failure)?;
             }
             self.handles
                 .insert(handle.clone(), OpenHandle::Writing { spool, arrival });
@@ -313,9 +316,14 @@ impl russh_sftp::server::Handler for SftpSession {
     async fn setstat(
         &mut self,
         id: u32,
-        _path: String,
-        _attrs: FileAttributes,
+        path: String,
+        attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
+        if let Some(mtime) = attrs.mtime {
+            self.library
+                .note_source_mtime(&path, u64::from(mtime))
+                .map_err(|_| StatusCode::Failure)?;
+        }
         Ok(status_ok(id))
     }
 
@@ -326,7 +334,7 @@ impl russh_sftp::server::Handler for SftpSession {
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         if let (Some(OpenHandle::Writing { spool, .. }), Some(mtime)) =
-            (self.handles.get(&handle), attrs.mtime)
+            (self.handles.get_mut(&handle), attrs.mtime)
         {
             let _ = spool.set_mtime(u64::from(mtime));
         }

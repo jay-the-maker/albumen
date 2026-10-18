@@ -50,6 +50,7 @@ struct Session {
     pending_user: String,
     pasv: Option<TcpListener>,
     port_target: Option<SocketAddr>,
+    pending_mtime: Option<(String, String, u64)>,
 }
 
 async fn session(
@@ -65,6 +66,7 @@ async fn session(
         pending_user: String::new(),
         pasv: None,
         port_target: None,
+        pending_mtime: None,
     };
     session.reply(220, "albumen ready").await?;
     let mut buf = Vec::new();
@@ -121,7 +123,9 @@ async fn handle_line(
         "FEAT" => {
             session
                 .control
-                .write_all(b"211-Features:\r\n SIZE\r\n MDTM\r\n PASV\r\n UTF8\r\n211 End\r\n")
+                .write_all(
+                    b"211-Features:\r\n SIZE\r\n MDTM\r\n MFMT\r\n PASV\r\n UTF8\r\n211 End\r\n",
+                )
                 .await?;
         }
         "OPTS" => session.reply(200, "ok").await?,
@@ -174,6 +178,11 @@ async fn handle_line(
                     }
                     None => session.reply(501, "bad PORT").await?,
                 }
+            }
+        }
+        "MFMT" | "MDTM" => {
+            if session.require_login().await? {
+                session.mtime_command(&verb, arg).await?;
             }
         }
         "STOR" => {
@@ -304,6 +313,11 @@ impl Session {
             offset += n as u64;
         }
         drop(data);
+        if let Some(seconds) = self.take_pending_mtime(&arrival) {
+            if let Err(err) = spool.set_mtime(seconds) {
+                return self.reply(451, &err).await;
+            }
+        }
         if let Err(err) = spool.finish() {
             return self.reply(451, &err).await;
         }
@@ -313,6 +327,52 @@ impl Session {
             }
             Err(err) => self.reply(550, &err).await,
         }
+    }
+
+    fn take_pending_mtime(&mut self, arrival: &Arrival) -> Option<u64> {
+        let (filename, directory, seconds) = self.pending_mtime.as_ref()?;
+        if filename == &arrival.camera_filename && directory == &arrival.directory {
+            let seconds = *seconds;
+            self.pending_mtime = None;
+            Some(seconds)
+        } else {
+            None
+        }
+    }
+
+    async fn mtime_command(&mut self, verb: &str, arg: &str) -> std::io::Result<()> {
+        let arg = arg.trim();
+        if verb == "MDTM" && !arg_starts_with_ftp_time(arg) {
+            let arrival = match Arrival::parse(arg) {
+                Ok(arrival) => arrival,
+                Err(err) => return self.reply(550, &err).await,
+            };
+            let path = self.library.root().join(&arrival.camera_filename);
+            let modified = match std::fs::metadata(&path).and_then(|meta| meta.modified()) {
+                Ok(modified) => modified,
+                Err(_) => return self.reply(550, "not found").await,
+            };
+            let secs = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            return self.reply(213, &ftp_time(secs)).await;
+        }
+        let Some((time, path)) = arg.split_once(' ') else {
+            return self.reply(501, "time and path required").await;
+        };
+        let Some(seconds) = parse_ftp_time(time) else {
+            return self.reply(501, "time must be YYYYMMDDHHMMSS").await;
+        };
+        let arrival = match Arrival::parse(path) {
+            Ok(arrival) => arrival,
+            Err(err) => return self.reply(550, &err).await,
+        };
+        if self.library.note_source_mtime(path, seconds).is_ok() {
+            return self.reply(213, time).await;
+        }
+        self.pending_mtime = Some((arrival.camera_filename, arrival.directory, seconds));
+        self.reply(213, time).await
     }
 
     async fn list(&mut self, names_only: bool) -> std::io::Result<()> {
@@ -342,6 +402,79 @@ impl Session {
         drop(data);
         self.reply(226, "transfer complete").await
     }
+}
+
+fn arg_starts_with_ftp_time(arg: &str) -> bool {
+    let Some(time) = arg.get(..14) else {
+        return false;
+    };
+    time.bytes().all(|byte| byte.is_ascii_digit()) && arg.as_bytes().get(14) == Some(&b' ')
+}
+
+fn parse_ftp_time(text: &str) -> Option<u64> {
+    if text.len() != 14 || !text.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let year: i32 = text[0..4].parse().ok()?;
+    let month: u32 = text[4..6].parse().ok()?;
+    let day: u32 = text[6..8].parse().ok()?;
+    let hour: u32 = text[8..10].parse().ok()?;
+    let minute: u32 = text[10..12].parse().ok()?;
+    let second: u32 = text[12..14].parse().ok()?;
+    if !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let days = days_before_month(year, month)? + day - 1;
+    let mut year_days = 0i64;
+    for y in 1970..year {
+        year_days += if is_leap(y) { 366 } else { 365 };
+    }
+    let stamp = (year_days + i64::from(days)) * 86_400
+        + i64::from(hour) * 3600
+        + i64::from(minute) * 60
+        + i64::from(second);
+    u64::try_from(stamp).ok()
+}
+
+fn ftp_time(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let time = seconds % 86_400;
+    let hour = time / 3600;
+    let minute = (time % 3600) / 60;
+    let second = time % 60;
+    let mut remaining = days as i64;
+    let mut year = 1970i32;
+    loop {
+        let length = if is_leap(year) { 366 } else { 365 };
+        if remaining < i64::from(length) {
+            break;
+        }
+        remaining -= i64::from(length);
+        year += 1;
+    }
+    let mut month = 1u32;
+    while month < 12 {
+        let length = days_before_month(year, month + 1).unwrap_or(0)
+            - days_before_month(year, month).unwrap_or(0);
+        if remaining < i64::from(length) {
+            break;
+        }
+        remaining -= i64::from(length);
+        month += 1;
+    }
+    let day = remaining + 1;
+    format!("{year:04}{month:02}{day:02}{hour:02}{minute:02}{second:02}")
+}
+
+fn is_leap(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_before_month(year: i32, month: u32) -> Option<u32> {
+    const COMMON: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let base = *COMMON.get(month.checked_sub(1)? as usize)?;
+    let leap = u32::from(month > 2 && is_leap(year));
+    Some(base + leap)
 }
 
 fn split_command(line: &str) -> (&str, &str) {
