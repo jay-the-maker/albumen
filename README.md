@@ -77,7 +77,7 @@ Fixture provenance and the CC0 dedication are in [fixtures/README.md](fixtures/R
 
 ## Agents
 
-`albumen-mcp` speaks MCP over stdio. Search and browse are available immediately. Export and upload are not, until that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. There is no delete tool.
+`albumen-mcp` speaks MCP over stdio. Search and browse are available immediately. Search can filter on capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions. It reads those from the files and sidecars and does not write a catalog. Export and upload are not available until that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. There is no delete tool.
 
 ```bash
 albumen-mcp --library ./library
