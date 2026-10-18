@@ -14,19 +14,19 @@ Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one 
 
 ### iOS
 
-- `mobile/ios` reads PhotoKit `PHAssetResource` originals. A Live Photo is the still plus the paired video. An edited asset prefers the full-size unadjusted resource when PhotoKit has one. Adjustment data is kept as `{filename}.adjustment`. `PHImageManager.requestImage` is not used.
+- `mobile/ios` reads PhotoKit `PHAssetResource` originals. A Live Photo is the still plus the paired video. An edited asset prefers the full-size unadjusted resource when PhotoKit has one. An iCloud-optimized asset is downloaded with `isNetworkAccessAllowed`. If only a derivative is available, the export fails and logs that refusal. Adjustment data is kept as `{filename}.adjustment`. `PHImageManager.requestImage` is not used.
 - The package builds with `swift test` on a macOS runner. PhotoKit is present there.
 - The receiver password is stored in the Keychain.
-- Still open: an iOS 26.1 background upload extension, so new photos and videos leave the device without the app staying in the foreground. That target needs an Xcode project and a signing identity, which this package does not have.
+- Still open: an iOS 26.1 background upload extension, so new photos and videos leave the device without the app staying in the foreground. The scope is [docs/camera-roll-scope.md](docs/camera-roll-scope.md). That target needs an Xcode project and a signing identity, which this package does not have.
 - Still open: a host that requests PhotoKit access without a version that strips GPS.
 
 ### Android
 
-- `mobile/android` reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor`. The manifest requests `READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, and `ACCESS_MEDIA_LOCATION`. The host app still has to grant those at runtime. Without location permission, MediaStore removes GPS.
+- `mobile/android` reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor`. `requiredPermissions` is the media permissions on API 33 and newer, and `READ_EXTERNAL_STORAGE` on API 30 through 32, plus `ACCESS_MEDIA_LOCATION`. The library does not show the dialog. Without location permission, MediaStore removes GPS.
 - `CameraRollBackupWorker` schedules the backup with WorkManager while the device is idle and charging, so a killed process resumes the same queue.
 - A motion photo is one JPEG with the video still appended. The worker copies that file whole.
 - The receiver password is in Keystore-backed storage. WorkManager input does not contain it.
-- Still open: an application module and the runtime permission request.
+- Still open: an application module that requests those permissions. The flow is [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
 
 ## Connectors
 

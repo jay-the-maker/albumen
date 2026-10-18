@@ -13,7 +13,7 @@ public enum CameraRollBackup {
         scratch: URL,
         uploader: WebDavUploader
     ) async throws -> [VerifiedUpload] {
-        let items = OriginalResources.forAsset(asset)
+        let items = try OriginalResources.forAsset(asset)
         if items.isEmpty {
             throw UploadFailure.noOriginal
         }

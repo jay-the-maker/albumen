@@ -2,6 +2,7 @@
 
 package photos.albumen.backup
 
+import android.Manifest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -68,6 +69,28 @@ class UploadCheckTest {
         assertFalse(input.contains("KEY_PASSWORD"))
         assertFalse(input.contains("to password"))
         assertFalse(input.contains("\"$secret\""))
+    }
+
+    @Test
+    fun runtimePermissionsFollowTheSdk() {
+        assertEquals(
+            listOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.ACCESS_MEDIA_LOCATION,
+            ),
+            CameraRoll.requiredPermissions(33).toList(),
+        )
+        assertEquals(
+            listOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.ACCESS_MEDIA_LOCATION,
+            ),
+            CameraRoll.requiredPermissions(30).toList(),
+        )
+        assertFalse(
+            CameraRoll.requiredPermissions(34).contains(Manifest.permission.READ_EXTERNAL_STORAGE),
+        )
     }
 
     @Test

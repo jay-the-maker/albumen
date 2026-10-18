@@ -88,7 +88,7 @@ The SFTP host key is generated for that process. FTP passive mode advertises the
 
 ## Camera-roll backup
 
-`mobile/ios` and `mobile/android` are skeletons, not apps. iOS exports PhotoKit originals, including a Live Photo's paired video, and does not ask PhotoKit for a rendered preview. The receiver password is in the Keychain. Android opens MediaStore with `setRequireOriginal` and `ACCESS_MEDIA_LOCATION`, and WorkManager runs the backup while the device is idle and charging. The receiver password is in Keystore-backed storage, not in WorkManager input. Both upload with WebDAV and accept the copy only when `X-Albumen-Sha256` matches the client's SHA-256. The camera-roll item stays.
+`mobile/ios` and `mobile/android` are skeletons, not apps. iOS exports PhotoKit originals, including a Live Photo's paired video, and does not ask PhotoKit for a rendered preview. An iCloud-optimized asset is fetched with network access allowed. A derivative is not uploaded in its place; that failure is logged. The receiver password is in the Keychain. Android opens MediaStore with `setRequireOriginal` and `ACCESS_MEDIA_LOCATION`, and WorkManager runs the backup while the device is idle and charging. The receiver password is in Keystore-backed storage, not in WorkManager input. Both upload with WebDAV and accept the copy only when `X-Albumen-Sha256` matches the client's SHA-256. The camera-roll item stays. The background-upload extension and the Android permission dialog are scoped in [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
 
 ## Agents
 

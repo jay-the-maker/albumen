@@ -52,6 +52,48 @@ final class UploadCheckTests: XCTestCase {
         XCTAssertEqual(loaded.user, "camera")
     }
 
+    func testRemoteAssetDoesNotFallBackToADerivative() {
+        XCTAssertEqual(
+            OriginalPolicy.choose(role: .still, present: [.photo], isRemote: true),
+            .derivativeOnly(present: [.photo])
+        )
+        XCTAssertEqual(
+            OriginalPolicy.choose(role: .video, present: [.video], isRemote: true),
+            .derivativeOnly(present: [.video])
+        )
+        XCTAssertEqual(
+            OriginalPolicy.choose(role: .pairedVideo, present: [.pairedVideo], isRemote: true),
+            .derivativeOnly(present: [.pairedVideo])
+        )
+    }
+
+    func testFullSizeOriginalWinsAndALocalPhotoCanStandAlone() {
+        XCTAssertEqual(
+            OriginalPolicy.choose(
+                role: .still,
+                present: [.photo, .fullSizePhoto],
+                isRemote: true
+            ),
+            .use(.fullSizePhoto)
+        )
+        XCTAssertEqual(
+            OriginalPolicy.choose(role: .still, present: [.adjustmentBasePhoto], isRemote: true),
+            .use(.adjustmentBasePhoto)
+        )
+        XCTAssertEqual(
+            OriginalPolicy.choose(role: .still, present: [.photo], isRemote: false),
+            .use(.photo)
+        )
+        XCTAssertEqual(
+            OriginalPolicy.choose(role: .video, present: [.fullSizeVideo, .video], isRemote: true),
+            .use(.fullSizeVideo)
+        )
+        XCTAssertEqual(
+            OriginalPolicy.choose(role: .pairedVideo, present: [.fullSizePairedVideo], isRemote: true),
+            .use(.fullSizePairedVideo)
+        )
+    }
+
     func testSourceMtimeHeaderIsUnixSeconds() {
         let date = Date(timeIntervalSince1970: 1_000_000_000)
         XCTAssertEqual(SourceMtime.headerValue(modificationDate: date), "1000000000")
