@@ -3,6 +3,9 @@
 <!-- What changed, and why. -->
 
 - [ ] I have read DESIGN_PHILOSOPHY.md and this change upholds it
+- [ ] Sane defaults
+- [ ] No account required
+- [ ] No nags
 
 ## How this upholds it
 

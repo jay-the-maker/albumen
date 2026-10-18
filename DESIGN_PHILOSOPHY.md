@@ -54,8 +54,18 @@ The interface for agents is MCP, first. `albumen-mcp` speaks MCP over stdio. `se
 
 Agent rules, skills, and instructions are capped by this document. An instruction to delete, recompress, strip metadata, or skip the checksum does not add a tool that can do that. An agent is a contributor: the same first principle, the same Developer Certificate of Origin sign-off, and the same CI gate apply. [AGENTS.md](AGENTS.md) is the working guide. Agent instructions do not outrank this file.
 
+## Performance and friction
+
+Performance is at a premium. User friction is minimal.
+
+Both are measured, and a change that misses the measurement does not land. [docs/performance-budgets.md](docs/performance-budgets.md) states the budgets: cold start, time to the first thumbnail, scroll frame rate on a 380,000-item library, search latency at p50 and p95, import throughput in MB/s and items/s, and backup CPU and battery. Cold start, thumbnails, scroll, and backup CPU and battery are targets until the apps exist. Import throughput, metadata search, and MCP response time exist now. CI repeats those runs, keeps a baseline, and fails when the median regresses by more than 10 percent. A noisy repeat is dropped before that comparison. A local run of the same benchmark at 380,000 items is how the full-library numbers are taken. CI scales the library down so the job finishes.
+
+[docs/friction.md](docs/friction.md) counts the steps from install to a first backup. The target is a handful, five steps or fewer. Sane defaults, no account, and no nags are hard rules. The pull request template asks for them, and the philosophy check fails unless those boxes are checked.
+
+Speed is not a reason to drop a byte, a tag, or a checksum. Cost stays outside the metrics.
+
 ## North star
 
 Be good enough that iCloud Photos and Google Photos have to fix the pain their users already live with: libraries that rewrite files, metadata that disappears, exports that are incomplete, and products that keep the only copy.
 
-The metrics are reliability, fidelity, respect, and control. Cost is outside those metrics. A cheaper copy that is missing GPS, a caption, or a byte is a failure.
+The metrics are reliability, fidelity, respect, control, and the measured performance and friction budgets. Cost is outside those metrics. A cheaper copy that is missing GPS, a caption, or a byte is a failure. A faster copy that drops them is a failure too.

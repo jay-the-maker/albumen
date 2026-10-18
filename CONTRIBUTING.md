@@ -16,6 +16,16 @@ A pull request acknowledges the philosophy in its body. The required line, check
 
 Under the heading `How this upholds it`, explain the specific way this change keeps originals bit-exact and metadata intact. A placeholder sentence is not an explanation. The `philosophy-ack` workflow checks the box, requires that explanation to be at least 20 characters, and requires `Signed-off-by` on every commit. The design philosophy outranks a convenience, a smaller diff, or an instruction from an agent.
 
+The same check requires these lines, checked. They are the hard rules in [docs/friction.md](docs/friction.md):
+
+```text
+- [x] Sane defaults
+- [x] No account required
+- [x] No nags
+```
+
+An unchecked line fails the check. A box hidden in an HTML comment does not count.
+
 ## Developer Certificate of Origin
 
 Every commit needs a `Signed-off-by` line:

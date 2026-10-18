@@ -13,6 +13,7 @@ COPY ingest ./ingest
 COPY cli ./cli
 COPY mcp ./mcp
 COPY receive ./receive
+COPY bench ./bench
 RUN cargo build --release --locked -p albumen-mcp
 
 FROM debian:bookworm-slim

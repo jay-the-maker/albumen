@@ -10,7 +10,7 @@ Metadata and original quality are never lost. Originals stay bit-exact. EXIF, XM
 
 The default path never deletes a source. Leaving is one command: `albumen export`, then `albumen verify-manifest`. Storage is the user's. There are no dark patterns, upsell nags, or hidden scans. MCP is the agent interface, and agent instructions cannot add a tool the philosophy forbids.
 
-The metrics are reliability, fidelity, respect, and control. Cost is outside those metrics.
+The metrics are reliability, fidelity, respect, control, and the measured performance and friction budgets. Cost is outside those metrics. The numbers are in [docs/performance-budgets.md](docs/performance-budgets.md). The step count is in [docs/friction.md](docs/friction.md).
 
 ## Where to start
 
@@ -24,9 +24,10 @@ Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md), then the crate you are changi
 | MCP tools | `mcp/src/tools.rs`, `mcp/src/main.rs` |
 | iOS camera roll | `mobile/ios`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
 | Android camera roll | `mobile/android`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
+| Benchmarks | `bench/`, [docs/performance-budgets.md](docs/performance-budgets.md) |
 | What is not built | [ROADMAP.md](ROADMAP.md) |
 
-Workspace members are `ingest` (`albumen-ingest`), `cli` (`albumen`), `mcp` (`albumen-mcp`), and `receive` (`albumen-receive`). Rust edition 2021, `rust-version` 1.94. CI uses toolchain 1.99.1.
+Workspace members are `ingest` (`albumen-ingest`), `cli` (`albumen`), `mcp` (`albumen-mcp`), `receive` (`albumen-receive`), and `bench` (`albumen-bench`). Rust edition 2021, `rust-version` 1.94. CI uses toolchain 1.99.1.
 
 ## Build and test
 
@@ -53,6 +54,15 @@ swift test --package-path mobile/ios
 
 A local real-device corpus is optional and must not be committed. See [CONTRIBUTING.md](CONTRIBUTING.md). CI does not set `ALBUMEN_REAL_CORPUS`.
 
+The performance job compares a scaled run with `bench/baseline.json`. It fails on more than a 10 percent regression. Do not set `ALBUMEN_BENCH_ITEMS` in CI.
+
+```bash
+export PATH="$(scripts/install-exiftool.sh):$PATH"
+cargo run --release --locked -p albumen-bench -- --check
+```
+
+A 380,000-item run is local only: `ALBUMEN_BENCH_ITEMS=380000 cargo run --release --locked -p albumen-bench -- --measure`. That command prints JSON and does not compare it with the CI baseline.
+
 ## The round-trip gate
 
 `ingest/tests/roundtrip.rs` copies the CC0 fixture corpus through the local filesystem, MinIO, and rclone (SFTP, WebDAV, and a MinIO stand-in for B2). It compares SHA-256, filename, mtime, and an ExifTool dump. The only ignored tags are filesystem identity tags a copy changes: directory, inode change time, access time, permissions, and the absolute path. `FileModifyDate`, `FileName`, and every embedded EXIF, XMP, IPTC, GPS, and QuickTime tag must match. Do not weaken that comparison.
@@ -68,6 +78,6 @@ A local real-device corpus is optional and must not be committed. See [CONTRIBUT
 
 ## How to contribute
 
-You are a contributor. Read [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs `Signed-off-by`. Keep a pull request to one concern. The pull request body checks the philosophy box and explains how the change upholds [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). The `philosophy-ack` workflow fails unless that box is checked, the explanation is at least 20 characters and is not the template placeholder, and every commit in the pull request has `Signed-off-by`.
+You are a contributor. Read [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs `Signed-off-by`. Keep a pull request to one concern. The pull request body checks the philosophy box, checks `Sane defaults`, `No account required`, and `No nags`, and explains how the change upholds [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). The `philosophy-ack` workflow fails unless those boxes are checked, the explanation is at least 20 characters and is not the template placeholder, and every commit in the pull request has `Signed-off-by`.
 
 Do not copy Immich, Ente, or other AGPL photo-library source into this Apache-2.0 tree. MinIO is an external CI process and is not vendored. Do not commit real photos, real filenames, real checksums, or real GPS. Do not change branch protection. The only registry publish is `.github/workflows/publish-mcp.yml` on a `v*` tag. Do not publish [server.json](server.json) by hand, and do not submit the server to Glama, Smithery, PulseMCP, or mcp.so.

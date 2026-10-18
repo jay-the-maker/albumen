@@ -98,3 +98,20 @@ jobs:
           docker image inspect albumen-mcp:ci --format '{{index .Config.Labels "io.modelcontextprotocol.server.name"}}' | grep -Fxq 'io.github.jay-the-maker/albumen'
           docker image inspect albumen-mcp:ci --format '{{json .Config.Entrypoint}}' | grep -Fxq '["albumen-mcp","--library","/library"]'
           docker run --rm --entrypoint exiftool albumen-mcp:ci -ver
+
+  bench:
+    name: performance regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
+
+      - name: Compare the scaled run with the stored baseline
+        run: cargo run --release --locked -p albumen-bench -- --check

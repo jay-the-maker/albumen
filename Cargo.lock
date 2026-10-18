@@ -55,6 +55,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "albumen-bench"
+version = "0.1.0"
+dependencies = [
+ "albumen-ingest",
+ "albumen-mcp",
+ "serde_json",
+]
+
+[[package]]
 name = "albumen-ingest"
 version = "0.1.0"
 dependencies = [
