@@ -10,7 +10,6 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
 /**
@@ -24,7 +23,7 @@ class CameraRollBackupWorker(
     override suspend fun doWork(): Result {
         val endpoint = inputData.getString(KEY_ENDPOINT) ?: return Result.failure()
         val user = inputData.getString(KEY_USER) ?: return Result.failure()
-        val password = inputData.getString(KEY_PASSWORD) ?: return Result.failure()
+        val password = ReceiverPasswordStore.read(applicationContext) ?: return Result.failure()
         val uploader = WebDavUploader(endpoint, user, password)
         val items = try {
             CameraRoll.list(applicationContext.contentResolver)
@@ -61,14 +60,13 @@ class CameraRollBackupWorker(
         const val UNIQUE_NAME = "albumen-camera-roll"
         const val KEY_ENDPOINT = "endpoint"
         const val KEY_USER = "user"
-        const val KEY_PASSWORD = "password"
 
         /**
-         * Run while the device is idle and charging. The password is stored in
-         * WorkManager's local database for this skeleton; a later app should
-         * use the credential store.
+         * Run while the device is idle and charging. The password is written to
+         * [ReceiverPasswordStore] and is not part of the WorkManager input.
          */
         fun enqueue(context: Context, endpoint: String, user: String, password: String) {
+            ReceiverPasswordStore.save(context, password)
             val constraints = Constraints.Builder()
                 .setRequiresCharging(true)
                 .setRequiresDeviceIdle(true)
@@ -76,13 +74,7 @@ class CameraRollBackupWorker(
                 .build()
             val request = PeriodicWorkRequestBuilder<CameraRollBackupWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(constraints)
-                .setInputData(
-                    workDataOf(
-                        KEY_ENDPOINT to endpoint,
-                        KEY_USER to user,
-                        KEY_PASSWORD to password,
-                    ),
-                )
+                .setInputData(backupInput(endpoint, user, password))
                 .build()
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 UNIQUE_NAME,
