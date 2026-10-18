@@ -8,9 +8,10 @@
 //!
 //! GitHub-hosted runners differ by more than 10 percent from job to job, so
 //! the gate does not compare raw MB/s or milliseconds with a laptop. Each
-//! repeat also times a same-run reference: a plain fsynced copy, one ExifTool read,
-//! one SHA-256 pass, and one directory walk. Throughput is Albumen's MB/s
-//! divided by the plain copy. Latency is the reference time divided by
+//! repeat also times a same-run reference that does the same kind of work:
+//! hash plus an fsynced copy, one ExifTool read, a stat-and-hash pass, and a
+//! directory walk that builds a line per file. Throughput is Albumen's MB/s
+//! divided by the reference copy. Latency is the reference time divided by
 //! Albumen's time. Higher is better, and the score fails when it drops by
 //! more than 10 percent. Raw MB/s and milliseconds are still reported.
 
@@ -58,11 +59,11 @@ pub struct Report {
     pub copy_verify_vs_plain: f64,
     /// ExifTool's own read time divided by cold search time.
     pub search_cold_vs_exif: f64,
-    /// One SHA-256 pass divided by warm search p50.
+    /// Stat-and-hash pass divided by warm search p50.
     pub search_warm_p50_vs_hash: f64,
-    /// One SHA-256 pass divided by warm search p95.
+    /// Stat-and-hash pass divided by warm search p95.
     pub search_warm_p95_vs_hash: f64,
-    /// A directory walk divided by browse p50.
+    /// Directory walk divided by browse p50.
     pub browse_vs_walk: f64,
 }
 
@@ -270,13 +271,13 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
         let (p50, p95) = warm_search(&library_handle, &search_args)?;
         warm_p50.push(p50);
         warm_p95.push(p95);
-        let hash_ms = hash_pass_ms(&library, &relative)?;
+        let hash_ms = search_reference_ms(&library, &relative)?;
         warm_p50_ratio.push(ratio(hash_ms, p50)?);
         warm_p95_ratio.push(ratio(hash_ms, p95)?);
 
         let browse_ms = warm_browse(&library_handle, &browse_args)?;
         browse_p50.push(browse_ms);
-        let walk_ms = walk_ms(&library)?;
+        let walk_ms = browse_reference_ms(&library)?;
         browse_ratio.push(ratio(walk_ms, browse_ms)?);
     }
 
@@ -380,6 +381,8 @@ fn plain_copy_mb_s(sources: &[PathBuf], dest: &Path) -> Result<f64, String> {
     let started = Instant::now();
     let mut bytes = 0u64;
     for source in sources {
+        let digest = sha256_hex(source).map_err(|err| err.to_string())?;
+        black_box(digest);
         let name = source
             .file_name()
             .ok_or_else(|| format!("missing file name {}", source.display()))?;
@@ -399,29 +402,34 @@ fn plain_copy_mb_s(sources: &[PathBuf], dest: &Path) -> Result<f64, String> {
     Ok((bytes as f64) / 1_000_000.0 / seconds)
 }
 
-fn hash_pass_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
+fn search_reference_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
     let started = Instant::now();
+    let mut lines = Vec::with_capacity(relative.len());
     for name in relative {
-        let digest = sha256_hex(&root.join(name)).map_err(|err| err.to_string())?;
-        black_box(digest);
+        let path = root.join(name);
+        let len = fs::metadata(&path)
+            .map_err(|err| format!("stat {name}: {err}"))?
+            .len();
+        let digest = sha256_hex(&path).map_err(|err| err.to_string())?;
+        lines.push(format!("{name} {len} {digest}"));
     }
+    black_box(lines);
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
-fn walk_ms(root: &Path) -> Result<f64, String> {
+fn browse_reference_ms(root: &Path) -> Result<f64, String> {
     let started = Instant::now();
-    let mut count = 0u64;
-    let mut bytes = 0u64;
+    let mut lines = Vec::new();
     for entry in fs::read_dir(root).map_err(|err| format!("walk library: {err}"))? {
         let entry = entry.map_err(|err| format!("walk library: {err}"))?;
         let len = entry
             .metadata()
             .map_err(|err| format!("stat {}: {err}", entry.path().display()))?
             .len();
-        bytes += len;
-        count += 1;
+        lines.push(format!("{} {len}", entry.file_name().to_string_lossy()));
     }
-    black_box((count, bytes));
+    lines.sort();
+    black_box(lines);
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 

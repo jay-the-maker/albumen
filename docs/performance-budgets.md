@@ -47,19 +47,19 @@ The report always prints raw rates and latencies: `copy_verify_mb_s` and `copy_v
 
 Those raw numbers are not the CI gate. Two `ubuntu-24.04` runners can differ by more than 10 percent on the same commit, which is machine noise, not a code change. Each repeat also times a reference on that same machine:
 
-- a plain copy of the same bytes, fsynced, without hashing or reading the destination back
+- a SHA-256 of each source, then an fsynced copy that does not read the destination back
 - one ExifTool read of the same library
-- one SHA-256 pass over the same files
-- one directory walk that stats every file
+- a stat, a SHA-256, and a formatted line for every library file
+- a directory walk that stats every file, formats a line, and sorts those lines
 
 The gated fields are Albumen divided into that reference. Higher is better. A slower Albumen lowers the ratio even when the runner is faster or slower than the last job.
 
 | Field | Ratio |
 | --- | --- |
-| `copy_verify_vs_plain` | `copy_verify` MB/s ÷ plain-copy MB/s |
+| `copy_verify_vs_plain` | `copy_verify` MB/s ÷ reference copy MB/s |
 | `search_cold_vs_exif` | ExifTool read time ÷ cold search time |
-| `search_warm_p50_vs_hash` | SHA-256 pass ÷ warm search p50 |
-| `search_warm_p95_vs_hash` | SHA-256 pass ÷ warm search p95 |
+| `search_warm_p50_vs_hash` | stat-and-hash pass ÷ warm search p50 |
+| `search_warm_p95_vs_hash` | stat-and-hash pass ÷ warm search p95 |
 | `browse_vs_walk` | directory walk ÷ browse p50 |
 
 `--check` reads the baseline first and refuses to compare a different `search_items`, `copy_files`, or `copy_bytes_each`. A 380,000-item run must not be checked against this file.
