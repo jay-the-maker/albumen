@@ -14,20 +14,27 @@ concurrency:
 
 jobs:
   ingest:
-    name: ingest round-trip
-    runs-on: ubuntu-latest
+    name: ingest round-trip (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest moves to Ubuntu 26.04 starting 2026-10-19.
+        # 24.04 is the pinned image. 26.04 stays in the matrix only while
+        # that leg is green.
+        os: [ubuntu-24.04, ubuntu-26.04]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
 
-      - name: Install ExifTool
-        run: sudo apt-get update && sudo apt-get install -y libimage-exiftool-perl
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
 
       - name: Check formatting
         run: cargo fmt --all -- --check

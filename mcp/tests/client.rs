@@ -386,3 +386,48 @@ fn enabled_export_to_s3_verifies_and_leaves_the_library() {
     assert_eq!(snapshot(&library.join("frame.jpg")), kept);
     client.close();
 }
+
+#[test]
+fn quarantine_is_unreachable_from_the_mcp_server() {
+    let root = tempfile::tempdir().unwrap();
+    let library = root.path().join("library");
+    fs::create_dir(&library).unwrap();
+    let source = library.join("IMG_0001.jpg");
+    fs::write(&source, b"jpeg-bytes").unwrap();
+    let kept = snapshot(&source);
+    let trash = root.path().join("trash");
+
+    for extra in [&[][..], &["--enable-export", "--enable-upload"][..]] {
+        let mut client = Client::start(&library, extra);
+        handshake(&mut client);
+        let names = tool_names(&client.request(2, "tools/list", json!({})));
+        assert!(
+            !names.iter().any(|name| name.contains("quarantine")),
+            "{extra:?} offers {names:?}"
+        );
+        for (id, tool) in [(3, "quarantine"), (4, "copy_verify_quarantine")] {
+            let (is_error, body) = tool_body(&client.request(
+                id,
+                "tools/call",
+                json!({
+                    "name": tool,
+                    "arguments": {
+                        "path": source.display().to_string(),
+                        "trash": trash.display().to_string()
+                    }
+                }),
+            ));
+            assert!(is_error, "{extra:?} {tool}: {body}");
+            assert!(
+                body.as_str()
+                    .unwrap()
+                    .contains("copy_verify_quarantine is not a default path"),
+                "{extra:?} {tool}: {body}"
+            );
+        }
+        client.close();
+        assert_eq!(snapshot(&source), kept);
+        assert!(!trash.exists());
+        assert!(source.is_file());
+    }
+}
