@@ -15,23 +15,27 @@ This is the outline of the system. Only the ingest crate exists today. The rest 
 | Fixture corpus and MinIO round-trip CI | Here |
 | Catalog / search index | Not started |
 | macOS, iOS, and Android apps | Not started |
-| MCP server | Not started |
+| MCP server (search, browse, export, upload/ingest) | Not started |
+| Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | Not started |
+| Export-everything command | Not started |
 | rclone-backed SMB, SFTP, WebDAV, B2 | Not started |
 
 ## Shape
 
 ```text
-macOS app ─┐
-iOS app  ──┼─► albumen-ingest ─► BlobStore ─► local disk / S3 / (later) rclone
-Android  ──┘         │
-                     ▼
-              originals + sidecars + edit files
-                     │
-                     ▼
-              catalog (rebuildable, not the source of truth)
-                     │
-                     ▼
-              MCP server, read-only by default
+macOS app ──────────────┐
+iOS / Android backup ───┤
+camera FTP/SFTP/WebDAV ─┼─► albumen-ingest copy_verify ─► BlobStore
+USB / tethered import ──┤         │                        local / S3 / rclone
+MCP upload (opt-in) ────┘         ▼
+                          originals + sidecars + edit files
+                                  │
+                                  ▼
+                          catalog (rebuildable)
+                                  │
+                                  ▼
+                          MCP: search, browse, export
+                          upload/ingest only if the user enables it
 ```
 
 The bytes on disk are the library. The catalog is a cache. If the catalog is deleted, it can be rebuilt by reading the originals. If an original is lost, nothing rebuilds it, so ingest is not allowed to risk it.
@@ -55,7 +59,7 @@ Android motion photos are one JPEG with an embedded video and XMP. They stay int
 
 ## Companions discovered today
 
-- Sidecars: `{stem}.xmp`, `{filename}.xmp`, and the same patterns for Apple `.aae`, either case.
+- Sidecars: `{stem}.xmp`, `{filename}.xmp`, and the same patterns for Apple `.aae` edit sidecars, either case. The `.aae` is an edit list, not a replacement for the still, and discovery copies the pair together.
 - Pairs, same stem, same directory:
   - still (JPEG, HEIC, PNG, TIFF, AVIF, WebP) with RAW
   - still with video (Live Photo)
@@ -63,6 +67,8 @@ Android motion photos are one JPEG with an embedded video and XMP. They stay int
   - video with still
 
 A non-UTF-8 name that looks like a pair is an error, not a skip. Skipping would drop a companion.
+
+Android motion photos and Ultra HDR gain maps are one file each. The motion photo is a JPEG with an MP4 after the EOI and XMP offsets that point at that trailer. The Ultra HDR JPEG carries an ICC profile, gain-map XMP, and a second JPEG in an MPF segment. Discovery does not split them. The byte-exact copy is what keeps the trailer, the profile, and the gain map. The CI corpus round-trips both, plus an `.aae` sidecar.
 
 ## Storage
 
@@ -91,9 +97,24 @@ The future catalog stores ids, paths, filenames, mtimes, SHA-256, and extracted 
 
 iCloud is import-only. A user can copy photos out of iCloud into the library. Albumen does not write back into iCloud Photos, because that path rewrites containers and does not promise bit-exact originals.
 
+## Camera to cloud
+
+Phone camera rolls are not the only ingest path. Dedicated cameras deliver RAW and video the same way, through `copy_verify`.
+
+- Wireless. A camera uploads each finished file to an FTP, SFTP, WebDAV, or S3 endpoint (the usual "FTP upload" mode on a body, or a card that writes to a share). Albumen accepts the file only after the upload is complete, then ingests it. A partial file is not reported done. The filename the camera sent is the filename stored. JPEG, RAW, and video share this path.
+- Tethered. USB import, whether PTP/MTP or a mounted card, copies each selected file with `copy_verify`. Ingest does not erase the card.
+
+Both paths refuse to overwrite an existing original. Success is the verified destination, not the moment the socket closed.
+
 ## Agents
 
-The MCP server, when it exists, exposes read tools: list, search, describe metadata, export a copy to a path the user chose. Export is `copy_verify` out of the library, not a move. There is no delete tool. There is no "fix the JPEG" tool. Turning on a write capability is an explicit second server or an explicit opt-in, and even then it cannot overwrite or recompress an original.
+The MCP server covers search, browse, export, and upload/ingest.
+
+Read tools are the default: search the catalog, browse by time and place, read metadata, and export a copy to a path the user chose. Export is `copy_verify` out of the library. It is not a move, and it is not a delete.
+
+Upload and ingest are write tools. They stay off until the user explicitly enables them. A write calls `copy_verify` and reports success only after the destination hash and mtime have been checked. It never overwrites an existing original, and it never recompresses one.
+
+There is no delete tool in the default set or in the enabled write set. There is no tool that rewrites an original in place.
 
 ## Scale
 
@@ -122,7 +143,7 @@ The macOS and iOS apps will be Swift, and the Android app will be Kotlin. The pi
 
 GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` against a pinned MinIO binary (`RELEASE.2025-09-07T16-13-09Z`). MinIO is AGPL. The workflow downloads it and runs it; the Albumen tree does not contain MinIO source. The S3 credentials in CI are fixed test strings (`albumen` / `albumen-ci-not-a-secret`) for a server that exists only for that job.
 
-The fixture corpus is synthetic and CC0. Tests compare each file with itself after a round trip. They do not depend on a checked-in ExifTool golden file, so an ExifTool upgrade that changes formatting still compares equal as long as both sides are read by the same binary.
+The fixture corpus is synthetic and CC0. It includes a Motion Photo (JPEG plus appended MP4), an Apple `.aae` edit sidecar, and an Ultra HDR JPEG with a synthetic ICC profile and an MPF gain map, along with the earlier GPS, HEIC, RAW+JPEG, XMP, Live Photo, and video files. Tests compare each file with itself after a round trip. They do not depend on a checked-in ExifTool golden file, so an ExifTool upgrade that changes formatting still compares equal as long as both sides are read by the same binary.
 
 ## AGPL boundary
 

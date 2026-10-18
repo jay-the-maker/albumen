@@ -60,7 +60,11 @@ Fixture provenance and the CC0 dedication are in [fixtures/README.md](fixtures/R
 
 ## Agents
 
-The future MCP server is read-only by default: search, describe, and export a copy. It does not ship a delete tool, and it does not ship a tool that rewrites an original. Ingest is a separate, explicit action.
+The MCP server covers search, browse, export, and upload/ingest. Read tools are the default. Upload and ingest stay off until the user enables them, and both go through `copy_verify`: the call reports done only after the destination verifies, and it never overwrites an original. There is no delete tool. Details are in [docs/architecture.md](docs/architecture.md). What is not built yet is listed in [ROADMAP.md](ROADMAP.md).
+
+## Support
+
+Buy Me a Coffee: coming soon. No page exists yet.
 
 ## Not Immich, and not Ente
 

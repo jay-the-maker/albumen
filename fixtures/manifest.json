@@ -29,6 +29,21 @@
       "id": "video",
       "primary": "video/IMG_0006.mp4",
       "companions": []
+    },
+    {
+      "id": "motion-photo",
+      "primary": "motion-photo/IMG_0007.jpg",
+      "companions": []
+    },
+    {
+      "id": "aae",
+      "primary": "aae/IMG_0008.jpg",
+      "companions": ["aae/IMG_0008.aae"]
+    },
+    {
+      "id": "ultra-hdr",
+      "primary": "ultra-hdr/IMG_0009.jpg",
+      "companions": []
     }
   ]
 }

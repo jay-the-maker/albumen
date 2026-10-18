@@ -332,6 +332,18 @@ mod tests {
     }
 
     #[test]
+    fn discovers_apple_edit_sidecar() {
+        let tmp = Tmp::new();
+        let dir = tmp.path();
+        touch(dir, "IMG_0008.jpg");
+        touch(dir, "IMG_0008.aae");
+        let asset = discover(&dir.join("IMG_0008.jpg")).unwrap();
+        assert_eq!(asset.files().len(), 2);
+        assert_eq!(asset.files()[1].role, Role::Sidecar);
+        assert_eq!(asset.files()[1].path.file_name().unwrap(), "IMG_0008.aae");
+    }
+
+    #[test]
     fn rejects_path_components_in_names() {
         let err = check_filename("../secret.jpg").unwrap_err();
         assert!(matches!(err, IngestError::UnsafeFilename { .. }));

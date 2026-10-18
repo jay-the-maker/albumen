@@ -17,10 +17,11 @@ need convert
 need exiftool
 need ffmpeg
 need heif-enc
+need python3
 need sha256sum
 
-rm -rf jpeg-gps heic raw-jpeg xmp live-photo video
-mkdir -p jpeg-gps heic raw-jpeg xmp live-photo video
+rm -rf jpeg-gps heic raw-jpeg xmp live-photo video motion-photo aae ultra-hdr
+mkdir -p jpeg-gps heic raw-jpeg xmp live-photo video motion-photo aae ultra-hdr
 
 echo "tool versions:"
 exiftool -ver
@@ -201,12 +202,83 @@ ffmpeg -y -hide_banner -loglevel error \
   -metadata comment="Synthetic CC0 video. Not a recording of a real scene." \
   video/IMG_0006.mp4
 
+# Android Motion Photo: JPEG with an MP4 appended after EOI. XMP carries
+# MicroVideoOffset and the Container MotionPhoto item length.
+convert -size 320x240 'xc:#335577' -strip -quality 90 motion-photo/base.jpg
+exiftool -overwrite_original \
+  -Make=Albumen \
+  -Model="Fixture Motion Photo" \
+  -Artist="Albumen Project" \
+  -Copyright="CC0-1.0" \
+  -DateTimeOriginal="2021:05:04 16:20:00" \
+  -CreateDate="2021:05:04 16:20:00" \
+  motion-photo/base.jpg >/dev/null
+ffmpeg -y -hide_banner -loglevel error \
+  -f lavfi -i "color=c=0x335577:s=160x120:d=1,format=yuv420p" \
+  -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 35 -an \
+  motion-photo/clip.mp4
+
+# Ultra HDR primary and a tiny grayscale gain map. assemble.py wraps them.
+convert -size 640x480 'xc:#E8D5A3' -strip -quality 90 ultra-hdr/base.jpg
+convert -size 32x24 'gradient:#202020-#e0e0e0' -colorspace gray -strip -quality 85 ultra-hdr/gain.jpg
+
+python3 "$ROOT/assemble.py" \
+  motion-photo/base.jpg motion-photo/clip.mp4 motion-photo/IMG_0007.jpg \
+  ultra-hdr/base.jpg ultra-hdr/gain.jpg ultra-hdr/IMG_0009.jpg
+rm -f motion-photo/base.jpg motion-photo/clip.mp4 ultra-hdr/base.jpg ultra-hdr/gain.jpg
+
+# Apple Photos edit sidecar. Non-destructive adjustments live beside the still.
+convert -size 320x240 'xc:#D4A017' -strip -quality 90 aae/IMG_0008.jpg
+exiftool -overwrite_original \
+  -Make=Albumen \
+  -Model="Fixture Camera" \
+  -Artist="Albumen Project" \
+  -Copyright="CC0-1.0" \
+  -DateTimeOriginal="2017:11:09 08:40:00" \
+  -CreateDate="2017:11:09 08:40:00" \
+  -ImageDescription="Synthetic CC0 JPEG paired with an Apple .aae edit sidecar." \
+  aae/IMG_0008.jpg >/dev/null
+cat > aae/IMG_0008.aae <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+ <key>adjustmentFormatIdentifier</key>
+ <string>com.apple.photo</string>
+ <key>adjustmentFormatVersion</key>
+ <integer>1</integer>
+ <key>adjustmentData</key>
+ <data>
+  AAE=
+ </data>
+ <key>adjustments</key>
+ <array>
+  <dict>
+   <key>identifier</key>
+   <string>com.apple.photo.adjustment.contrast</string>
+   <key>formatIdentifier</key>
+   <string>com.apple.photo</string>
+   <key>formatVersion</key>
+   <integer>1</integer>
+   <key>settings</key>
+   <dict>
+    <key>inputContrast</key>
+    <real>0.35</real>
+    <key>inputBrightness</key>
+    <real>0.10</real>
+   </dict>
+  </dict>
+ </array>
+</dict>
+</plist>
+EOF
+
 # Drop generator leftovers exiftool may leave behind.
 find . -name '*_original' -delete
 
 (
   cd "$ROOT"
-  find jpeg-gps heic raw-jpeg xmp live-photo video -type f ! -name 'src.png' -print0 \
+  find jpeg-gps heic raw-jpeg xmp live-photo video motion-photo aae ultra-hdr -type f ! -name 'src.png' -print0 \
     | sort -z \
     | xargs -0 sha256sum
 ) > SHA256SUMS

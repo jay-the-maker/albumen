@@ -6,5 +6,6 @@ fixtures/**/*.dng binary
 fixtures/**/*.mov binary
 fixtures/**/*.mp4 binary
 fixtures/**/*.xmp text eol=lf
+fixtures/**/*.aae text eol=lf
 fixtures/SHA256SUMS text eol=lf
 fixtures/manifest.json text eol=lf
