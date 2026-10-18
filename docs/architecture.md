@@ -2,9 +2,9 @@
 
 **First principle: metadata and original quality are never lost.**
 
-Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy and every move is checked with SHA-256 and fails loudly on mismatch.
+Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy is checked with SHA-256 and fails loudly on mismatch. The default path does not move or delete a source.
 
-This is the outline of the system. Only the ingest crate exists today. The rest is the shape later crates have to fit.
+This is the outline of the system. The ingest crate, the export command, and the stdio MCP skeleton exist today. The rest is the shape later crates have to fit.
 
 ## Status
 
@@ -15,7 +15,7 @@ This is the outline of the system. Only the ingest crate exists today. The rest 
 | Fixture corpus and MinIO round-trip CI | Here |
 | Catalog / search index | Not started |
 | macOS, iOS, and Android apps | Not started |
-| MCP server (search, browse, export, upload/ingest) | Not started |
+| MCP server (`albumen-mcp`, stdio) | Here |
 | Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | Not started |
 | Export-everything command (`albumen export`) | Here |
 | rclone-backed SMB, SFTP, WebDAV, B2 | Not started |

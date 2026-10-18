@@ -75,7 +75,14 @@ Fixture provenance and the CC0 dedication are in [fixtures/README.md](fixtures/R
 
 ## Agents
 
-The MCP server covers search, browse, export, and upload/ingest. Read tools are the default. Upload and ingest stay off until the user enables them, and both go through `copy_verify`: the call reports done only after the destination verifies, and it never overwrites an original. There is no delete tool. Details are in [docs/architecture.md](docs/architecture.md). What is not built yet is listed in [ROADMAP.md](ROADMAP.md).
+`albumen-mcp` speaks MCP over stdio. Search and browse are available immediately. Export and upload are not, until that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. There is no delete tool.
+
+```bash
+albumen-mcp --library ./library
+albumen-mcp --library ./library --enable-export --enable-upload
+```
+
+Details are in [docs/architecture.md](docs/architecture.md). What is not built yet is listed in [ROADMAP.md](ROADMAP.md).
 
 ## Support
 
