@@ -14,8 +14,9 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 
 use crate::checksum::{sha256_file, to_hex};
-use crate::discover::check_filename;
+use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
+use crate::export::{check_relative, source_fingerprint, ExportDest, Placed};
 use crate::local::finalize_verified;
 use crate::mtime::{from_unix_nanos_string, mtime_of, to_unix_nanos_string};
 use crate::store::{BlobStore, VerifiedObject};
@@ -145,94 +146,7 @@ impl S3Store {
 impl BlobStore for S3Store {
     fn put_verified(&self, source: &Path, filename: &str) -> Result<VerifiedObject, IngestError> {
         check_filename(filename)?;
-        if !source.is_file() {
-            return Err(IngestError::NotAFile(source.to_path_buf()));
-        }
-        let actual = crate::discover::file_name_str(source)?;
-        if actual != filename {
-            return Err(IngestError::FilenameMismatch {
-                source_name: actual,
-                requested: filename.to_string(),
-            });
-        }
-        let mtime = mtime_of(source)?;
-        let expected = sha256_file(source)?;
-        let expected_hex = to_hex(&expected);
-        let mtime_string = to_unix_nanos_string(mtime);
-        let key = self.key(filename);
-        let len = fs::metadata(source)
-            .map_err(|err| IngestError::io(source, err))?
-            .len();
-
-        self.block_on(async {
-            if self.object_exists(&key).await? {
-                return Err(IngestError::AlreadyExists {
-                    filename: filename.to_string(),
-                    destination: self.destination(&key),
-                });
-            }
-            let body = ByteStream::from_path(source)
-                .await
-                .map_err(|err| IngestError::store("read", filename, err))?;
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(&key)
-                .content_length(i64::try_from(len).unwrap_or(i64::MAX))
-                .content_type("application/octet-stream")
-                .metadata(MTIME_META, &mtime_string)
-                .metadata(SHA_META, &expected_hex)
-                .body(body)
-                .send()
-                .await
-                .map_err(|err| IngestError::store("put", filename, err))?;
-
-            let head = self
-                .client
-                .head_object()
-                .bucket(&self.bucket)
-                .key(&key)
-                .send()
-                .await
-                .map_err(|err| IngestError::store("head", filename, err))?;
-            let meta = head.metadata().cloned().unwrap_or_default();
-            if meta.get(MTIME_META) != Some(&mtime_string)
-                || meta.get(SHA_META) != Some(&expected_hex)
-            {
-                self.delete_object(&key).await?;
-                return Err(IngestError::MissingObjectMetadata {
-                    key: key.clone(),
-                    field: "albumen-mtime-ns or albumen-sha256 was not stored".to_string(),
-                });
-            }
-
-            let downloaded = self.download_to_temp(&key, filename).await?;
-            let actual = match sha256_file(&downloaded) {
-                Ok(hash) => hash,
-                Err(err) => {
-                    let _ = fs::remove_file(&downloaded);
-                    self.delete_object(&key).await?;
-                    return Err(err);
-                }
-            };
-            let _ = fs::remove_file(&downloaded);
-            if actual != expected {
-                let removed = self.delete_object(&key).await.is_ok();
-                return Err(IngestError::checksum_mismatch(
-                    filename,
-                    expected_hex,
-                    to_hex(&actual),
-                    self.destination(&key),
-                    removed,
-                ));
-            }
-            Ok(VerifiedObject {
-                filename: filename.to_string(),
-                sha256: expected_hex,
-                byte_len: len,
-                mtime,
-            })
-        })
+        self.write_new(source, filename)
     }
 
     fn get_verified(&self, filename: &str, dest_dir: &Path) -> Result<VerifiedObject, IngestError> {
@@ -305,6 +219,143 @@ impl BlobStore for S3Store {
 }
 
 impl S3Store {
+    fn write_new(&self, source: &Path, key_suffix: &str) -> Result<VerifiedObject, IngestError> {
+        if !source.is_file() {
+            return Err(IngestError::NotAFile(source.to_path_buf()));
+        }
+        let source_name = file_name_str(source)?;
+        let last = key_suffix.rsplit('/').next().unwrap_or(key_suffix);
+        if source_name != last {
+            return Err(IngestError::FilenameMismatch {
+                source_name,
+                requested: key_suffix.to_string(),
+            });
+        }
+        let mtime = mtime_of(source)?;
+        let expected = sha256_file(source)?;
+        let expected_hex = to_hex(&expected);
+        let mtime_string = to_unix_nanos_string(mtime);
+        let key = self.key(key_suffix);
+        let len = fs::metadata(source)
+            .map_err(|err| IngestError::io(source, err))?
+            .len();
+        let display = key_suffix.to_string();
+
+        self.block_on(async {
+            if self.object_exists(&key).await? {
+                return Err(IngestError::AlreadyExists {
+                    filename: display.clone(),
+                    destination: self.destination(&key),
+                });
+            }
+            let body = ByteStream::from_path(source)
+                .await
+                .map_err(|err| IngestError::store("read", &display, err))?;
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .content_length(i64::try_from(len).unwrap_or(i64::MAX))
+                .content_type("application/octet-stream")
+                .metadata(MTIME_META, &mtime_string)
+                .metadata(SHA_META, &expected_hex)
+                .body(body)
+                .send()
+                .await
+                .map_err(|err| IngestError::store("put", &display, err))?;
+
+            let head = self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|err| IngestError::store("head", &display, err))?;
+            let meta = head.metadata().cloned().unwrap_or_default();
+            if meta.get(MTIME_META) != Some(&mtime_string)
+                || meta.get(SHA_META) != Some(&expected_hex)
+            {
+                self.delete_object(&key).await?;
+                return Err(IngestError::MissingObjectMetadata {
+                    key: key.clone(),
+                    field: "albumen-mtime-ns or albumen-sha256 was not stored".to_string(),
+                });
+            }
+
+            let downloaded = self.download_to_temp(&key, &display).await?;
+            let actual = match sha256_file(&downloaded) {
+                Ok(hash) => hash,
+                Err(err) => {
+                    let _ = fs::remove_file(&downloaded);
+                    self.delete_object(&key).await?;
+                    return Err(err);
+                }
+            };
+            let _ = fs::remove_file(&downloaded);
+            if actual != expected {
+                let removed = self.delete_object(&key).await.is_ok();
+                return Err(IngestError::checksum_mismatch(
+                    &display,
+                    expected_hex,
+                    to_hex(&actual),
+                    self.destination(&key),
+                    removed,
+                ));
+            }
+            Ok(VerifiedObject {
+                filename: display,
+                sha256: expected_hex,
+                byte_len: len,
+                mtime,
+            })
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn object_etag(&self, relative: &str) -> Result<String, IngestError> {
+        check_relative(relative)?;
+        let key = self.key(relative);
+        self.block_on(async {
+            let head = self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|err| IngestError::store("head", relative, err))?;
+            Ok(head.e_tag().unwrap_or("").to_string())
+        })
+    }
+
+    async fn existing_hash(
+        &self,
+        key: &str,
+        display: &str,
+    ) -> Result<Option<(String, u64)>, IngestError> {
+        if !self.object_exists(key).await? {
+            return Ok(None);
+        }
+        let downloaded = self.download_to_temp(key, display).await?;
+        let hash = match sha256_file(&downloaded) {
+            Ok(hash) => hash,
+            Err(err) => {
+                let _ = fs::remove_file(&downloaded);
+                return Err(err);
+            }
+        };
+        let len = match fs::metadata(&downloaded) {
+            Ok(meta) => meta.len(),
+            Err(err) => {
+                let _ = fs::remove_file(&downloaded);
+                return Err(IngestError::io(&downloaded, err));
+            }
+        };
+        let _ = fs::remove_file(&downloaded);
+        Ok(Some((to_hex(&hash), len)))
+    }
+
     fn destination(&self, key: &str) -> String {
         format!("s3://{}/{}", self.bucket, key)
     }
@@ -368,6 +419,90 @@ impl S3Store {
     }
 }
 
+impl ExportDest for S3Store {
+    fn place(&self, source: &Path, relative: &str) -> Result<Placed, IngestError> {
+        check_relative(relative)?;
+        let (source_hash, source_len) = source_fingerprint(source)?;
+        let key = self.key(relative);
+        if let Some((hash, len)) = self.block_on(self.existing_hash(&key, relative))? {
+            if hash == source_hash && len == source_len {
+                return Ok(Placed {
+                    object: VerifiedObject {
+                        filename: relative.to_string(),
+                        sha256: hash,
+                        byte_len: len,
+                        mtime: mtime_of(source)?,
+                    },
+                    copied: false,
+                });
+            }
+            return Err(IngestError::AlreadyExists {
+                filename: relative.to_string(),
+                destination: self.destination(&key),
+            });
+        }
+        let object = self.write_new(source, relative)?;
+        Ok(Placed {
+            object,
+            copied: true,
+        })
+    }
+
+    fn read_hash(&self, relative: &str) -> Result<Option<(String, u64)>, IngestError> {
+        check_relative(relative)?;
+        let key = self.key(relative);
+        self.block_on(self.existing_hash(&key, relative))
+    }
+
+    fn list(&self) -> Result<Vec<String>, IngestError> {
+        self.block_on(async {
+            let mut token: Option<String> = None;
+            let mut out = Vec::new();
+            loop {
+                let mut request = self
+                    .client
+                    .list_objects_v2()
+                    .bucket(&self.bucket)
+                    .prefix(&self.prefix);
+                if let Some(token) = &token {
+                    request = request.continuation_token(token);
+                }
+                let page = request
+                    .send()
+                    .await
+                    .map_err(|err| IngestError::store("list", &self.prefix, err))?;
+                for object in page.contents() {
+                    let Some(key) = object.key() else {
+                        continue;
+                    };
+                    let Some(relative) = key.strip_prefix(&self.prefix) else {
+                        continue;
+                    };
+                    if !relative.is_empty() {
+                        out.push(relative.to_string());
+                    }
+                }
+                if page.is_truncated().unwrap_or(false) {
+                    match page.next_continuation_token() {
+                        Some(next) => token = Some(next.to_string()),
+                        None => break,
+                    }
+                } else {
+                    break;
+                }
+            }
+            out.sort();
+            Ok(out)
+        })
+    }
+
+    fn remove_placed(&self, relative: &str) -> Result<(), IngestError> {
+        check_relative(relative)?;
+        let key = self.key(relative);
+        self.block_on(self.delete_object(&key))
+    }
+}
+
 fn normalize_prefix(prefix: &str) -> String {
     if prefix.is_empty() {
         String::new()
@@ -410,8 +545,19 @@ fn temp_path(filename: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_nanos();
+    let safe: String = filename
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(80)
+        .collect();
     std::env::temp_dir().join(format!(
-        "albumen-s3-{nanos}-{n}-{}-{filename}",
+        "albumen-s3-{nanos}-{n}-{}-{safe}",
         std::process::id()
     ))
 }

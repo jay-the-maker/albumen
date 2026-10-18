@@ -12,6 +12,7 @@
 mod checksum;
 mod discover;
 mod error;
+mod export;
 mod local;
 mod mtime;
 mod s3;
@@ -20,9 +21,16 @@ mod store;
 pub use checksum::{sha256_file, sha256_hex};
 pub use discover::{discover, Asset, AssetFile, Role};
 pub use error::IngestError;
+pub use export::{
+    export_tree, format_manifest, parse_manifest, verify_tree, write_manifest, DirectoryTree,
+    ExportDest, ManifestEntry, Placed,
+};
 pub use local::{copy_verify_file, LocalStore};
 pub use s3::{S3Config, S3Store};
-pub use store::{copy_verify, move_verified, BlobStore, IngestReport, StoredFile, VerifiedObject};
+pub use store::{
+    copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,
+    VerifiedObject,
+};
 
 #[cfg(test)]
 mod test_support {
