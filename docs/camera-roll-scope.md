@@ -26,7 +26,7 @@ The extension, once it exists, should:
 
 ## Android runtime permissions
 
-`CameraRoll.requiredPermissions(sdkInt)` is the set the host requests. The library has no `Activity`, so it does not call `ActivityResultContracts.RequestMultiplePermissions` itself. `CameraRollBackupWorker` does not prompt. The host requests permission, then calls `CameraRollBackupWorker.enqueue`.
+`CameraRoll.requiredPermissions(sdkInt)` is the set the host requests. The library has no `Activity`, so it does not call `ActivityResultContracts.RequestMultiplePermissions` itself. `CameraRollBackupWorker` does not prompt. `mobile/android/host` is the host app: `HostActivity` launches that contract with `requiredPermissions()`, and `PermissionGate` decides what happens next. The host requests permission, then calls `CameraRollBackupWorker.enqueue` only when the gate allows it.
 
 | API | Request |
 | --- | --- |
@@ -35,7 +35,9 @@ The extension, once it exists, should:
 
 The manifest already caps `READ_EXTERNAL_STORAGE` at `maxSdkVersion` 32. A unit test checks the split.
 
-If images or video are denied, the host does not enqueue the worker. If media is granted and location is denied, MediaStore strips GPS from the file it returns. That copy is not a complete original. The host should say so and ask for `ACCESS_MEDIA_LOCATION` again before treating the backup as finished. The worker does not delete the MediaStore row in either case.
+If images or video are denied, the host does not enqueue the worker. If media is granted and location is denied, MediaStore would strip GPS, so that copy is not a complete original. The host says so, does not enqueue, and does not treat the backup as finished. The worker does not delete the MediaStore row in either case.
+
+CI compiles the host and unit-tests the gate. It does not click the system permission dialog.
 
 If a grant is revoked later, the worker's MediaStore query fails or returns nothing and the worker retries. It still does not show a dialog.
 
