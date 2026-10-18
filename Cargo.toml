@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ingest", "cli"]
+members = ["ingest", "cli", "mcp"]
 
 [workspace.package]
 edition = "2021"

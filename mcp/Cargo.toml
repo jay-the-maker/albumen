@@ -1,0 +1,22 @@
+[package]
+name = "albumen-mcp"
+version = "0.1.0"
+description = "Stdio MCP server for searching, browsing, exporting, and uploading an Albumen library."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "albumen-mcp"
+path = "src/main.rs"
+
+[dependencies]
+albumen-ingest = { path = "../ingest" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+albumen-ingest = { path = "../ingest" }
+tempfile = "3"
