@@ -44,3 +44,31 @@ jobs:
 
       - name: Round-trip originals through the local filesystem and MinIO
         run: scripts/with-minio.sh cargo test --locked --all-targets
+
+  android:
+    name: android camera-roll skeleton
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Java for the Android SDK
+        run: |
+          if ! command -v java >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y openjdk-17-jdk-headless unzip
+          fi
+          java -version
+
+      - name: Compile and test the backup library
+        run: scripts/android-ci.sh
+
+  ios:
+    name: ios camera-roll skeleton
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and test the PhotoKit package
+        run: swift test --package-path mobile/ios

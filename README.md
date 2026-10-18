@@ -84,7 +84,11 @@ albumen-receive --to ./library --user camera --password "$ALBUMEN_RECEIVE_PASSWO
   --webdav 0.0.0.0:8080 --sftp 0.0.0.0:2222 --ftp 0.0.0.0:2121
 ```
 
-The SFTP host key is generated for that process. FTP passive mode advertises the address of the control connection.
+The SFTP host key is generated for that process. FTP passive mode advertises the address of the control connection. A WebDAV 201 response includes `X-Albumen-Sha256`, the digest `copy_verify` checked. A 409 for a file that is already there includes the digest of the stored bytes.
+
+## Camera-roll backup
+
+`mobile/ios` and `mobile/android` are skeletons, not apps. iOS exports PhotoKit originals, including a Live Photo's paired video, and does not ask PhotoKit for a rendered preview. Android opens MediaStore with `setRequireOriginal` and `ACCESS_MEDIA_LOCATION`, and WorkManager runs the backup while the device is idle and charging. Both upload with WebDAV and accept the copy only when `X-Albumen-Sha256` matches the client's SHA-256. The camera-roll item stays.
 
 ## Agents
 

@@ -10,21 +10,21 @@ Shipped as `albumen export` and `albumen verify-manifest`. The command copy-veri
 
 ## Camera-roll background backup spike
 
-The iOS and Android apps are not started. The first slice is a spike that backs up the camera roll in the background and proves the copy still goes through `copy_verify` (or the same checks, if the platform forces the upload to happen inside an extension). No transcode on the way in. The camera-roll file stays until the library copy has verified.
+Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one exports the camera original, uploads it to `albumen-receive`, and accepts the copy only when the client's SHA-256 matches `X-Albumen-Sha256` from `copy_verify`. Nothing in the camera roll is deleted. No transcode on the way in.
 
 ### iOS
 
-- Read the library with PhotoKit.
-- Target the iOS 26.1 background upload extension so new photos and videos leave the device without the app staying in the foreground.
-- Preserve the original resource PhotoKit returns, including Live Photo pairs, not a rendered preview.
-- Keep location metadata. Do not request a version that strips GPS.
+- `mobile/ios` reads PhotoKit `PHAssetResource` originals. A Live Photo is the still plus the paired video. An edited asset prefers the full-size unadjusted resource when PhotoKit has one. Adjustment data is kept as `{filename}.adjustment`. `PHImageManager.requestImage` is not used.
+- The package builds with `swift test` on a macOS runner. PhotoKit is present there.
+- Still open: an iOS 26.1 background upload extension, so new photos and videos leave the device without the app staying in the foreground. That target needs an Xcode project and a signing identity, which this package does not have.
+- Still open: a host that requests PhotoKit access without a version that strips GPS.
 
 ### Android
 
-- Read images and video through MediaStore.
-- Schedule the backup with WorkManager so it runs when the device is idle and on power, and so a killed process resumes the same queue.
-- Hold `ACCESS_MEDIA_LOCATION`. Without it, MediaStore hands back files whose GPS has been removed, and that would break the first principle.
-- Motion photos are one JPEG with the video still appended. Copy that file whole.
+- `mobile/android` reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor`. The manifest requests `READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, and `ACCESS_MEDIA_LOCATION`. The host app still has to grant those at runtime. Without location permission, MediaStore removes GPS.
+- `CameraRollBackupWorker` schedules the backup with WorkManager while the device is idle and charging, so a killed process resumes the same queue.
+- A motion photo is one JPEG with the video still appended. The worker copies that file whole.
+- Still open: an application module, a credential store for the receiver password, and the runtime permission request. The skeleton keeps the password in WorkManager's local input data.
 
 ## Connectors
 
