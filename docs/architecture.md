@@ -14,7 +14,7 @@ This is the outline of the system. The ingest crate, the export command, and the
 | `albumen-ingest` copy/verify for local files and S3 | Here |
 | Fixture corpus and MinIO round-trip CI | Here |
 | Catalog / search index | No on-disk catalog. MCP search reads files and sidecars into a process-local cache |
-| macOS, iOS, and Android apps | Not started |
+| macOS, iOS, and Android apps | Camera-roll skeletons in `mobile/ios` and `mobile/android`. Not shipped apps. The macOS library UI is not started |
 | MCP server (`albumen-mcp`, stdio) | Here |
 | Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | `albumen-receive` speaks WebDAV, SFTP, and FTP into `copy_verify`. S3 upload and USB are not started |
 | Export-everything command (`albumen export`) | Here |
@@ -94,8 +94,8 @@ A future catalog may store ids, paths, filenames, mtimes, SHA-256, and extracted
 
 ## Apps
 
-- macOS: SwiftUI for the library UI, AppKit where SwiftUI still falls short (import panels, drag and drop, menus). It links or shells out to the ingest core.
-- iOS and Android: automatic camera-roll backup. New photos and videos are copied with `copy_verify` to the library store. The camera-roll original is left alone until the copy has verified. The apps do not transcode to "save space" on the way in.
+- macOS: SwiftUI for the library UI, AppKit where SwiftUI still falls short (import panels, drag and drop, menus). It links or shells out to the ingest core. That UI is not started.
+- iOS and Android: `mobile/ios` and `mobile/android` are camera-roll backup skeletons, not apps. iOS writes PhotoKit `PHAssetResource` originals, including a Live Photo's paired video, and does not call `PHImageManager.requestImage`. Android opens MediaStore with `setRequireOriginal` and asks for `ACCESS_MEDIA_LOCATION`. WorkManager schedules that backup while the device is idle and charging. Both PUT the bytes to `albumen-receive` and accept the copy only when `X-Albumen-Sha256` matches the client's SHA-256. The camera-roll original stays. The apps do not transcode to "save space" on the way in.
 
 iCloud is import-only. A user can copy photos out of iCloud into the library. Albumen does not write back into iCloud Photos, because that path rewrites containers and does not promise bit-exact originals.
 
@@ -103,7 +103,7 @@ iCloud is import-only. A user can copy photos out of iCloud into the library. Al
 
 Phone camera rolls are not the only ingest path. Dedicated cameras deliver RAW and video the same way, through `copy_verify`.
 
-- Wireless. `albumen-receive` is the process the user runs on their own machine. It listens for WebDAV, SFTP, and plain FTP. A camera uploads each finished file. The receiver stores it only after the upload is complete, through `copy_verify`. A partial file is not reported done. The filename the camera sent is the filename stored; directory names in the upload path are not. JPEG, RAW, and video share this path. FTP is unencrypted and is there for older bodies. S3 upload from a camera and tethered USB import are not in this receiver.
+- Wireless. `albumen-receive` is the process the user runs on their own machine. It listens for WebDAV, SFTP, and plain FTP. A camera uploads each finished file. The receiver stores it only after the upload is complete, through `copy_verify`. A partial file is not reported done. WebDAV's 201 response includes `X-Albumen-Sha256`, the digest `copy_verify` checked. A 409 for a file that is already there includes the digest of those stored bytes. The filename the camera sent is the filename stored; directory names in the upload path are not. JPEG, RAW, and video share this path. FTP is unencrypted and is there for older bodies. S3 upload from a camera and tethered USB import are not in this receiver.
 - Tethered. USB import, whether PTP/MTP or a mounted card, copies each selected file with `copy_verify`. Ingest does not erase the card.
 
 Both paths refuse to overwrite an existing original. Success is the verified destination, not the moment the socket closed.
@@ -143,7 +143,7 @@ The macOS and iOS apps will be Swift, and the Android app will be Kotlin. The pi
 
 ## CI
 
-GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, and `cargo test`. The runner pin, the ExifTool 13.59 checksum, and the MinIO checksum are in [ci.md](ci.md). MinIO is AGPL. The workflow downloads it and runs it; the Albumen tree does not contain MinIO source. The S3 credentials in CI are fixed test strings (`albumen` / `albumen-ci-not-a-secret`) for a server that exists only for that job.
+GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` on `ubuntu-24.04` and `ubuntu-26.04`. A separate `ubuntu-24.04` job compiles the Android camera-roll skeleton. A `macos-14` job builds the iOS package. The runner pin, the ExifTool 13.59 checksum, the MinIO checksum, and the Android SDK pin are in [ci.md](ci.md). MinIO is AGPL. The workflow downloads it and runs it; the Albumen tree does not contain MinIO source. The S3 credentials in CI are fixed test strings (`albumen` / `albumen-ci-not-a-secret`) for a server that exists only for that job.
 
 The fixture corpus is synthetic and CC0. It includes a Motion Photo (JPEG plus appended MP4), an Apple `.aae` edit sidecar, and an Ultra HDR JPEG with a synthetic ICC profile and an MPF gain map, along with the earlier GPS, HEIC, RAW+JPEG, XMP, Live Photo, and video files. Tests compare each file with itself after a round trip. They do not depend on a checked-in ExifTool golden file, so an ExifTool upgrade that changes formatting still compares equal as long as both sides are read by the same binary.
 

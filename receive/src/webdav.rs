@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! WebDAV for cameras and card writers. PUT commits through `copy_verify`.
+//! A 201 response carries `X-Albumen-Sha256`, the digest `copy_verify` checked.
+//! A 409 for an existing file carries the digest of the bytes already stored.
 //! DELETE and MOVE are refused. Only the filename is stored.
 
 use std::net::SocketAddr;
@@ -145,7 +147,7 @@ async fn put(
         Err(err) => return write_status(socket, 400, &err, &[]).await,
     };
     if library.has(&name) {
-        return write_status(socket, 409, "refusing to overwrite", &[]).await;
+        return existing(socket, library, &name).await;
     }
     let mut spool = match Spool::create(&name) {
         Ok(spool) => spool,
@@ -158,15 +160,36 @@ async fn put(
         return write_status(socket, 500, &err, &[]).await;
     }
     match library.commit(&spool) {
-        Ok(_) => write_status(socket, 201, "Created", &[]).await,
+        Ok(verified) => created(socket, &verified.sha256).await,
         Err(err) => {
-            let status = if err.contains("refusing to overwrite") {
-                409
+            if err.contains("refusing to overwrite") {
+                existing(socket, library, &name).await
             } else {
-                500
-            };
-            write_status(socket, status, &err, &[]).await
+                write_status(socket, 500, &err, &[]).await
+            }
         }
+    }
+}
+
+async fn created(socket: &mut TcpStream, sha256: &str) -> std::io::Result<()> {
+    let sha256 = sha256.replace(['\r', '\n'], "");
+    write_status(socket, 201, "Created", &[("X-Albumen-Sha256", &sha256)]).await
+}
+
+async fn existing(socket: &mut TcpStream, library: &Library, name: &str) -> std::io::Result<()> {
+    let path = library.root().join(name);
+    match albumen_ingest::sha256_hex(&path) {
+        Ok(sha256) => {
+            let sha256 = sha256.replace(['\r', '\n'], "");
+            write_status(
+                socket,
+                409,
+                "refusing to overwrite",
+                &[("X-Albumen-Sha256", &sha256)],
+            )
+            .await
+        }
+        Err(err) => write_status(socket, 500, &err.to_string(), &[]).await,
     }
 }
 

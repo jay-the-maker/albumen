@@ -41,8 +41,8 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
     let sftp = listening.sftp.unwrap();
     let ftp = listening.ftp.unwrap();
 
-    http_put(webdav, "/DCIM/IMG_0003.dng", &raw, "201").await;
-    http_put(webdav, "/IMG_0006.mp4", &video, "201").await;
+    http_put(webdav, "/DCIM/IMG_0003.dng", &raw, "201", &raw_hash).await;
+    http_put(webdav, "/IMG_0006.mp4", &video, "201", &video_hash).await;
     assert_eq!(
         sha256_hex(&root.path().join("IMG_0003.dng")).unwrap(),
         raw_hash
@@ -52,7 +52,7 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
         video_hash
     );
     let kept = std::fs::read(root.path().join("IMG_0003.dng")).unwrap();
-    http_put(webdav, "/IMG_0003.dng", b"different", "409").await;
+    http_put(webdav, "/IMG_0003.dng", b"different", "409", &raw_hash).await;
     http_request(webdav, "DELETE", "/IMG_0003.dng", b"", "405").await;
     assert_eq!(
         std::fs::read(root.path().join("IMG_0003.dng")).unwrap(),
@@ -108,11 +108,40 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
     assert!(root.path().join("IMG_0006.mp4").is_file());
 }
 
-async fn http_put(addr: SocketAddr, path: &str, body: &[u8], status: &str) {
-    http_request(addr, "PUT", path, body, status).await;
+async fn http_put(addr: SocketAddr, path: &str, body: &[u8], status: &str, sha256: &str) {
+    let text = http_exchange(addr, "PUT", path, body).await;
+    assert!(
+        text.starts_with(&format!("HTTP/1.1 {status}")),
+        "PUT {path}: {text}"
+    );
+    assert_eq!(
+        header_value(&text, "X-Albumen-Sha256").as_deref(),
+        Some(sha256),
+        "PUT {path}: {text}"
+    );
+}
+
+fn header_value(response: &str, name: &str) -> Option<String> {
+    let head = response.split("\r\n\r\n").next().unwrap_or(response);
+    for line in head.split("\r\n").skip(1) {
+        if let Some((key, value)) = line.split_once(':') {
+            if key.eq_ignore_ascii_case(name) {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
 async fn http_request(addr: SocketAddr, method: &str, path: &str, body: &[u8], status: &str) {
+    let text = http_exchange(addr, method, path, body).await;
+    assert!(
+        text.starts_with(&format!("HTTP/1.1 {status}")),
+        "{method} {path}: {text}"
+    );
+}
+
+async fn http_exchange(addr: SocketAddr, method: &str, path: &str, body: &[u8]) -> String {
     let mut socket = TcpStream::connect(addr).await.unwrap();
     let token = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"camera:roll");
     let request = format!(
@@ -123,11 +152,7 @@ async fn http_request(addr: SocketAddr, method: &str, path: &str, body: &[u8], s
     socket.write_all(body).await.unwrap();
     let mut response = Vec::new();
     socket.read_to_end(&mut response).await.unwrap();
-    let text = String::from_utf8_lossy(&response);
-    assert!(
-        text.starts_with(&format!("HTTP/1.1 {status}")),
-        "{method} {path}: {text}"
-    );
+    String::from_utf8_lossy(&response).into_owned()
 }
 
 struct AcceptKey;
