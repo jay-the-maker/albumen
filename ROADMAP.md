@@ -26,7 +26,7 @@ Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one 
 - `CameraRollBackupWorker` schedules the backup with WorkManager while the device is idle and charging, so a killed process resumes the same queue.
 - A motion photo is one JPEG with the video still appended. The worker copies that file whole.
 - The receiver password is in Keystore-backed storage. WorkManager input does not contain it.
-- Still open: an application module that requests those permissions. The flow is [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
+- `mobile/android/host` requests those permissions and enqueues only when images, video, and location are all granted. A location denial is explained as stripped GPS and is not a finished backup. CI compiles the app and unit-tests that decision. It does not click the system dialog. Android 14 selected-photos (`READ_MEDIA_VISUAL_USER_SELECTED`) is still not a grant. The flow is [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
 
 ## Connectors
 

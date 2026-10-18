@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile the Android camera-roll library and run its JVM unit tests.
+# Compile the Android camera-roll library and host app, and run their JVM unit tests.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -10,4 +10,4 @@ export ANDROID_SDK_ROOT="$sdk"
 printf 'sdk.dir=%s\n' "$sdk" >"$root/mobile/android/local.properties"
 
 cd "$root/mobile/android"
-"$gradle" :backup:testDebugUnitTest --no-daemon --stacktrace
+"$gradle" :backup:testDebugUnitTest :host:testDebugUnitTest :host:assembleDebug --no-daemon --stacktrace

@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "albumen-android"
 include(":backup")
+include(":host")
