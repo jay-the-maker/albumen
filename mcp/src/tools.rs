@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Library tools. Search and browse only read. Export and upload call
-//! `copy_verify` and refuse to overwrite. Nothing here deletes a source.
+//! `copy_verify` and refuse to overwrite. Nothing here deletes a source or
+//! renames one into quarantine.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,6 +65,9 @@ impl Library {
             }
             "delete" | "remove" | "unlink" | "move" | "move_verified" => {
                 Err("albumen has no delete tool".to_string())
+            }
+            "quarantine" | "copy_verify_quarantine" => {
+                Err("copy_verify_quarantine is not a default path".to_string())
             }
             other => Err(format!("unknown tool {other}")),
         }

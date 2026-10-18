@@ -63,9 +63,11 @@ The tests copy the CC0 fixture corpus through the local filesystem and through M
 Locally:
 
 ```bash
-sudo apt-get install -y libimage-exiftool-perl
+export PATH="$(scripts/install-exiftool.sh):$PATH"
 scripts/with-minio.sh cargo test --locked
 ```
+
+ExifTool and MinIO are pinned by exact version and SHA-256 in those scripts. Do not replace the gate with an unpinned distro package.
 
 ## Code we do not copy
 

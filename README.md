@@ -67,9 +67,11 @@ The manifest lists SHA-256, byte length, and the relative path. `verify-manifest
 The merge gate copies the fixture corpus through the local filesystem and through MinIO, then compares SHA-256, filename, mtime, and an ExifTool metadata dump. Filesystem identity tags that any copy changes (directory, inode change time, access time, permissions, and the absolute path) are the only tags ignored. `FileModifyDate`, `FileName`, and every embedded EXIF, XMP, IPTC, GPS, and QuickTime tag must match.
 
 ```bash
-sudo apt-get install -y libimage-exiftool-perl
+export PATH="$(scripts/install-exiftool.sh):$PATH"
 scripts/with-minio.sh cargo test --locked
 ```
+
+`scripts/install-exiftool.sh` downloads one ExifTool release and checks its SHA-256 before putting it on `PATH`. `scripts/with-minio.sh` does the same for the MinIO binary. Neither follows a distro package.
 
 Fixture provenance and the CC0 dedication are in [fixtures/README.md](fixtures/README.md). The architecture outline is in [docs/architecture.md](docs/architecture.md).
 
