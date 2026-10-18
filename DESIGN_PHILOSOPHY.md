@@ -64,8 +64,24 @@ Both are measured, and a change that misses the measurement does not land. [docs
 
 Speed is not a reason to drop a byte, a tag, or a checksum. Cost stays outside the metrics.
 
+## Scale
+
+Scales with your hardware, no artificial limits.
+
+There is no hard-coded ceiling on library size, file size, concurrency, or item counts. A page size, a batch size, or a worker count is a soft default the user can override. It is not a maximum.
+
+Concurrency follows the machine. CPU count, IO saturation, and network backpressure decide how much work runs at once. A fixed pool that ignores the hardware is a ceiling.
+
+APIs stream or paginate. They do not load the whole library to answer one page. An index may grow to tens of millions of items. The files and sidecars stay the source of truth: an index is a cache the files can rebuild, not a second catalog that becomes the only copy of a caption or a GPS point. Memory stays constant as the library grows. A response holds one page, not the library.
+
+Under throttling, work slows and continues. It does not fail because a count, a file, or a queue crossed a number compiled into the binary.
+
+A bound that protects the first principle, or that protects the process from unauthenticated input, stays. Protocol-level denial-of-service limits are that kind of bound. Each one is documented and configurable. A limit that exists only to keep a demo small does not stay.
+
+A larger library is not a reason to drop a byte, a tag, or a checksum.
+
 ## North star
 
 Be good enough that iCloud Photos and Google Photos have to fix the pain their users already live with: libraries that rewrite files, metadata that disappears, exports that are incomplete, and products that keep the only copy.
 
-The metrics are reliability, fidelity, respect, control, and the measured performance and friction budgets. Cost is outside those metrics. A cheaper copy that is missing GPS, a caption, or a byte is a failure. A faster copy that drops them is a failure too.
+The metrics are reliability, fidelity, respect, control, scale, and the measured performance and friction budgets. Cost is outside those metrics. A cheaper copy that is missing GPS, a caption, or a byte is a failure. A faster copy that drops them is a failure too. A larger library that drops them is a failure too.

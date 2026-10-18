@@ -10,7 +10,7 @@ Metadata and original quality are never lost. Originals stay bit-exact. EXIF, XM
 
 The default path never deletes a source. Leaving is one command: `albumen export`, then `albumen verify-manifest`. Storage is the user's. There are no dark patterns, upsell nags, or hidden scans. MCP is the agent interface, and agent instructions cannot add a tool the philosophy forbids.
 
-The metrics are reliability, fidelity, respect, control, and the measured performance and friction budgets. Cost is outside those metrics. The numbers are in [docs/performance-budgets.md](docs/performance-budgets.md). The step count is in [docs/friction.md](docs/friction.md).
+The metrics are reliability, fidelity, respect, control, scale, and the measured performance and friction budgets. Cost is outside those metrics. The numbers are in [docs/performance-budgets.md](docs/performance-budgets.md). The step count is in [docs/friction.md](docs/friction.md). Scale means no hard-coded ceiling on library size, file size, concurrency, or item counts: soft defaults the user can override, streaming and pagination, and constant memory as the library grows.
 
 ## Where to start
 
