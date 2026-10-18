@@ -9,8 +9,8 @@
 //! GitHub-hosted runners differ by more than 10 percent from job to job, so
 //! the gate does not compare raw MB/s or milliseconds with a laptop. Each
 //! repeat also times a same-run reference that does the same kind of work:
-//! hash plus an fsynced copy, one ExifTool read, a stat-and-hash pass, and a
-//! directory walk that builds a line per file. Throughput is Albumen's MB/s
+//! hash while copying, fsync, and hash the destination; one ExifTool read;
+//! and the same directory walk search and browse use. Throughput is Albumen's MB/s
 //! divided by the reference copy. Latency is the reference time divided by
 //! Albumen's time. Higher is better, and the score fails when it drops by
 //! more than 10 percent. Raw MB/s and milliseconds are still reported.
@@ -19,7 +19,7 @@
 
 use std::fs::{self, File};
 use std::hint::black_box;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -29,6 +29,7 @@ use albumen_ingest::{
 };
 use albumen_mcp::Library;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 /// Repeats of a whole measurement. The stored score is the median.
 pub const REPEATS: usize = 5;
@@ -382,27 +383,47 @@ fn plain_copy_mb_s(sources: &[PathBuf], dest: &Path) -> Result<f64, String> {
     fs::create_dir_all(dest).map_err(|err| format!("create plain dest: {err}"))?;
     let started = Instant::now();
     let mut bytes = 0u64;
+    let mut buffer = vec![0u8; 64 * 1024];
     for source in sources {
-        let digest = sha256_hex(source).map_err(|err| err.to_string())?;
-        black_box(digest);
         let name = source
             .file_name()
             .ok_or_else(|| format!("missing file name {}", source.display()))?;
+        let target = dest.join(name);
         let mut input =
             File::open(source).map_err(|err| format!("open {}: {err}", source.display()))?;
-        let mut output = File::create(dest.join(name))
+        let mut output = File::create(&target)
             .map_err(|err| format!("create plain copy of {}: {err}", source.display()))?;
-        let copied = std::io::copy(&mut input, &mut output)
+        let mut hasher = Sha256::new();
+        let copied = hash_while_copying(&mut input, &mut output, &mut hasher, &mut buffer)
             .map_err(|err| format!("plain copy {}: {err}", source.display()))?;
         output
             .sync_all()
             .map_err(|err| format!("sync plain copy of {}: {err}", source.display()))?;
-        let written = sha256_hex(&dest.join(name)).map_err(|err| err.to_string())?;
-        black_box((copied, written));
+        black_box(hasher.finalize());
+        let written = sha256_hex(&target).map_err(|err| err.to_string())?;
+        black_box(written);
         bytes += copied;
     }
     let seconds = started.elapsed().as_secs_f64().max(1e-9);
     Ok((bytes as f64) / 1_000_000.0 / seconds)
+}
+
+fn hash_while_copying(
+    input: &mut File,
+    output: &mut File,
+    hasher: &mut Sha256,
+    buffer: &mut [u8],
+) -> Result<u64, std::io::Error> {
+    let mut copied = 0u64;
+    loop {
+        let read = input.read(buffer)?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        hasher.update(&buffer[..read]);
+        output.write_all(&buffer[..read])?;
+        copied += read as u64;
+    }
 }
 
 fn search_reference_ms(root: &Path, _relative: &[String]) -> Result<f64, String> {

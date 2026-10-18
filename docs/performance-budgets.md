@@ -47,7 +47,7 @@ The report always prints raw rates and latencies: `copy_verify_mb_s` and `copy_v
 
 Those raw numbers are not the CI gate. Two `ubuntu-24.04` runners can differ by more than 10 percent on the same commit, which is machine noise, not a code change. Each repeat also times a reference on that same machine:
 
-- a SHA-256 of each source, an fsynced copy, and a SHA-256 of the destination
+- a SHA-256 while the bytes are copied, an fsync, and a SHA-256 of the destination
 - one ExifTool read of the same library
 - a stat, a SHA-256, and a JSON object for every library file
 - a directory walk that stats every file, builds a JSON object, and sorts those objects
