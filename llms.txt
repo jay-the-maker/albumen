@@ -9,6 +9,7 @@ Reliability, fidelity, respect, control, scale, and the measured performance and
 - [Design philosophy](https://github.com/jay-the-maker/albumen/blob/main/DESIGN_PHILOSOPHY.md): Bit-exact originals, checksums on the CI gate, never delete, one-step export, bring-your-own storage, respect for the user, the MCP cap, and scale with no artificial limits.
 - [Performance budgets](https://github.com/jay-the-maker/albumen/blob/main/docs/performance-budgets.md): Cold start, thumbnails, scroll, search, import, and backup CPU and battery. Client metrics are targets until the apps exist.
 - [Friction](https://github.com/jay-the-maker/albumen/blob/main/docs/friction.md): Steps from install to a first backup, and the sane-defaults, no-account, and no-nags rules.
+- [Scale](https://github.com/jay-the-maker/albumen/blob/main/docs/scale.md): No artificial ceilings. Soft defaults, streaming pages, and the safety bounds that stay.
 - [Agent guide](https://github.com/jay-the-maker/albumen/blob/main/AGENTS.md): Build and test commands, the round-trip gate, never-delete rules, and where to start.
 - [Contributing](https://github.com/jay-the-maker/albumen/blob/main/CONTRIBUTING.md): Philosophy acknowledgment, Developer Certificate of Origin, and how agents contribute.
 - [README](https://github.com/jay-the-maker/albumen/blob/main/README.md): What the repository does today.

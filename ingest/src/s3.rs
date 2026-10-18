@@ -16,7 +16,7 @@ use aws_sdk_s3::Client;
 use crate::checksum::{sha256_file, to_hex};
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
-use crate::export::{check_relative, source_fingerprint, ExportDest, Placed};
+use crate::export::{check_relative, scratch_name_chars, source_fingerprint, ExportDest, Placed};
 use crate::local::finalize_verified;
 use crate::mtime::{from_unix_nanos_string, mtime_of, to_unix_nanos_string};
 use crate::store::{BlobStore, VerifiedObject};
@@ -85,7 +85,7 @@ impl std::fmt::Debug for S3Store {
 impl S3Store {
     pub fn connect(config: S3Config) -> Result<Self, IngestError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            .worker_threads(s3_worker_threads())
             .enable_all()
             .build()
             .map_err(|err| IngestError::store("runtime", &config.bucket, err))?;
@@ -503,6 +503,21 @@ impl ExportDest for S3Store {
     }
 }
 
+/// Soft default: one Tokio worker per CPU. `ALBUMEN_S3_WORKERS` overrides it.
+/// There is no compiled maximum.
+fn s3_worker_threads() -> usize {
+    if let Ok(text) = std::env::var("ALBUMEN_S3_WORKERS") {
+        if let Ok(value) = text.parse::<usize>() {
+            if value >= 1 {
+                return value;
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+}
+
 fn normalize_prefix(prefix: &str) -> String {
     if prefix.is_empty() {
         String::new()
@@ -554,7 +569,7 @@ fn temp_path(filename: &str) -> PathBuf {
                 '_'
             }
         })
-        .take(80)
+        .take(scratch_name_chars())
         .collect();
     std::env::temp_dir().join(format!(
         "albumen-s3-{nanos}-{n}-{}-{safe}",

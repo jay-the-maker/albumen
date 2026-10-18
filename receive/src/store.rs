@@ -51,13 +51,17 @@ impl Library {
         self.root.join(filename).is_file()
     }
 
+    pub fn is_listed_file(name: &str) -> bool {
+        !name.ends_with(SIDECAR_SUFFIX)
+    }
+
     pub fn files(&self) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             if entry.file_type()?.is_file() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if !name.ends_with(SIDECAR_SUFFIX) {
+                    if Self::is_listed_file(name) {
                         names.push(name.to_string());
                     }
                 }

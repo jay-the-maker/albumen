@@ -78,7 +78,7 @@ Under throttling, work slows and continues. It does not fail because a count, a 
 
 A bound that protects the first principle, or that protects the process from unauthenticated input, stays. Protocol-level denial-of-service limits are that kind of bound. Each one is documented and configurable. A limit that exists only to keep a demo small does not stay.
 
-A larger library is not a reason to drop a byte, a tag, or a checksum.
+A larger library is not a reason to drop a byte, a tag, or a checksum. The bounds that stay, and the soft defaults, are listed in [docs/scale.md](docs/scale.md).
 
 ## North star
 

@@ -7,6 +7,7 @@
 
 pub mod io;
 pub mod metadata;
+pub mod page;
 pub mod tools;
 
 pub use tools::Library;

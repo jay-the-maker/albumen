@@ -121,8 +121,10 @@ impl ExportDest for DirectoryTree {
         if !self.root.exists() {
             return Ok(out);
         }
-        walk_files(&self.root, &self.root, &mut out)?;
-        out.sort();
+        walk_sorted(&self.root, None, &mut |relative| {
+            out.push(relative.to_string());
+            WalkControl::Continue
+        })?;
         Ok(out)
     }
 
@@ -144,7 +146,10 @@ pub fn export_tree(root: &Path, dest: &dyn ExportDest) -> Result<Vec<ManifestEnt
         return Err(IngestError::NotAFile(root.to_path_buf()));
     }
     let mut files = Vec::new();
-    walk_files(root, root, &mut files)?;
+    walk_sorted(root, None, &mut |relative| {
+        files.push(relative.to_string());
+        WalkControl::Continue
+    })?;
     let assets = plan_assets(root, &files)?;
     let mut entries = Vec::new();
     for asset in assets {
@@ -382,22 +387,129 @@ fn to_relative(root: &Path, path: &Path) -> Result<String, IngestError> {
     Ok(parts.join("/"))
 }
 
-fn walk_files(dir: &Path, root: &Path, out: &mut Vec<String>) -> Result<(), IngestError> {
-    let entries = fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))?;
-    for entry in entries {
+/// Ask the walker to keep going, or to stop before unread branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkControl {
+    Continue,
+    Stop,
+}
+
+/// Visit files under `root` in relative-path order.
+///
+/// `after` skips paths that sort at or before that relative path, so a page
+/// can resume. One directory is listed so the order stays stable. The walk
+/// does not keep a vector of the whole tree, and it returns when `visit`
+/// asks it to stop.
+pub fn walk_sorted(
+    root: &Path,
+    after: Option<&str>,
+    visit: &mut dyn FnMut(&str) -> WalkControl,
+) -> Result<(), IngestError> {
+    if !root.exists() {
+        return Ok(());
+    }
+    match walk_dir(root, "", after, visit)? {
+        WalkControl::Continue | WalkControl::Stop => Ok(()),
+    }
+}
+
+fn walk_dir(
+    dir: &Path,
+    prefix: &str,
+    after: Option<&str>,
+    visit: &mut dyn FnMut(&str) -> WalkControl,
+) -> Result<WalkControl, IngestError> {
+    let mut entries = Vec::new();
+    let read = fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))?;
+    for entry in read {
         let entry = entry.map_err(|err| IngestError::io(dir, err))?;
         let path = entry.path();
         let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
         if meta.file_type().is_symlink() {
             return Err(IngestError::Symlink(path));
         }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(IngestError::NonUtf8Filename { path });
+        };
+        check_filename(name)?;
         if meta.is_dir() {
-            walk_files(&path, root, out)?;
+            entries.push((name.to_string(), true));
         } else if meta.is_file() {
-            out.push(to_relative(root, &path)?);
+            entries.push((name.to_string(), false));
         }
     }
-    Ok(())
+    entries.sort_by(|left, right| cmp_walk(&left.0, left.1, &right.0, right.1));
+    for (name, is_dir) in entries {
+        let child = dir.join(&name);
+        let relative = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if is_dir {
+            if let Some(after) = after {
+                if directory_is_at_or_before(&relative, after) {
+                    continue;
+                }
+            }
+            if walk_dir(&child, &relative, after, visit)? == WalkControl::Stop {
+                return Ok(WalkControl::Stop);
+            }
+        } else {
+            if let Some(after) = after {
+                if relative.as_str() <= after {
+                    continue;
+                }
+            }
+            if visit(&relative) == WalkControl::Stop {
+                return Ok(WalkControl::Stop);
+            }
+        }
+    }
+    Ok(WalkControl::Continue)
+}
+
+/// How many characters of a filename are kept in a local scratch path.
+///
+/// `ALBUMEN_SCRATCH_NAME_CHARS` overrides 80. The stored object name is not
+/// shortened.
+pub(crate) fn scratch_name_chars() -> usize {
+    match std::env::var("ALBUMEN_SCRATCH_NAME_CHARS") {
+        Ok(text) => match text.parse::<usize>() {
+            Ok(value) if value >= 1 => value,
+            _ => 80,
+        },
+        Err(_) => 80,
+    }
+}
+
+fn directory_is_at_or_before(relative: &str, after: &str) -> bool {
+    let mut prefix = String::with_capacity(relative.len() + 1);
+    prefix.push_str(relative);
+    prefix.push('/');
+    !after.starts_with(&prefix) && prefix.as_str() < after
+}
+
+fn cmp_walk(
+    left_name: &str,
+    left_dir: bool,
+    right_name: &str,
+    right_dir: bool,
+) -> std::cmp::Ordering {
+    let mut left = left_name.bytes().chain(left_dir.then_some(b'/'));
+    let mut right = right_name.bytes().chain(right_dir.then_some(b'/'));
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(left_byte), Some(right_byte)) => match left_byte.cmp(&right_byte) {
+                std::cmp::Ordering::Equal => {}
+                order => return order,
+            },
+        }
+    }
 }
 
 fn plan_assets(
@@ -468,6 +580,44 @@ mod tests {
 
     fn mtime() -> std::time::SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_600_000_000)
+    }
+
+    #[test]
+    fn walk_is_lexicographic_and_can_stop() {
+        let tmp = Tmp::new();
+        let root = tmp.path();
+        fs::create_dir(root.join("a")).unwrap();
+        fs::write(root.join("a.txt"), b"1").unwrap();
+        fs::write(root.join("a").join("z.txt"), b"2").unwrap();
+        fs::write(root.join("ab.txt"), b"3").unwrap();
+        fs::write(root.join("b.txt"), b"4").unwrap();
+        let mut got = Vec::new();
+        walk_sorted(root, None, &mut |path| {
+            got.push(path.to_string());
+            WalkControl::Continue
+        })
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "a.txt".to_string(),
+                "a/z.txt".to_string(),
+                "ab.txt".to_string(),
+                "b.txt".to_string()
+            ]
+        );
+        assert_eq!(DirectoryTree::new(root).list().unwrap(), got);
+        let mut page = Vec::new();
+        walk_sorted(root, Some("a.txt"), &mut |path| {
+            page.push(path.to_string());
+            if page.len() == 2 {
+                WalkControl::Stop
+            } else {
+                WalkControl::Continue
+            }
+        })
+        .unwrap();
+        assert_eq!(page, vec!["a/z.txt".to_string(), "ab.txt".to_string()]);
     }
 
     #[test]
