@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Bit-exact ingest for Albumen.
+//!
+//! Metadata and original quality are never lost. This crate copies an original
+//! and its sidecars without recompressing, transcoding, or stripping them,
+//! preserves the filename and mtime, and verifies SHA-256. A mismatch is a
+//! hard error: the bad destination is removed, and both hashes are reported.
+
+#![forbid(unsafe_code)]
+
+mod checksum;
+mod discover;
+mod error;
+mod local;
+mod mtime;
+mod s3;
+mod store;
+
+pub use checksum::{sha256_file, sha256_hex};
+pub use discover::{discover, Asset, AssetFile, Role};
+pub use error::IngestError;
+pub use local::{copy_verify_file, LocalStore};
+pub use s3::{S3Config, S3Store};
+pub use store::{copy_verify, move_verified, BlobStore, IngestReport, StoredFile, VerifiedObject};
+
+#[cfg(test)]
+mod test_support {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::mtime::set_mtime;
+
+    pub struct Tmp {
+        path: PathBuf,
+    }
+
+    impl Tmp {
+        pub fn new() -> Self {
+            let n = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("albumen-test-{n}-{}", std::process::id()));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    pub fn write_file(dir: &Path, name: &str, bytes: &[u8], mtime: SystemTime) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, bytes).expect("write fixture");
+        set_mtime(&path, mtime).expect("set mtime");
+        path
+    }
+}

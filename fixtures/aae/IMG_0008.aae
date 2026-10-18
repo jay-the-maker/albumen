@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+ <key>adjustmentFormatIdentifier</key>
+ <string>com.apple.photo</string>
+ <key>adjustmentFormatVersion</key>
+ <integer>1</integer>
+ <key>adjustmentData</key>
+ <data>
+  AAE=
+ </data>
+ <key>adjustments</key>
+ <array>
+  <dict>
+   <key>identifier</key>
+   <string>com.apple.photo.adjustment.contrast</string>
+   <key>formatIdentifier</key>
+   <string>com.apple.photo</string>
+   <key>formatVersion</key>
+   <integer>1</integer>
+   <key>settings</key>
+   <dict>
+    <key>inputContrast</key>
+    <real>0.35</real>
+    <key>inputBrightness</key>
+    <real>0.10</real>
+   </dict>
+  </dict>
+ </array>
+</dict>
+</plist>

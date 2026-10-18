@@ -1,0 +1,76 @@
+# Contributing to Albumen
+
+**First principle: metadata and original quality are never lost.**
+
+Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy and every move is checked with SHA-256 and fails loudly on mismatch.
+
+A change that drops a tag, renames a file, rewrites pixels, or swallows a checksum mismatch does not land. If a patch cannot preserve something yet, it must fail loudly rather than continue.
+
+## Developer Certificate of Origin
+
+Every commit needs a `Signed-off-by` line:
+
+```text
+Signed-off-by: Your Name <you@example.com>
+```
+
+`git commit -s` adds it. By signing off you certify the Developer Certificate of Origin 1.1:
+
+```text
+By making a contribution to this project, I certify that:
+
+(a) The contribution was created in whole or in part by me and I
+    have the right to submit it under the open source license
+    indicated in the file; or
+
+(b) The contribution is based upon previous work that, to the best
+    of my knowledge, is covered under an appropriate open source
+    license and I have the right under that license to submit that
+    work with modifications, whether created in whole or in part
+    by me, under the same open source license (unless I am
+    permitted to submit under a different license), as indicated
+    in the file; or
+
+(c) The contribution was provided directly to me by some other
+    person who certified (a), (b) or (c) and I have not modified
+    it.
+
+(d) I understand and agree that this project and the contribution
+    are public and that a record of the contribution (including all
+    personal information I submit with it, including my sign-off) is
+    maintained indefinitely and may be redistributed consistent with
+    this project or the open source license(s) involved.
+```
+
+## Agent-authored pull requests
+
+Agent-authored pull requests are welcome. An agent is a contributor. The same first principle, the same DCO sign-off, and the same CI gate apply. The `Signed-off-by` line must name the identity that is submitting the patch. A green ingest CI run is required before merge.
+
+## Small pull requests
+
+Keep a pull request to one concern. A reviewer should be able to hold the diff in their head. Do not mix a behavior change with an unrelated refactor. Do not add drive-by files.
+
+## The merge gate
+
+CI must pass:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --locked -- -D warnings`
+- `scripts/with-minio.sh cargo test --locked --all-targets`
+
+The tests copy the CC0 fixture corpus through the local filesystem and through MinIO. They compare SHA-256, filename, mtime, and a full ExifTool dump. Do not weaken that comparison to make a change pass. Extending the corpus is fine; shrinking what is compared is not.
+
+Locally:
+
+```bash
+sudo apt-get install -y libimage-exiftool-perl
+scripts/with-minio.sh cargo test --locked
+```
+
+## Code we do not copy
+
+Immich, Ente, and other AGPL photo libraries are ideas only. Do not paste their source, translate it, or retype it from memory into this Apache-2.0 tree. MinIO is run as an external CI process and is not vendored.
+
+## Conduct
+
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
