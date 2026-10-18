@@ -20,6 +20,7 @@ Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md), then the crate you are changi
 | --- | --- |
 | Copy, checksum, export | `ingest/src/lib.rs`, `ingest/tests/roundtrip.rs` |
 | `albumen export` / `verify-manifest` | `cli/` |
+| Read-only macOS trial, `albumen scan` | [docs/trial-macos.md](docs/trial-macos.md), `ingest/src/scan.rs` |
 | Camera receiver | `receive/src/store.rs` |
 | MCP tools | `mcp/src/tools.rs`, `mcp/src/main.rs` |
 | iOS camera roll | `mobile/ios`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |

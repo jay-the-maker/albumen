@@ -137,6 +137,12 @@ fn export_and_verify_local_fixture_corpus() {
 
 #[test]
 fn export_and_verify_s3_fixture_corpus() {
+    if std::env::var("ALBUMEN_S3_UNAVAILABLE").ok().as_deref() == Some("1") {
+        eprintln!(
+            "skipping S3: ALBUMEN_S3_UNAVAILABLE=1. Docker is not used. Local filesystem only."
+        );
+        return;
+    }
     if std::env::var("ALBUMEN_S3_ENDPOINT").is_err() {
         panic!("S3 export requires MinIO. Run scripts/with-minio.sh cargo test --locked");
     }

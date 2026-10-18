@@ -14,16 +14,26 @@ concurrency:
 
 jobs:
   ingest:
-    name: ingest round-trip (${{ matrix.os }})
+    name: ingest round-trip (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         # ubuntu-latest moves to Ubuntu 26.04 starting 2026-10-19.
         # 24.04 is the pinned image. 26.04 stays in the matrix only while
-        # that leg is green.
-        os: [ubuntu-24.04, ubuntu-26.04]
+        # that leg is green. macos-14 is the arm64 leg and runs the same
+        # suite, including MinIO and rclone round-trips, from pinned binaries.
+        include:
+          - os: ubuntu-24.04
+            label: ubuntu-24.04
+            timeout: 45
+          - os: ubuntu-26.04
+            label: ubuntu-26.04
+            timeout: 45
+          - os: macos-14
+            label: macos-14 (arm64)
+            timeout: 60
     steps:
       - uses: actions/checkout@v5
 

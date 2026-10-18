@@ -92,6 +92,10 @@ albumen verify-manifest --manifest ./library-manifest.txt --against s3://my-buck
 
 The manifest lists SHA-256, byte length, and the relative path. `verify-manifest` hashes the destination bytes and fails if a file is missing, extra, or different. S3 uses the same `ALBUMEN_S3_*` variables as ingest.
 
+## Read-only macOS trial
+
+`albumen scan <dir> --manifest <out>` walks a library without opening it for write and records path, size, mtime, SHA-256, pairs, sidecars, and key metadata in a JSONL manifest. The manifest has to resolve outside the library. Run the same command again to resume. `albumen verify-manifest` re-hashes a scan manifest and reports drift. The exact commands for a subset of a large volume are in [docs/trial-macos.md](docs/trial-macos.md).
+
 ## Tests
 
 The merge gate copies the fixture corpus through the local filesystem, through MinIO, and through rclone (SFTP, WebDAV, and a MinIO stand-in for B2), then compares SHA-256, filename, mtime, and an ExifTool metadata dump. Filesystem identity tags that any copy changes (directory, inode change time, access time, permissions, and the absolute path) are the only tags ignored. `FileModifyDate`, `FileName`, and every embedded EXIF, XMP, IPTC, GPS, and QuickTime tag must match.
