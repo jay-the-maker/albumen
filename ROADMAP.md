@@ -32,7 +32,7 @@ Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one 
 
 Storage adapters beyond the local directory and the S3 API that exist now:
 
-- rclone for SMB, SFTP, WebDAV, and Backblaze B2. The adapter calls `copy_verify`; rclone is the transport.
+- rclone for SMB. SFTP, WebDAV, and Backblaze B2 already go through `RcloneStore`: the adapter calls `copy_verify`, and rclone is the transport. CI serves SFTP and WebDAV with rclone and uses MinIO as the B2 stand-in.
 - Camera-to-cloud: `albumen-receive` accepts WebDAV, SFTP, and FTP and stores each file with `copy_verify`. S3 upload from a camera, and tethered USB import, are still open. Described in [docs/architecture.md](docs/architecture.md).
 - Synced Google Drive and Dropbox folders stay a `LocalStore` root. No vendor API that rewrites the file on the way through.
 

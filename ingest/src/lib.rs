@@ -15,6 +15,7 @@ mod error;
 mod export;
 mod local;
 mod mtime;
+mod rclone;
 mod s3;
 mod store;
 
@@ -26,6 +27,7 @@ pub use export::{
     ExportDest, ManifestEntry, Placed,
 };
 pub use local::{copy_verify_file, LocalStore};
+pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};
 pub use store::{
     copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,

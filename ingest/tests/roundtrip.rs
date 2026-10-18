@@ -3,10 +3,13 @@
 use std::collections::BTreeSet;
 use std::fs::{self, FileTimes, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use albumen_ingest::{copy_verify, discover, sha256_hex, BlobStore, LocalStore, S3Config, S3Store};
+use albumen_ingest::{
+    copy_verify, discover, sha256_hex, BlobStore, IngestError, LocalStore, RcloneStore, S3Config,
+    S3Store,
+};
 use serde_json::{Map, Value};
 
 /// Tags that describe the filesystem location rather than the original.
@@ -89,6 +92,173 @@ fn s3_round_trip_preserves_bytes_metadata_mtime_and_filename() {
         }
         assert_preserved(&stage, restored.path(), &report);
     }
+}
+
+const RCLONE_USER: &str = "albumen";
+const RCLONE_PASS: &str = "albumen-ci-not-a-secret";
+
+#[test]
+fn rclone_sftp_webdav_and_b2_round_trip() {
+    let bin = rclone_bin();
+    let sftp = start_serve("sftp", &bin);
+    let sftp_store = RcloneStore::sftp(&bin, "127.0.0.1", sftp.port, RCLONE_USER, RCLONE_PASS)
+        .expect("sftp store");
+    round_trip_store(&sftp_store);
+    drop(sftp);
+
+    let webdav = start_serve("webdav", &bin);
+    let webdav_store = RcloneStore::webdav(
+        &bin,
+        &format!("http://127.0.0.1:{}", webdav.port),
+        RCLONE_USER,
+        RCLONE_PASS,
+    )
+    .expect("webdav store");
+    round_trip_store(&webdav_store);
+    drop(webdav);
+
+    let mut config = S3Config::from_env().unwrap_or_else(|err| {
+        panic!(
+            "B2's CI stand-in is MinIO through rclone ({err}). \
+             Run `scripts/with-minio.sh cargo test --locked`."
+        )
+    });
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    config.prefix = format!("rclone-b2-{}-{nanos}/", std::process::id());
+    let b2 = RcloneStore::s3(
+        &bin,
+        &config.endpoint,
+        &config.bucket,
+        &config.access_key,
+        &config.secret_key,
+        &config.prefix,
+    )
+    .unwrap_or_else(|err| panic!("rclone MinIO stand-in for B2 failed: {err}"));
+    round_trip_store(&b2);
+}
+
+fn round_trip_store(store: &impl BlobStore) {
+    let probe_dir = tempfile::tempdir().expect("probe");
+    let probe = probe_dir.path().join("albumen-rclone-probe.bin");
+    fs::write(&probe, b"probe-bytes-not-a-photo").expect("probe bytes");
+    let file = OpenOptions::new().write(true).open(&probe).expect("probe");
+    file.set_times(
+        FileTimes::new().set_modified(UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789)),
+    )
+    .expect("probe mtime");
+    drop(file);
+    store
+        .put_verified(&probe, "albumen-rclone-probe.bin")
+        .expect("probe put");
+    let again = store
+        .put_verified(&probe, "albumen-rclone-probe.bin")
+        .expect_err("identical bytes must not overwrite");
+    assert!(
+        matches!(again, IngestError::AlreadyExists { .. }),
+        "{again}"
+    );
+
+    for case in load_cases() {
+        let stage = stage_case(&case);
+        let asset = discover(&stage.primary).expect("discover");
+        assert_same_names(&case, &asset, &stage.dir);
+        let report = copy_verify(&asset, store)
+            .unwrap_or_else(|err| panic!("rclone copy of {} failed: {err}", case.id));
+        let restored = tempfile::tempdir().expect("temp");
+        for file in &report.files {
+            store
+                .get_verified(&file.filename, restored.path())
+                .unwrap_or_else(|err| {
+                    panic!("rclone read-back of {} failed: {err}", file.filename)
+                });
+        }
+        assert_preserved(&stage, restored.path(), &report);
+    }
+}
+
+struct RcloneServe {
+    child: std::process::Child,
+    port: u16,
+    _keep: tempfile::TempDir,
+}
+
+impl Drop for RcloneServe {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn start_serve(kind: &str, bin: &Path) -> RcloneServe {
+    let keep = tempfile::tempdir().expect("serve dir");
+    let root = keep.path().join("data");
+    fs::create_dir(&root).expect("serve root");
+    let log_path = keep.path().join("serve.log");
+    let log = std::fs::File::create(&log_path).expect("serve log");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("port")
+        .local_addr()
+        .expect("addr")
+        .port();
+    let mut child = Command::new(bin)
+        .arg("--config")
+        .arg("/dev/null")
+        .arg("serve")
+        .arg(kind)
+        .arg(&root)
+        .arg("--addr")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--user")
+        .arg(RCLONE_USER)
+        .arg("--pass")
+        .arg(RCLONE_PASS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log))
+        .spawn()
+        .unwrap_or_else(|err| panic!("failed to start rclone serve {kind}: {err}"));
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return RcloneServe {
+                child,
+                port,
+                _keep: keep,
+            };
+        }
+        if let Some(status) = child.try_wait().expect("serve status") {
+            panic!(
+                "rclone serve {kind} exited {status}\n{}",
+                fs::read_to_string(&log_path).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "rclone serve {kind} did not listen on {port}\n{}",
+        fs::read_to_string(&log_path).unwrap_or_default()
+    );
+}
+
+fn rclone_bin() -> PathBuf {
+    if let Ok(path) = std::env::var("ALBUMEN_RCLONE") {
+        let path = PathBuf::from(path);
+        assert!(
+            path.is_file(),
+            "ALBUMEN_RCLONE={path:?} is not the rclone binary. scripts/install-rclone.sh installs the pinned release."
+        );
+        return path;
+    }
+    let found = Command::new("rclone").arg("version").output();
+    if found.map(|output| output.status.success()).unwrap_or(false) {
+        return PathBuf::from("rclone");
+    }
+    panic!(
+        "rclone is not installed. Run scripts/install-rclone.sh, then \
+         `scripts/with-minio.sh cargo test --locked`."
+    );
 }
 
 struct Stage {

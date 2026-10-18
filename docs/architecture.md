@@ -11,14 +11,14 @@ This is the outline of the system. The ingest crate, the export command, and the
 | Piece | State |
 | --- | --- |
 | Charter, license, contribution rules | Here |
-| `albumen-ingest` copy/verify for local files and S3 | Here |
+| `albumen-ingest` copy/verify for local files, S3, and rclone (SFTP, WebDAV, B2) | Here |
 | Fixture corpus and MinIO round-trip CI | Here |
 | Catalog / search index | No on-disk catalog. MCP search reads files and sidecars into a process-local cache |
 | macOS, iOS, and Android apps | Camera-roll skeletons in `mobile/ios` and `mobile/android`. Not shipped apps. The macOS library UI is not started |
 | MCP server (`albumen-mcp`, stdio) | Here |
 | Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | `albumen-receive` speaks WebDAV, SFTP, and FTP into `copy_verify`. S3 upload and USB are not started |
 | Export-everything command (`albumen export`) | Here |
-| rclone-backed SMB, SFTP, WebDAV, B2 | Not started |
+| rclone-backed SMB, SFTP, WebDAV, B2 | SFTP, WebDAV, and B2 write through `RcloneStore` and `copy_verify`. SMB is not started |
 
 ## Shape
 

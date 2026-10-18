@@ -36,6 +36,9 @@ jobs:
       - name: Install pinned ExifTool
         run: scripts/install-exiftool.sh
 
+      - name: Install pinned rclone
+        run: scripts/install-rclone.sh
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

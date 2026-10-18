@@ -48,6 +48,8 @@ let report = copy_verify(&asset, &LocalStore::new("/library/originals"))?;
 
 S3-compatible stores use `S3Store` (`ALBUMEN_S3_ENDPOINT`, `ALBUMEN_S3_BUCKET`, `ALBUMEN_S3_ACCESS_KEY`, `ALBUMEN_S3_SECRET_KEY`). The CI credentials are disposable test values, not secrets.
 
+SFTP, WebDAV, and Backblaze B2 use `RcloneStore`. rclone is the transport and is not vendored. `put_verified` uploads, reads the bytes back, and checks SHA-256. The exact mtime is kept in a sibling `.{filename}.albumen-verify` object because those backends do not store nanoseconds. CI runs SFTP and WebDAV with `rclone serve` and points the B2 leg at MinIO.
+
 ## Export
 
 `albumen export` copies a whole library, including sidecars and pairs, with `copy_verify`. The source is not modified. A file already at the destination with the same SHA-256 is left in place, so the command can be run again. A different file at that relative path is an error and is not overwritten.
@@ -64,14 +66,14 @@ The manifest lists SHA-256, byte length, and the relative path. `verify-manifest
 
 ## Tests
 
-The merge gate copies the fixture corpus through the local filesystem and through MinIO, then compares SHA-256, filename, mtime, and an ExifTool metadata dump. Filesystem identity tags that any copy changes (directory, inode change time, access time, permissions, and the absolute path) are the only tags ignored. `FileModifyDate`, `FileName`, and every embedded EXIF, XMP, IPTC, GPS, and QuickTime tag must match.
+The merge gate copies the fixture corpus through the local filesystem, through MinIO, and through rclone (SFTP, WebDAV, and a MinIO stand-in for B2), then compares SHA-256, filename, mtime, and an ExifTool metadata dump. Filesystem identity tags that any copy changes (directory, inode change time, access time, permissions, and the absolute path) are the only tags ignored. `FileModifyDate`, `FileName`, and every embedded EXIF, XMP, IPTC, GPS, and QuickTime tag must match.
 
 ```bash
 export PATH="$(scripts/install-exiftool.sh):$PATH"
 scripts/with-minio.sh cargo test --locked
 ```
 
-`scripts/install-exiftool.sh` downloads one ExifTool release and checks its SHA-256 before putting it on `PATH`. `scripts/with-minio.sh` does the same for the MinIO binary. Neither follows a distro package.
+`scripts/install-exiftool.sh` downloads one ExifTool release and checks its SHA-256 before putting it on `PATH`. `scripts/install-rclone.sh` does the same for rclone. `scripts/with-minio.sh` does the same for the MinIO binary and installs that rclone. None of them follow a distro package.
 
 Fixture provenance and the CC0 dedication are in [fixtures/README.md](fixtures/README.md). The architecture outline is in [docs/architecture.md](docs/architecture.md).
 

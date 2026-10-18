@@ -6,6 +6,8 @@ ExifTool is Image-ExifTool **13.59**, SHA-256 `668ea3acececb7235fbd0f4900e72d5f1
 
 MinIO stays at `RELEASE.2025-09-07T16-13-09Z`, SHA-256 `7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f`, in `scripts/with-minio.sh`. The workflow downloads that binary and runs it. The tree does not contain MinIO source.
 
+rclone stays at **v1.75.2**, zip SHA-256 `349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702`, in `scripts/install-rclone.sh`. The round-trip job uses that binary as the transport for SFTP and WebDAV (`rclone serve` on a local directory) and for B2. B2 has no local server and no paid account in CI, so that leg is rclone's S3 backend pointed at the same MinIO. The tree does not contain rclone source.
+
 The Android camera-roll job runs on `ubuntu-24.04`. `scripts/install-android-sdk.sh` pins command-line tools `13114758`, SHA-256 `7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee`, from `https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip`. It then installs `platforms;android-35` and `build-tools;35.0.0`, which `sdkmanager` checks against Google's repository. `scripts/install-gradle.sh` pins Gradle `8.11.1`, SHA-256 `f397b287023acdba1e9f6fc5ea72d22dd63669d59ed4a289a29b1a76eee151c6`. The library is Android Gradle Plugin `8.7.3` and Kotlin `2.0.21`. `scripts/android-ci.sh` compiles it and runs the hash-check unit test.
 
 The iOS job runs `swift test --package-path mobile/ios` on `macos-14`. PhotoKit is a macOS framework, so the package builds there. This VM is Linux and cannot link Photos. If the macOS runner is rejected for billing, that job has to come out and this page has to say so.
