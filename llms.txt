@@ -2,11 +2,13 @@
 
 > Open-source, bring-your-own-storage, MCP-native photo library. Originals are bit-exact, metadata is never lost, and a full export is one command.
 
-Reliability, fidelity, respect, and control are the metrics. Cost is outside those metrics. The commitment is the design philosophy. The working guide for agents is AGENTS.md.
+Reliability, fidelity, respect, control, and the measured performance and friction budgets are the metrics. Cost is outside those metrics. The commitment is the design philosophy. The working guide for agents is AGENTS.md.
 
 ## Docs
 
 - [Design philosophy](https://github.com/jay-the-maker/albumen/blob/main/DESIGN_PHILOSOPHY.md): Bit-exact originals, checksums on the CI gate, never delete, one-step export, bring-your-own storage, respect for the user, and the MCP cap.
+- [Performance budgets](https://github.com/jay-the-maker/albumen/blob/main/docs/performance-budgets.md): Cold start, thumbnails, scroll, search, import, and backup CPU and battery. Client metrics are targets until the apps exist.
+- [Friction](https://github.com/jay-the-maker/albumen/blob/main/docs/friction.md): Steps from install to a first backup, and the sane-defaults, no-account, and no-nags rules.
 - [Agent guide](https://github.com/jay-the-maker/albumen/blob/main/AGENTS.md): Build and test commands, the round-trip gate, never-delete rules, and where to start.
 - [Contributing](https://github.com/jay-the-maker/albumen/blob/main/CONTRIBUTING.md): Philosophy acknowledgment, Developer Certificate of Origin, and how agents contribute.
 - [README](https://github.com/jay-the-maker/albumen/blob/main/README.md): What the repository does today.

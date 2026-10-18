@@ -15,7 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Require the checked box and a real explanation
+      - name: Self-test the checker
+        run: python3 scripts/check-philosophy-ack.py --self-test
+
+      - name: Require the checked boxes and a real explanation
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: python3 scripts/check-philosophy-ack.py

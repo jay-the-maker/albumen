@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fail unless a pull request body checks the philosophy box and explains it."""
+"""Fail unless a pull request body checks the philosophy and friction boxes."""
 
 import os
 import re
 import sys
 
 CHECKED_TEXT = "I have read DESIGN_PHILOSOPHY.md and this change upholds it"
+FRICTION = ("Sane defaults", "No account required", "No nags")
 PLACEHOLDER = (
     "Replace this sentence with how the change keeps originals bit-exact and metadata intact."
 )
@@ -13,13 +14,13 @@ HEADING = "## How this upholds it"
 MIN_EXPLANATION = 20
 
 
-def is_checked(line: str) -> bool:
+def line_is_checked(line: str, text: str) -> bool:
     stripped = line.strip()
     if not stripped.startswith("- [") or len(stripped) < 5 or stripped[4] != "]":
         return False
     if stripped[3] not in ("x", "X"):
         return False
-    return stripped[5:].lstrip() == CHECKED_TEXT
+    return stripped[5:].lstrip() == text
 
 
 def strip_comments(text: str) -> str:
@@ -45,10 +46,13 @@ def explanation(body: str) -> str | None:
 
 def problems(body: str) -> list[str]:
     visible = strip_comments(body or "")
+    lines = visible.splitlines()
     found: list[str] = []
-    checked = any(is_checked(line) for line in visible.splitlines())
-    if not checked:
+    if not any(line_is_checked(line, CHECKED_TEXT) for line in lines):
         found.append("the philosophy checkbox is not checked")
+    for label in FRICTION:
+        if not any(line_is_checked(line, label) for line in lines):
+            found.append(f"the {label} checkbox is not checked")
     text = explanation(visible)
     if text is None:
         found.append("missing heading 'How this upholds it'")
@@ -81,7 +85,10 @@ def main() -> int:
 
 def self_test() -> int:
     good = (
-        "- [x] I have read DESIGN_PHILOSOPHY.md and this change upholds it\n\n"
+        "- [x] I have read DESIGN_PHILOSOPHY.md and this change upholds it\n"
+        "- [x] Sane defaults\n"
+        "- [x] No account required\n"
+        "- [x] No nags\n\n"
         "## How this upholds it\n\n"
         "This change keeps the original bytes and the embedded metadata intact.\n\n"
         "## Test plan\n\n"
@@ -118,13 +125,19 @@ def self_test() -> int:
         (
             "commented-out box",
             "<!-- - [x] I have read DESIGN_PHILOSOPHY.md and this change upholds it -->\n"
+            "- [x] Sane defaults\n"
+            "- [x] No account required\n"
+            "- [x] No nags\n"
             "## How this upholds it\n\n"
             "This change keeps the original bytes and the embedded metadata intact.\n",
             ["the philosophy checkbox is not checked"],
         ),
         (
             "explanation only in a comment",
-            "- [x] I have read DESIGN_PHILOSOPHY.md and this change upholds it\n\n"
+            "- [x] I have read DESIGN_PHILOSOPHY.md and this change upholds it\n"
+            "- [x] Sane defaults\n"
+            "- [x] No account required\n"
+            "- [x] No nags\n\n"
             "## How this upholds it\n\n"
             f"{PLACEHOLDER}\n"
             "<!-- This change keeps the original bytes and the embedded metadata intact. -->\n",
@@ -137,6 +150,29 @@ def self_test() -> int:
                 "abcdefghijabcdefghij",
             ),
             [],
+        ),
+        (
+            "unchecked nags",
+            good.replace("- [x] No nags", "- [ ] No nags"),
+            ["the No nags checkbox is not checked"],
+        ),
+        (
+            "commented-out nags",
+            good.replace(
+                "- [x] No nags\n",
+                "<!-- - [x] No nags -->\n",
+            ),
+            ["the No nags checkbox is not checked"],
+        ),
+        (
+            "uppercase friction box",
+            good.replace("- [x] No account required", "- [X] No account required"),
+            [],
+        ),
+        (
+            "friction box with extra words",
+            good.replace("- [x] Sane defaults", "- [x] Sane defaults today"),
+            ["the Sane defaults checkbox is not checked"],
         ),
     ]
     failed = 0

@@ -6,18 +6,14 @@
 //! when the matching flag is set for this process, and both go through
 //! `copy_verify`. There is no delete tool.
 
-mod io;
-mod metadata;
-mod tools;
-
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use albumen_mcp::io;
+use albumen_mcp::Library;
 use clap::Parser;
 use serde_json::{json, Value};
-
-use crate::tools::Library;
 
 #[derive(Debug, Parser)]
 #[command(
