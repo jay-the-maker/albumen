@@ -13,7 +13,7 @@ This is the outline of the system. The ingest crate, the export command, and the
 | Charter, license, contribution rules | Here |
 | `albumen-ingest` copy/verify for local files and S3 | Here |
 | Fixture corpus and MinIO round-trip CI | Here |
-| Catalog / search index | Not started |
+| Catalog / search index | No on-disk catalog. MCP search reads files and sidecars into a process-local cache |
 | macOS, iOS, and Android apps | Not started |
 | MCP server (`albumen-mcp`, stdio) | Here |
 | Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | Not started |
@@ -88,7 +88,9 @@ Edits never replace the original. A rating, a crop, or a color adjustment is a s
 
 ## Catalog
 
-The future catalog stores ids, paths, filenames, mtimes, SHA-256, and extracted metadata so the browser can scroll without reading every file. It is rebuildable. A hash in the catalog is a hint; a copy still hashes the bytes. The catalog is not allowed to be the only copy of GPS, captions, or dates.
+MCP search does not keep a catalog. It reads capture date, camera, lens, GPS, keywords, and captions from each file and from XMP or AAE sidecars beside it. A process-local cache is reused only while the file's SHA-256 and length are unchanged. Nothing is written next to the originals.
+
+A future catalog may store ids, paths, filenames, mtimes, SHA-256, and extracted metadata so a browser can scroll without reading every file. It would be rebuildable. A hash in that catalog is a hint; a copy still hashes the bytes. The catalog is not allowed to be the only copy of GPS, captions, or dates.
 
 ## Apps
 
@@ -110,7 +112,7 @@ Both paths refuse to overwrite an existing original. Success is the verified des
 
 The MCP server covers search, browse, export, and upload/ingest.
 
-Read tools are the default: search the catalog, browse by time and place, read metadata, and export a copy to a path the user chose. Export is `copy_verify` out of the library. It is not a move, and it is not a delete.
+Read tools are the default: search files and sidecars by capture date, camera, lens, GPS box, keyword, and caption; browse by path; and export a copy to a path the user chose. Export is `copy_verify` out of the library. It is not a move, and it is not a delete.
 
 Upload and ingest are write tools. They stay off until the user explicitly enables them. A write calls `copy_verify` and reports success only after the destination hash and mtime have been checked. It never overwrites an existing original, and it never recompresses one.
 
@@ -141,7 +143,7 @@ The macOS and iOS apps will be Swift, and the Android app will be Kotlin. The pi
 
 ## CI
 
-GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` against a pinned MinIO binary (`RELEASE.2025-09-07T16-13-09Z`). MinIO is AGPL. The workflow downloads it and runs it; the Albumen tree does not contain MinIO source. The S3 credentials in CI are fixed test strings (`albumen` / `albumen-ci-not-a-secret`) for a server that exists only for that job.
+GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, and `cargo test`. The runner pin, the ExifTool 13.59 checksum, and the MinIO checksum are in [ci.md](ci.md). MinIO is AGPL. The workflow downloads it and runs it; the Albumen tree does not contain MinIO source. The S3 credentials in CI are fixed test strings (`albumen` / `albumen-ci-not-a-secret`) for a server that exists only for that job.
 
 The fixture corpus is synthetic and CC0. It includes a Motion Photo (JPEG plus appended MP4), an Apple `.aae` edit sidecar, and an Ultra HDR JPEG with a synthetic ICC profile and an MPF gain map, along with the earlier GPS, HEIC, RAW+JPEG, XMP, Live Photo, and video files. Tests compare each file with itself after a round trip. They do not depend on a checked-in ExifTool golden file, so an ExifTool upgrade that changes formatting still compares equal as long as both sides are read by the same binary.
 

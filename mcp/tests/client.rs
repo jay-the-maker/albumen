@@ -388,6 +388,155 @@ fn enabled_export_to_s3_verifies_and_leaves_the_library() {
 }
 
 #[test]
+fn metadata_search_reads_files_and_sidecars_without_writing() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+    let sums = fs::read_to_string(fixtures.join("SHA256SUMS")).unwrap();
+    let before = snapshot(&fixtures.join("jpeg-gps/IMG_0001.jpg"));
+    let mut client = Client::start(&fixtures, &[]);
+    handshake(&mut client);
+
+    let (is_error, body) =
+        tool_body(&client.request(2, "tools/call", json!({"name": "search", "arguments": {}})));
+    assert!(is_error, "{body}");
+
+    let paths = search_paths(
+        &mut client,
+        3,
+        json!({"captured_after": "2016-03-21", "captured_before": "2016-03-21"}),
+    );
+    assert!(paths.contains(&"xmp/IMG_0004.jpg".to_string()), "{paths:?}");
+    assert!(paths.contains(&"xmp/IMG_0004.xmp".to_string()), "{paths:?}");
+    assert!(
+        !paths.iter().any(|path| path.contains("IMG_0001")),
+        "{paths:?}"
+    );
+
+    let paths = search_paths(&mut client, 4, json!({"camera": "Synthetic DNG"}));
+    assert_eq!(paths, vec!["raw-jpeg/IMG_0003.dng".to_string()]);
+
+    let (is_error, body) = tool_body(&client.request(
+        5,
+        "tools/call",
+        json!({"name": "search", "arguments": {"gps": {"south": 37.0, "north": 38.0, "west": -123.0, "east": -122.0}}}),
+    ));
+    assert!(!is_error, "{body}");
+    let sf = body["files"].as_array().unwrap();
+    assert_eq!(sf.len(), 1);
+    assert_eq!(sf[0]["path"], "jpeg-gps/IMG_0001.jpg");
+    assert_eq!(sf[0]["longitude"], -122.4783);
+    assert!(sf[0]["keywords"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == "cc0"));
+
+    let paths = search_paths(
+        &mut client,
+        6,
+        json!({"gps": {"south": 36.0, "north": 37.0, "west": -116.0, "east": -115.0}}),
+    );
+    assert_eq!(paths, vec!["raw-jpeg/IMG_0003.jpg".to_string()]);
+
+    let paths = search_paths(
+        &mut client,
+        7,
+        json!({"gps": {"south": 48.0, "north": 49.0, "west": 2.0, "east": 3.0}}),
+    );
+    assert!(
+        paths.contains(&"heic/IMG_0002.heic".to_string()),
+        "{paths:?}"
+    );
+    assert!(paths.contains(&"xmp/IMG_0004.jpg".to_string()), "{paths:?}");
+    assert!(paths.contains(&"xmp/IMG_0004.xmp".to_string()), "{paths:?}");
+    assert!(
+        !paths.contains(&"jpeg-gps/IMG_0001.jpg".to_string()),
+        "{paths:?}"
+    );
+
+    let paths = search_paths(&mut client, 8, json!({"keyword": "cc0"}));
+    assert_eq!(paths, vec!["jpeg-gps/IMG_0001.jpg".to_string()]);
+
+    let paths = search_paths(&mut client, 9, json!({"caption": "sidecar fixture"}));
+    assert!(paths.contains(&"xmp/IMG_0004.jpg".to_string()), "{paths:?}");
+    assert!(paths.contains(&"xmp/IMG_0004.xmp".to_string()), "{paths:?}");
+
+    let paths = search_paths(&mut client, 10, json!({"lens": "35mm"}));
+    assert!(paths.is_empty(), "{paths:?}");
+
+    let (is_error, body) = tool_body(&client.request(
+        11,
+        "tools/call",
+        json!({"name": "search", "arguments": {"camera": "Albumen", "limit": 1}}),
+    ));
+    assert!(!is_error, "{body}");
+    assert_eq!(body["files"].as_array().unwrap().len(), 1);
+    assert!(body["truncated"].as_bool().unwrap());
+
+    client.close();
+    assert_eq!(snapshot(&fixtures.join("jpeg-gps/IMG_0001.jpg")), before);
+    assert_eq!(
+        fs::read_to_string(fixtures.join("SHA256SUMS")).unwrap(),
+        sums
+    );
+}
+
+#[test]
+fn lens_and_keyword_search_reads_a_sidecar() {
+    let root = tempfile::tempdir().unwrap();
+    let library = root.path();
+    fs::write(library.join("IMG_0001.jpg"), b"jpeg-bytes").unwrap();
+    fs::write(
+        library.join("IMG_0001.xmp"),
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:aux="http://ns.adobe.com/exif/1.0/aux/">
+   <dc:subject><rdf:Bag><rdf:li>harbor</rdf:li></rdf:Bag></dc:subject>
+   <aux:Lens>Fixture Lens 35mm</aux:Lens>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>
+"#,
+    )
+    .unwrap();
+    let names_before = fs::read_dir(library)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mut client = Client::start(library, &[]);
+    handshake(&mut client);
+    let paths = search_paths(&mut client, 2, json!({"lens": "35mm"}));
+    assert!(paths.contains(&"IMG_0001.jpg".to_string()), "{paths:?}");
+    assert!(paths.contains(&"IMG_0001.xmp".to_string()), "{paths:?}");
+    let paths = search_paths(&mut client, 3, json!({"keyword": "harbor"}));
+    assert!(paths.contains(&"IMG_0001.jpg".to_string()), "{paths:?}");
+    client.close();
+    let names_after = fs::read_dir(library)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names_before.len(), names_after.len());
+}
+
+fn search_paths(client: &mut Client, id: i64, arguments: Value) -> Vec<String> {
+    let (is_error, body) = tool_body(&client.request(
+        id,
+        "tools/call",
+        json!({"name": "search", "arguments": arguments}),
+    ));
+    assert!(!is_error, "{body}");
+    body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
 fn quarantine_is_unreachable_from_the_mcp_server() {
     let root = tempfile::tempdir().unwrap();
     let library = root.path().join("library");

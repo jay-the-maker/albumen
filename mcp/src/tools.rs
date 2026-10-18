@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use albumen_ingest::{
     copy_verify, discover, export_tree, write_manifest, DirectoryTree, ExportDest, IngestError,
@@ -13,10 +14,13 @@ use albumen_ingest::{
 };
 use serde_json::{json, Value};
 
+use crate::metadata::{self, Filters, GeoBox};
+
 pub struct Library {
     root: PathBuf,
     pub enable_export: bool,
     pub enable_upload: bool,
+    metadata: Mutex<metadata::Cache>,
 }
 
 impl Library {
@@ -28,6 +32,7 @@ impl Library {
             root,
             enable_export,
             enable_upload,
+            metadata: Mutex::new(metadata::Cache::default()),
         })
     }
 
@@ -88,21 +93,48 @@ impl Library {
     }
 
     fn search(&self, arguments: &Value) -> Result<Value, String> {
-        let query = required_string(arguments, "query")?.to_lowercase();
-        if query.is_empty() {
+        reject_unknown_search_keys(arguments)?;
+        let query = optional_string(arguments, "query")?;
+        if query.is_some_and(|query| query.is_empty()) {
             return Err("query must not be empty".to_string());
         }
-        let mut files = self
-            .files()?
-            .into_iter()
-            .filter(|file| {
+        let filters = metadata_filters(arguments)?;
+        if query.is_none() && filters.is_none() {
+            return Err("search needs a query or a metadata filter".to_string());
+        }
+        let query = query.map(str::to_lowercase);
+        let mut files = self.files()?;
+        if let Some(filters) = filters {
+            let paths = files
+                .iter()
+                .map(|file| file["path"].as_str().unwrap_or("").to_string())
+                .collect::<Vec<_>>();
+            let mut cache = self.metadata.lock().unwrap_or_else(|err| err.into_inner());
+            let read = cache.load(&self.root, &paths)?;
+            drop(cache);
+            files.retain(|file| {
+                let path = file["path"].as_str().unwrap_or("");
+                let Some(own) = read.get(path) else {
+                    return false;
+                };
+                filters.matches(&metadata::with_sidecars(path, own, &read))
+            });
+            for file in &mut files {
+                let path = file["path"].as_str().unwrap_or("");
+                if let Some(own) = read.get(path) {
+                    attach_metadata(file, &metadata::with_sidecars(path, own, &read));
+                }
+            }
+        }
+        if let Some(query) = &query {
+            files.retain(|file| {
                 file["path"]
                     .as_str()
                     .unwrap_or("")
                     .to_lowercase()
-                    .contains(&query)
-            })
-            .collect::<Vec<_>>();
+                    .contains(query)
+            });
+        }
         let truncated = truncate(&mut files, optional_limit(arguments)?.unwrap_or(1000))?;
         Ok(json!({"files": files, "truncated": truncated}))
     }
@@ -276,17 +308,152 @@ fn optional_limit(arguments: &Value) -> Result<Option<u64>, String> {
     }
 }
 
+fn attach_metadata(file: &mut Value, record: &metadata::Record) {
+    file["captured"] = record
+        .captured
+        .map(|time| Value::String(time.to_text()))
+        .unwrap_or(Value::Null);
+    file["camera"] = optional_text(record.camera.as_deref());
+    file["lens"] = optional_text(record.lens.as_deref());
+    file["latitude"] = optional_number(record.latitude);
+    file["longitude"] = optional_number(record.longitude);
+    file["keywords"] = Value::Array(record.keywords.iter().cloned().map(Value::String).collect());
+    file["captions"] = Value::Array(record.captions.iter().cloned().map(Value::String).collect());
+}
+
+fn optional_text(text: Option<&str>) -> Value {
+    match text {
+        Some(text) => Value::String(text.to_string()),
+        None => Value::Null,
+    }
+}
+
+fn optional_number(number: Option<f64>) -> Value {
+    match number {
+        Some(number) => json!(number),
+        None => Value::Null,
+    }
+}
+
+fn reject_unknown_search_keys(arguments: &Value) -> Result<(), String> {
+    const ALLOWED: &[&str] = &[
+        "query",
+        "limit",
+        "captured_after",
+        "captured_before",
+        "camera",
+        "lens",
+        "keyword",
+        "caption",
+        "gps",
+    ];
+    for key in arguments_object(arguments)?.keys() {
+        if !ALLOWED.contains(&key.as_str()) {
+            return Err(format!("unknown search field {key}"));
+        }
+    }
+    Ok(())
+}
+
+fn metadata_filters(arguments: &Value) -> Result<Option<Filters>, String> {
+    let captured_after = optional_string(arguments, "captured_after")?
+        .map(|text| metadata::parse_user_time(text, false))
+        .transpose()?;
+    let captured_before = optional_string(arguments, "captured_before")?
+        .map(|text| metadata::parse_user_time(text, true))
+        .transpose()?;
+    let camera = optional_nonempty(arguments, "camera")?;
+    let lens = optional_nonempty(arguments, "lens")?;
+    let keyword = optional_nonempty(arguments, "keyword")?;
+    let caption = optional_nonempty(arguments, "caption")?;
+    let gps = optional_gps(arguments)?;
+    if captured_after.is_none()
+        && captured_before.is_none()
+        && camera.is_none()
+        && lens.is_none()
+        && keyword.is_none()
+        && caption.is_none()
+        && gps.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(Filters {
+        captured_after,
+        captured_before,
+        camera,
+        lens,
+        keyword,
+        caption,
+        gps,
+    }))
+}
+
+fn optional_nonempty(arguments: &Value, key: &str) -> Result<Option<String>, String> {
+    match optional_string(arguments, key)? {
+        None => Ok(None),
+        Some("") => Err(format!("{key} must not be empty")),
+        Some(text) => Ok(Some(text.to_string())),
+    }
+}
+
+fn optional_gps(arguments: &Value) -> Result<Option<GeoBox>, String> {
+    match arguments_object(arguments)?.get("gps") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(map)) => {
+            for key in map.keys() {
+                if !["south", "north", "west", "east"].contains(&key.as_str()) {
+                    return Err(format!("unknown gps field {key}"));
+                }
+            }
+            let south = required_f64(map, "south")?;
+            let north = required_f64(map, "north")?;
+            let west = required_f64(map, "west")?;
+            let east = required_f64(map, "east")?;
+            metadata::parse_geo_box(south, north, west, east).map(Some)
+        }
+        Some(_) => Err("gps must be an object".to_string()),
+    }
+}
+
+fn required_f64(map: &serde_json::Map<String, Value>, key: &str) -> Result<f64, String> {
+    match map.get(key) {
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .ok_or_else(|| format!("gps {key} must be a finite number")),
+        Some(_) => Err(format!("gps {key} must be a number")),
+        None => Err(format!("gps is missing {key}")),
+    }
+}
+
 fn search_def() -> Value {
     json!({
         "name": "search",
-        "description": "Find library files whose relative path contains the query. Reads only. Does not modify the library.",
+        "description": "Find library files by path, capture date, camera, lens, GPS box, keyword, or caption. Metadata is read from the files and their XMP/AAE sidecars. Nothing is written.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Case-insensitive substring of the relative path"},
+                "captured_after": {"type": "string", "description": "Inclusive capture date or time, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"},
+                "captured_before": {"type": "string", "description": "Inclusive capture date or time. A date alone includes that whole day."},
+                "camera": {"type": "string", "description": "Case-insensitive substring of make and model"},
+                "lens": {"type": "string", "description": "Case-insensitive substring of the lens name"},
+                "keyword": {"type": "string", "description": "Case-insensitive substring of an XMP subject or IPTC keyword"},
+                "caption": {"type": "string", "description": "Case-insensitive substring of an XMP/IPTC caption or description"},
+                "gps": {
+                    "type": "object",
+                    "description": "Inclusive latitude/longitude box. If west is greater than east, the box crosses the antimeridian.",
+                    "properties": {
+                        "south": {"type": "number"},
+                        "north": {"type": "number"},
+                        "west": {"type": "number"},
+                        "east": {"type": "number"}
+                    },
+                    "required": ["south", "north", "west", "east"],
+                    "additionalProperties": false
+                },
                 "limit": {"type": "integer", "minimum": 0}
             },
-            "required": ["query"],
             "additionalProperties": false
         }
     })

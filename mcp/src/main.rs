@@ -7,6 +7,7 @@
 //! `copy_verify`. There is no delete tool.
 
 mod io;
+mod metadata;
 mod tools;
 
 use std::io::BufReader;
