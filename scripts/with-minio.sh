@@ -66,6 +66,11 @@ export ALBUMEN_S3_ENDPOINT="${ALBUMEN_S3_ENDPOINT:-http://127.0.0.1:${PORT}}"
 export ALBUMEN_S3_BUCKET="${ALBUMEN_S3_BUCKET:-albumen-ingest-test}"
 export ALBUMEN_S3_REGION="${ALBUMEN_S3_REGION:-us-east-1}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RCLONE_DIR="$("${SCRIPT_DIR}/install-rclone.sh")"
+export PATH="${RCLONE_DIR}:${PATH}"
+export ALBUMEN_RCLONE="${RCLONE_DIR}/rclone"
+
 set +e
 "$@"
 status=$?
