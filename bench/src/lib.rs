@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use albumen_ingest::{copy_verify, sha256_hex, Asset, AssetFile, LocalStore, Role};
+use albumen_ingest::{
+    copy_verify, sha256_hex, Asset, AssetFile, DirectoryTree, ExportDest, LocalStore, Role,
+};
 use albumen_mcp::Library;
 use serde_json::{json, Value};
 
@@ -403,10 +405,13 @@ fn plain_copy_mb_s(sources: &[PathBuf], dest: &Path) -> Result<f64, String> {
     Ok((bytes as f64) / 1_000_000.0 / seconds)
 }
 
-fn search_reference_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
+fn search_reference_ms(root: &Path, _relative: &[String]) -> Result<f64, String> {
     let started = Instant::now();
-    let mut lines = Vec::with_capacity(relative.len());
-    for name in relative {
+    let listed = DirectoryTree::new(root)
+        .list()
+        .map_err(|err| err.to_string())?;
+    let mut lines = Vec::with_capacity(listed.len());
+    for name in &listed {
         let path = root.join(name);
         let len = fs::metadata(&path)
             .map_err(|err| format!("stat {name}: {err}"))?
@@ -425,19 +430,19 @@ fn search_reference_ms(root: &Path, relative: &[String]) -> Result<f64, String> 
 
 fn browse_reference_ms(root: &Path) -> Result<f64, String> {
     let started = Instant::now();
-    let mut lines = Vec::new();
-    for entry in fs::read_dir(root).map_err(|err| format!("walk library: {err}"))? {
-        let entry = entry.map_err(|err| format!("walk library: {err}"))?;
-        let len = entry
-            .metadata()
-            .map_err(|err| format!("stat {}: {err}", entry.path().display()))?
+    let listed = DirectoryTree::new(root)
+        .list()
+        .map_err(|err| err.to_string())?;
+    let mut lines = Vec::with_capacity(listed.len());
+    for name in listed {
+        let len = fs::metadata(root.join(&name))
+            .map_err(|err| format!("stat {name}: {err}"))?
             .len();
         lines.push(json!({
-            "path": entry.file_name().to_string_lossy(),
+            "path": name,
             "bytes": len,
         }));
     }
-    lines.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
     black_box(lines);
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
