@@ -40,7 +40,7 @@ pub use store::{
 mod test_support {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::SystemTime;
 
     use super::mtime::set_mtime;
 
@@ -50,12 +50,11 @@ mod test_support {
 
     impl Tmp {
         pub fn new() -> Self {
-            let n = std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos();
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let path =
-                std::env::temp_dir().join(format!("albumen-test-{n}-{}", std::process::id()));
+                std::env::temp_dir().join(format!("albumen-test-{}-{n}", std::process::id()));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }
