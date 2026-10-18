@@ -1,0 +1,20 @@
+# Albumen
+
+> Open-source, bring-your-own-storage, MCP-native photo library. Originals are bit-exact, metadata is never lost, and a full export is one command.
+
+Reliability, fidelity, respect, and control are the metrics. Cost is outside those metrics. The commitment is the design philosophy. The working guide for agents is AGENTS.md.
+
+## Docs
+
+- [Design philosophy](https://github.com/jay-the-maker/albumen/blob/main/DESIGN_PHILOSOPHY.md): Bit-exact originals, checksums on the CI gate, never delete, one-step export, bring-your-own storage, respect for the user, and the MCP cap.
+- [Agent guide](https://github.com/jay-the-maker/albumen/blob/main/AGENTS.md): Build and test commands, the round-trip gate, never-delete rules, and where to start.
+- [Contributing](https://github.com/jay-the-maker/albumen/blob/main/CONTRIBUTING.md): Philosophy acknowledgment, Developer Certificate of Origin, and how agents contribute.
+- [README](https://github.com/jay-the-maker/albumen/blob/main/README.md): What the repository does today.
+- [Roadmap](https://github.com/jay-the-maker/albumen/blob/main/ROADMAP.md): Work that is not in the tree yet.
+- [Architecture](https://github.com/jay-the-maker/albumen/blob/main/docs/architecture.md): Ingest, export, the camera receiver, and the MCP server.
+- [MCP registry draft](https://github.com/jay-the-maker/albumen/blob/main/docs/mcp-registry.md): `server.json` metadata for the official MCP Registry. Not submitted.
+
+## Optional
+
+- [Repository](https://github.com/jay-the-maker/albumen): Source, Apache-2.0.
+- [GitHub Sponsors](https://github.com/sponsors/jay-the-maker): The only funding platform.

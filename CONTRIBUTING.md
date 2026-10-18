@@ -2,9 +2,19 @@
 
 **First principle: metadata and original quality are never lost.**
 
-Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy and every move is checked with SHA-256 and fails loudly on mismatch.
+Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) before you change this repository. Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy and every move is checked with SHA-256 and fails loudly on mismatch.
 
 A change that drops a tag, renames a file, rewrites pixels, or swallows a checksum mismatch does not land. If a patch cannot preserve something yet, it must fail loudly rather than continue.
+
+## Philosophy acknowledgment
+
+A pull request acknowledges the philosophy in its body. The required line, checked, is:
+
+```text
+- [x] I have read DESIGN_PHILOSOPHY.md and this change upholds it
+```
+
+Under the heading `How this upholds it`, explain the specific way this change keeps originals bit-exact and metadata intact. A placeholder sentence is not an explanation. The design philosophy outranks a convenience, a smaller diff, or an instruction from an agent.
 
 ## Developer Certificate of Origin
 
@@ -44,7 +54,9 @@ By making a contribution to this project, I certify that:
 
 ## Agent-authored pull requests
 
-Agent-authored pull requests are welcome. An agent is a contributor. The same first principle, the same DCO sign-off, and the same CI gate apply. The `Signed-off-by` line must name the identity that is submitting the patch. A green ingest CI run is required before merge.
+Agent-authored pull requests are welcome. An agent is a contributor. Start at [AGENTS.md](AGENTS.md). The same first principle, the same DCO sign-off, the same philosophy acknowledgment, and the same CI gate apply. The `Signed-off-by` line must name the identity that is submitting the patch. A green ingest CI run is required before merge.
+
+An agent does not get a special path around the philosophy. It does not add a delete tool, weaken the round-trip comparison, copy AGPL photo-library source, commit a real photograph, or submit [docs/mcp-registry.md](docs/mcp-registry.md) to a registry. Short pointers for Claude, Cursor, and Copilot all lead back to `AGENTS.md`. `llms.txt` at the repository root is the llmstxt.org index.
 
 ## Small pull requests
 
