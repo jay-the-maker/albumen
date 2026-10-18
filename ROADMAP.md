@@ -6,9 +6,7 @@ Albumen is early. This list is the work that is not in the tree yet. The ingest 
 
 ## Export everything
 
-One command copies the whole library to a destination the user names: every original, every sidecar, every non-destructive edit file, and the metadata that lives inside those files. The destination can be a directory or any `BlobStore` the ingest core already speaks.
-
-The command is `copy_verify` across the library, not an archive format that recompresses. It writes a manifest next to the export. Each line is the preserved filename, the byte length, and the SHA-256. A later check of that manifest must fail if a byte moved. The export does not delete the library it copied from.
+Shipped as `albumen export` and `albumen verify-manifest`. The command copy-verifies the library, sidecars, and pairs to a directory or `s3://` prefix, writes a SHA-256 manifest, and can be run again without overwriting. See the README.
 
 ## Camera-roll background backup spike
 

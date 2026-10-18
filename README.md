@@ -2,11 +2,11 @@
 
 **First principle: metadata and original quality are never lost.**
 
-Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy and every move is checked with SHA-256 and fails loudly on mismatch.
+Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy is checked with SHA-256 and fails loudly on mismatch. The default path never removes or alters a source.
 
 Albumen is an open-source photo library with the feel of classic iPhoto, built to keep working when the library is hundreds of thousands of items and multiple terabytes. You bring the storage. Agents can read the library; they do not get tools that delete or rewrite originals.
 
-**Status: early.** The native apps, the catalog, and the agent server are not built yet. This repository holds the charter and `albumen-ingest`, a small Rust library that copies an original plus its sidecars, preserves filename and mtime, and verifies SHA-256.
+**Status: early.** The native apps, the catalog, and the agent server are not built yet. This repository holds the charter, `albumen-ingest`, and the `albumen` export command. Ingest copies an original plus its sidecars, preserves filename and mtime, and verifies SHA-256. It does not delete sources.
 
 ## Vision
 
@@ -34,9 +34,10 @@ The backup apps call the same ingest path as a drag-and-drop import. They do not
 2. Copy the bytes. Do not open them with an image codec.
 3. Keep the filename. Refuse a rename. Refuse to overwrite a file that is already there.
 4. Keep the mtime. On S3, store it in object metadata (`albumen-mtime-ns`). `Last-Modified` is the upload time and is not the photo's timestamp.
-5. Read the destination back, compute SHA-256, and compare. On mismatch, delete the destination and return an error that names both hashes.
+5. Read the destination back, compute SHA-256, and compare. On mismatch, delete the destination copy and return an error that names both hashes. The source is left as it was.
+6. If a later file in the asset fails, delete the destination copies this call wrote. Sources stay.
 
-`move_verified` is that copy, and only then deletes the source.
+`copy_verify` is the only default path. There is no move in the CLI. `copy_verify_quarantine` is an explicit per-run opt-in: after the copy verifies, it renames sources into a trash directory you pass in for that call. It never unlinks a source. If the trash directory already has that name, the source stays. Nothing in the default API or the CLI calls it.
 
 ```rust
 use albumen_ingest::{copy_verify, discover, LocalStore};
@@ -46,6 +47,20 @@ let report = copy_verify(&asset, &LocalStore::new("/library/originals"))?;
 ```
 
 S3-compatible stores use `S3Store` (`ALBUMEN_S3_ENDPOINT`, `ALBUMEN_S3_BUCKET`, `ALBUMEN_S3_ACCESS_KEY`, `ALBUMEN_S3_SECRET_KEY`). The CI credentials are disposable test values, not secrets.
+
+## Export
+
+`albumen export` copies a whole library, including sidecars and pairs, with `copy_verify`. The source is not modified. A file already at the destination with the same SHA-256 is left in place, so the command can be run again. A different file at that relative path is an error and is not overwritten.
+
+```bash
+albumen export --from ./library --to /backup/library
+albumen verify-manifest --manifest /backup/library/ALBUMEN-MANIFEST.txt --against /backup/library
+
+albumen export --from ./library --to s3://my-bucket/library --manifest ./library-manifest.txt
+albumen verify-manifest --manifest ./library-manifest.txt --against s3://my-bucket/library
+```
+
+The manifest lists SHA-256, byte length, and the relative path. `verify-manifest` hashes the destination bytes and fails if a file is missing, extra, or different. S3 uses the same `ALBUMEN_S3_*` variables as ingest.
 
 ## Tests
 

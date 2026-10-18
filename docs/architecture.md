@@ -17,7 +17,7 @@ This is the outline of the system. Only the ingest crate exists today. The rest 
 | macOS, iOS, and Android apps | Not started |
 | MCP server (search, browse, export, upload/ingest) | Not started |
 | Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | Not started |
-| Export-everything command | Not started |
+| Export-everything command (`albumen export`) | Here |
 | rclone-backed SMB, SFTP, WebDAV, B2 | Not started |
 
 ## Shape
@@ -51,9 +51,9 @@ The bytes on disk are the library. The catalog is a cache. If the catalog is del
 5. On mismatch, delete the destination and return `IngestError::ChecksumMismatch` with both hex digests.
 6. Set the destination mtime to the source mtime. Read it back. If the filesystem did not keep it, delete the destination and return `MtimeNotPreserved`.
 7. Keep the filename exactly. A requested name that differs from the source name is an error. Overwriting an existing destination is an error.
-8. If a later file in the asset fails, delete the files this call already wrote.
+8. If a later file in the asset fails, delete the destination files this call already wrote. The source is unchanged.
 
-`move_verified` runs that copy and deletes the sources only after every destination has verified.
+`copy_verify` is the only default path. `copy_verify_quarantine` is an explicit per-run opt-in. After the copy verifies, it renames each source into a trash directory the caller supplies for that call. It never unlinks a source. If the rename would overwrite something in the trash, the source stays. The CLI does not call it.
 
 Android motion photos are one JPEG with an embedded video and XMP. They stay intact because the file is never rewritten. There is no separate pair to discover.
 

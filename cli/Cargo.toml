@@ -1,0 +1,20 @@
+[package]
+name = "albumen"
+version = "0.1.0"
+description = "Copy a photo library bit-exactly and verify the SHA-256 manifest."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "albumen"
+path = "src/main.rs"
+
+[dependencies]
+albumen-ingest = { path = "../ingest" }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-/// Failure while copying, moving, or verifying an original.
+/// Failure while copying or verifying an original.
 ///
 /// Checksum failures name both hashes. When Albumen created the bad
 /// destination, it is removed so a corrupt copy is not kept.
@@ -79,6 +79,29 @@ pub enum IngestError {
         filename: String,
         message: String,
     },
+
+    #[error("refusing to follow symlink {0}")]
+    Symlink(PathBuf),
+
+    #[error(
+        "manifest mismatch for {relative_path}: expected sha256 {expected_sha256} ({expected_len} bytes), got {actual_sha256} ({actual_len} bytes)"
+    )]
+    ManifestMismatch {
+        relative_path: String,
+        expected_sha256: String,
+        actual_sha256: String,
+        expected_len: u64,
+        actual_len: u64,
+    },
+
+    #[error("manifest entry missing at destination: {0}")]
+    ManifestMissing(String),
+
+    #[error("destination has {0}, which is not in the manifest")]
+    ManifestExtra(String),
+
+    #[error("could not parse manifest line {line_number}: {line}")]
+    ManifestParse { line_number: usize, line: String },
 }
 
 impl IngestError {
