@@ -228,7 +228,10 @@ impl russh_sftp::server::Handler for SftpSession {
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         match self.handles.remove(&handle) {
             Some(OpenHandle::Writing { mut spool, arrival }) => {
-                match self.library.commit(&mut spool, &arrival) {
+                match self
+                    .library
+                    .commit(&mut spool, &arrival, crate::store::MtimeProtocol::Sftp)
+                {
                     Ok(Commit::Stored { .. } | Commit::Deduped { .. }) => Ok(status_ok(id)),
                     Err(_) => Err(StatusCode::Failure),
                 }
@@ -321,7 +324,7 @@ impl russh_sftp::server::Handler for SftpSession {
     ) -> Result<Status, Self::Error> {
         if let Some(mtime) = attrs.mtime {
             self.library
-                .note_source_mtime(&path, u64::from(mtime))
+                .note_source_mtime(&path, u64::from(mtime), crate::store::MtimeProtocol::Sftp)
                 .map_err(|_| StatusCode::Failure)?;
         }
         Ok(status_ok(id))

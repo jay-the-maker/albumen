@@ -162,7 +162,7 @@ async fn put(
             return write_status(socket, 500, &err, &[]).await;
         }
     }
-    match library.commit(&mut spool, &arrival) {
+    match library.commit(&mut spool, &arrival, crate::store::MtimeProtocol::WebDav) {
         Ok(Commit::Stored { sha256, .. }) => created(socket, &sha256).await,
         Ok(Commit::Deduped { sha256, .. }) => deduped(socket, &sha256).await,
         Err(err) => write_status(socket, 500, &err, &[]).await,

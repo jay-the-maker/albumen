@@ -299,13 +299,10 @@ async fn mtime_round_trips_on_webdav_ftp_and_sftp() {
 
     let sftp = listening.sftp.unwrap();
     let session = sftp_session(sftp).await;
-    session
-        .write("/DCIM/100CANON/IMG_SFTP.JPG", sftp_body)
-        .await
-        .unwrap();
-    session
-        .set_metadata(
+    let mut file = session
+        .open_with_flags_and_attributes(
             "/DCIM/100CANON/IMG_SFTP.JPG",
+            russh_sftp::protocol::OpenFlags::WRITE,
             russh_sftp::client::fs::Metadata {
                 mtime: Some(u32::try_from(CAMERA_MTIME).unwrap()),
                 ..Default::default()
@@ -313,6 +310,8 @@ async fn mtime_round_trips_on_webdav_ftp_and_sftp() {
         )
         .await
         .unwrap();
+    file.write_all(sftp_body).await.unwrap();
+    file.close().await.unwrap();
     let remote = session
         .metadata("/DCIM/100CANON/IMG_SFTP.JPG")
         .await
@@ -323,6 +322,116 @@ async fn mtime_round_trips_on_webdav_ftp_and_sftp() {
         sftp_body
     );
     assert_mtime(root.path(), "IMG_SFTP.JPG", CAMERA_MTIME);
+}
+
+const LATER_MTIME: u64 = CAMERA_MTIME + 60;
+const LATER_FTP_TIME: &str = "20010909014740";
+
+#[tokio::test]
+async fn a_later_mtime_is_appended_and_does_not_replace_the_first() {
+    let body = b"mtime-conflict";
+    let root = tempfile::tempdir().unwrap();
+    let listening = listen(
+        Settings {
+            library: root.path().to_path_buf(),
+            user: "camera".into(),
+            password: "roll".into(),
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let webdav = listening.webdav.unwrap();
+    let hash = hash_bytes(body);
+    http_put_with_mtime(
+        webdav,
+        "/DCIM/100CANON/IMG_WEB.JPG",
+        body,
+        CAMERA_MTIME,
+        "201",
+        &hash,
+    )
+    .await;
+    http_put_with_mtime(
+        webdav,
+        "/DCIM/100CANON/IMG_WEB.JPG",
+        body,
+        LATER_MTIME,
+        "409",
+        &hash,
+    )
+    .await;
+    assert_mtime(root.path(), "IMG_WEB.JPG", CAMERA_MTIME);
+    assert_conflict(root.path(), "IMG_WEB.JPG", "webdav", LATER_MTIME, 1);
+
+    let ftp = listening.ftp.unwrap();
+    ftp_put_with_time(
+        ftp,
+        "MFMT",
+        "/DCIM/100CANON/IMG_MFMT.JPG",
+        b"mtime-late-mfmt",
+    )
+    .await;
+    assert_mtime(root.path(), "IMG_MFMT.JPG", CAMERA_MTIME);
+    let late = ftp_command(ftp, &format!("MFMT {LATER_FTP_TIME} IMG_MFMT.JPG")).await;
+    assert!(late.starts_with("213"), "{late}");
+    let again = ftp_command(ftp, &format!("MDTM {LATER_FTP_TIME} IMG_MFMT.JPG")).await;
+    assert!(again.starts_with("213"), "{again}");
+    assert_mtime(root.path(), "IMG_MFMT.JPG", CAMERA_MTIME);
+    let read_back = ftp_command(ftp, "MDTM IMG_MFMT.JPG").await;
+    assert_eq!(read_back, format!("213 {CAMERA_FTP_TIME}"));
+    assert_conflict(root.path(), "IMG_MFMT.JPG", "ftp", LATER_MTIME, 2);
+
+    let sftp = listening.sftp.unwrap();
+    let session = sftp_session(sftp).await;
+    let mut file = session
+        .open_with_flags_and_attributes(
+            "/DCIM/100CANON/IMG_SFTP.JPG",
+            russh_sftp::protocol::OpenFlags::WRITE,
+            russh_sftp::client::fs::Metadata {
+                mtime: Some(u32::try_from(CAMERA_MTIME).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    file.write_all(b"mtime-late-sftp").await.unwrap();
+    file.close().await.unwrap();
+    assert_mtime(root.path(), "IMG_SFTP.JPG", CAMERA_MTIME);
+    session
+        .set_metadata(
+            "/DCIM/100CANON/IMG_SFTP.JPG",
+            russh_sftp::client::fs::Metadata {
+                mtime: Some(u32::try_from(LATER_MTIME).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut retry = session
+        .open_with_flags_and_attributes(
+            "/DCIM/100CANON/IMG_SFTP.JPG",
+            russh_sftp::protocol::OpenFlags::WRITE,
+            russh_sftp::client::fs::Metadata {
+                mtime: Some(u32::try_from(LATER_MTIME + 60).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    retry.write_all(b"mtime-late-sftp").await.unwrap();
+    retry.close().await.unwrap();
+    let remote = session
+        .metadata("/DCIM/100CANON/IMG_SFTP.JPG")
+        .await
+        .unwrap();
+    assert_eq!(remote.mtime, Some(u32::try_from(CAMERA_MTIME).unwrap()));
+    assert_mtime(root.path(), "IMG_SFTP.JPG", CAMERA_MTIME);
+    assert_conflict(root.path(), "IMG_SFTP.JPG", "sftp", LATER_MTIME, 1);
+    assert_conflict(root.path(), "IMG_SFTP.JPG", "sftp", LATER_MTIME + 60, 1);
 }
 
 fn assert_mtime(root: &std::path::Path, stored_name: &str, seconds: u64) {
@@ -346,6 +455,28 @@ fn assert_mtime(root: &std::path::Path, stored_name: &str, seconds: u64) {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or_else(|| panic!("received_at missing in {text}"));
     assert_ne!(received, seconds, "{text}");
+}
+
+fn assert_conflict(
+    root: &std::path::Path,
+    stored_name: &str,
+    protocol: &str,
+    seconds: u64,
+    count: usize,
+) {
+    let text = std::fs::read_to_string(root.join(format!("{stored_name}.albumen.json"))).unwrap();
+    assert!(
+        text.contains(&format!("\"source_mtime\":\"{CAMERA_MTIME}\"")),
+        "{text}"
+    );
+    let conflicts = text
+        .split("\"mtime_conflicts\":")
+        .nth(1)
+        .unwrap_or_else(|| panic!("mtime_conflicts missing in {text}"));
+    let entry = format!("\"protocol\":\"{protocol}\"");
+    let value = format!("\"value\":\"{seconds}\"");
+    assert!(conflicts.contains(&entry), "{text}");
+    assert_eq!(conflicts.matches(&value).count(), count, "{text}");
 }
 
 fn assert_sidecar(
