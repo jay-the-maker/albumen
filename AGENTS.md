@@ -1,5 +1,7 @@
 # AGENTS.md
 
+Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io.
+
 This is the canonical guide for agents working in this repository. [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) wins if the two disagree.
 
 ## Philosophy
@@ -68,4 +70,4 @@ A local real-device corpus is optional and must not be committed. See [CONTRIBUT
 
 You are a contributor. Read [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs `Signed-off-by`. Keep a pull request to one concern. The pull request body checks the philosophy box and explains how the change upholds [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). The `philosophy-ack` workflow fails unless that box is checked, the explanation is at least 20 characters and is not the template placeholder, and every commit in the pull request has `Signed-off-by`.
 
-Do not copy Immich, Ente, or other AGPL photo-library source into this Apache-2.0 tree. MinIO is an external CI process and is not vendored. Do not commit real photos, real filenames, real checksums, or real GPS. Do not change branch protection. Do not submit [docs/mcp-registry.md](docs/mcp-registry.md) to a registry.
+Do not copy Immich, Ente, or other AGPL photo-library source into this Apache-2.0 tree. MinIO is an external CI process and is not vendored. Do not commit real photos, real filenames, real checksums, or real GPS. Do not change branch protection. The only registry publish is `.github/workflows/publish-mcp.yml` on a `v*` tag. Do not publish [server.json](server.json) by hand, and do not submit the server to Glama, Smithery, PulseMCP, or mcp.so.

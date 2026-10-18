@@ -1,0 +1,41 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jay-the-maker/albumen",
+  "title": "Albumen",
+  "description": "Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io.",
+  "websiteUrl": "https://github.com/jay-the-maker/albumen",
+  "repository": {
+    "url": "https://github.com/jay-the-maker/albumen",
+    "source": "github",
+    "id": "1424496552",
+    "subfolder": "mcp"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/jay-the-maker/albumen-mcp:0.1.0",
+      "version": "0.1.0",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--mount",
+          "description": "Mount the library of originals at /library. Search and browse only read it.",
+          "value": "type=bind,src={library_path},dst=/library",
+          "isRequired": true,
+          "variables": {
+            "library_path": {
+              "description": "Host directory of originals.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # Albumen
 
+Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io.
+
 The commitment is [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). Read it before changing this repository.
 
 **First principle: metadata and original quality are never lost.**
@@ -8,7 +10,7 @@ Originals are stored bit-exact: Albumen does not recompress, transcode, or strip
 
 Albumen is an open-source photo library with the feel of classic iPhoto, built to keep working when the library is hundreds of thousands of items and multiple terabytes. You bring the storage. Agents can read the library; they do not get tools that delete or rewrite originals.
 
-**Status: early.** The native apps, the catalog, and the agent server are not built yet. This repository holds the charter, `albumen-ingest`, and the `albumen` export command. Ingest copies an original plus its sidecars, preserves filename and mtime, and verifies SHA-256. It does not delete sources.
+**Status: early-stage.** `albumen-mcp` is in this repository. It speaks MCP over stdio. Search and browse are on, including metadata search (capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions). Export and upload are off until that process is started with `--enable-export` or `--enable-upload`. There is no delete tool. The native apps and the on-disk catalog are not built yet. Ingest copies an original plus its sidecars, preserves filename and mtime, and verifies SHA-256. It does not delete sources.
 
 ## Vision
 
@@ -27,6 +29,30 @@ Clients:
 - Android, Kotlin, with automatic camera-roll backup.
 
 The backup apps call the same ingest path as a drag-and-drop import. They do not recompress on the way in.
+
+## Install from source
+
+The toolchain in CI is Rust 1.99.1. The workspace asks for 1.94 or newer. Metadata search needs ExifTool on `PATH`. `scripts/install-exiftool.sh` downloads Image-ExifTool 13.59 and checks its SHA-256. It does not use a distro package.
+
+```bash
+git clone https://github.com/jay-the-maker/albumen.git
+cd albumen
+cargo build --release --locked
+export PATH="$(scripts/install-exiftool.sh):$PATH"
+./target/release/albumen-mcp --library ./library
+./target/release/albumen export --from ./library --to /backup/library
+```
+
+That build produces `albumen-mcp`, `albumen`, and `albumen-receive`.
+
+The container is the same server. The image entrypoint is `albumen-mcp --library /library`, and the image contains that pinned ExifTool. Search and browse only read the mounted directory. Append `--enable-export` or `--enable-upload` to turn those tools on. There is still no delete tool.
+
+```bash
+docker build -t albumen-mcp .
+docker run --rm -i -v "$PWD/library:/library" albumen-mcp
+```
+
+Tag `v0.1.0` publishes `ghcr.io/jay-the-maker/albumen-mcp:0.1.0` and the [server.json](server.json) entry `io.github.jay-the-maker/albumen` to the MCP Registry. [glama.json](glama.json) names the maintainer for Glama. This repository does not submit Glama, Smithery, PulseMCP, or mcp.so by itself.
 
 ## Ingest core
 

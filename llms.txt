@@ -1,4 +1,4 @@
-# Albumen
+# Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io.
 
 > Open-source, bring-your-own-storage, MCP-native photo library. Originals are bit-exact, metadata is never lost, and a full export is one command.
 
@@ -12,7 +12,7 @@ Reliability, fidelity, respect, and control are the metrics. Cost is outside tho
 - [README](https://github.com/jay-the-maker/albumen/blob/main/README.md): What the repository does today.
 - [Roadmap](https://github.com/jay-the-maker/albumen/blob/main/ROADMAP.md): Work that is not in the tree yet.
 - [Architecture](https://github.com/jay-the-maker/albumen/blob/main/docs/architecture.md): Ingest, export, the camera receiver, and the MCP server.
-- [MCP registry draft](https://github.com/jay-the-maker/albumen/blob/main/docs/mcp-registry.md): `server.json` metadata for the official MCP Registry. Not submitted.
+- [MCP server.json](https://github.com/jay-the-maker/albumen/blob/main/server.json): Official registry metadata for `io.github.jay-the-maker/albumen`. Published by the `v*` workflow.
 
 ## Optional
 

@@ -75,3 +75,26 @@ jobs:
 
       - name: Build and test the PhotoKit package
         run: swift test --package-path mobile/ios
+
+  mcp-image:
+    name: albumen-mcp image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate server.json against the registry schema
+        run: |
+          python3 -m venv /tmp/schema
+          /tmp/schema/bin/pip install jsonschema==4.25.1
+          /tmp/schema/bin/python scripts/check-mcp-release.py
+
+      - name: Build the albumen-mcp image
+        run: docker build -t albumen-mcp:ci .
+
+      - name: Check the entrypoint, label, and ExifTool
+        run: |
+          docker run --rm albumen-mcp:ci --help
+          docker image inspect albumen-mcp:ci --format '{{index .Config.Labels "io.modelcontextprotocol.server.name"}}' | grep -Fxq 'io.github.jay-the-maker/albumen'
+          docker image inspect albumen-mcp:ci --format '{{json .Config.Entrypoint}}' | grep -Fxq '["albumen-mcp","--library","/library"]'
+          docker run --rm --entrypoint exiftool albumen-mcp:ci -ver
