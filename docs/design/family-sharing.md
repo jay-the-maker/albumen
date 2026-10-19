@@ -72,12 +72,41 @@ The family view is the merge of every admitted device log the reader can verify.
 
 Search reads the local originals and these records. It does not build a second catalog that is the only copy of a caption or a GPS point. The file and the log can rebuild a view.
 
+### Signed shared manifest
+
+The shared manifest is the merge of those verified records. It is not a file one member rewrites.
+
+Each album add, album remove, title, caption, hide, invite, admit, revoke, successor, and object record is signed by the member who appended it, and each record names the SHA-256 of the previous record on that device. A reader rebuilds the manifest by:
+
+1. Reading every device log under every admitted member.
+2. Checking the signature against the member id in the path.
+3. Checking the hash link. A broken link stops that device chain. Earlier verified records stay. The broken record is not applied.
+4. Merging the verified records with the CRDT rules in the table above.
+
+The result lists album ids, the membership set, titles, per-author captions, and per-viewer hides. It names the log heads it used: member id, device id, last sequence, and the head record's SHA-256.
+
+A member may append a snapshot record in their own log that repeats that head list and the album ids they computed. The snapshot is signed. Another reader trusts it only when every named head is still the head they verify and the snapshot signature checks. If a head has moved, or the snapshot disagrees with a fresh merge, the snapshot is ignored and the logs are the source. A snapshot is never written over an older snapshot. It is a new log record.
+
+Object bytes are not inside the manifest. The manifest points at SHA-256 values. Changing a manifest record does not change an object file.
+
 ## Nobody writes another member's photos
 
 Two checks, both required:
 
 1. **Namespace ownership.** A record is accepted only when the signature matches the member id in its path. Album operations and captions are signed by their author. They reference another member's object by SHA-256. They do not open that object for write.
-2. **Storage permissions.** On a shared bucket or drive, the member's credential can create objects only under `members/<their-id>/`. It cannot create, replace, or delete under another member's prefix. On each-member storage, other people receive a read capability only. Albumen refuses to write outside the caller's namespace even if the credential would allow it.
+2. **Storage permissions.** On a shared bucket or drive, the member's credential can create objects only under `members/<their-id>/`. It cannot create, replace, or delete under another member's prefix. On each-member storage, other people receive a read capability only. Albumen refuses to write outside the caller's namespace even if the credential would allow it. The check runs before the backend call. A refused write creates no file and does not change mtime.
+
+### Storage permissions by backend
+
+Albumen enforces the namespace rule in process on every backend. The backend's own permission is the second check. Neither one is optional.
+
+| Backend | Create in the caller's namespace | Another member's namespace | Delete |
+| --- | --- | --- | --- |
+| Local directory | `create_new` under `members/<caller>/` only. Parents are created there. | Refused before `create`. The other member's directory stays as it was, including mode, mtime, bytes, and sidecars. When the family sets that directory unwritable by this user, the operating system refuses too. | The family commands do not unlink. A failed `copy_verify` removes only the new file that call just created, and only if it sits in the caller's namespace. |
+| S3, including MinIO in CI | `PutObject` of a new key under `members/<caller>/`. An existing key with different bytes is `AlreadyExists` and is left in place. The same SHA-256 is a verified no-op. | The caller never sends `PutObject` or `DeleteObject` for `members/<other>/`. A bucket policy that allows `s3:PutObject` and `s3:DeleteObject` only on `members/<caller>/*`, and `s3:GetObject` on the library prefix, is what the storage owner applies. Albumen prints that policy. It does not rewrite objects to apply it. | No family command calls `DeleteObject`. Rollback of a object this call just put uses the existing store rollback, and only for that new key in the caller's namespace. |
+| rclone (SFTP, WebDAV, B2) and a shared drive | `copy_verify` into the caller's prefix through `RcloneStore`. | The remote account can read the other prefix and cannot write it. Albumen refuses the path before it calls rclone. A synced folder is the same rule on a filesystem. | rclone is not asked to delete a member object. |
+
+CLI, MCP, and `albumen-receive` all use this rule. A family subcommand writes only the signing member's namespace. MCP `upload` and `albumen-receive` do not open a library root that resolves inside `members/<id>/`; that root is a member namespace, and those tools have no member key. Pointing them there is an error, and the files already in that namespace stay. Export reads. It does not write the source.
 
 Removal is a hide or a tombstone, and it is per viewer.
 
@@ -89,7 +118,20 @@ There is no delete tool, no move, and no quarantine of a member object. `BlobSto
 
 ## Key management
 
-Each member generates a signing key on their own machine. Ed25519 is the signature scheme. The public key is the member id. The private key stays in a file the member holds, mode `0600`, and they may copy that file to their own devices. Albumen does not upload the private key, and it does not have an account to recover it. A member who loses the key keeps every object already stored. They create a new key, and an admitted member signs an admit that names the new key as a successor. The old key stops being accepted for new records once that admit is verified. Old signatures remain valid for the records they already signed.
+Each member generates a signing key on their own machine. Ed25519 is the signature scheme. The public key is the member id. The private key stays in a file the member holds, mode `0600`, and they may copy that file to their own devices. Albumen does not upload the private key, and it does not have an account to recover it.
+
+### Key rotation
+
+Rotation replaces the key that signs new records. It does not replace objects.
+
+1. The member generates a new keypair. The new public key is the new member id.
+2. A successor record names the old public key and the new public key. It is signed by the old key when the member still has it. That is self-rotation. When the old key is lost or compromised, an admitted member signs the successor instead, and a revoke record for the old key is appended in the same pass. A successor without a revoke leaves the old key able to sign until a revoke is verified. A compromised key is revoked, not only rotated.
+3. Readers who have verified the successor accept new records from the new key. Records the old key already signed stay valid. Their hash links stay. Objects those records point at stay, with the same bytes, mtime, and sidecars.
+4. The member copies the new private key file to their own devices. Devices still holding only the old key can read. They cannot append once a revoke for the old key is verified.
+5. When sealing is on, the member appends new wraps of the content keys to the new public key. Old wrap records stay in the log. A revoked key is left off wraps for objects added after the revoke. Objects already copied stay with the member who copied them.
+6. A second successor for the same old key does not erase the first. Both new keys can sign until an admitted member appends a choice record that names one successor. The other key's already verified records stay. The choice record does not delete objects.
+
+A member who loses every key keeps every object already stored. They can still read what their storage credential can read. Appending again waits for a successor signed by another admitted member. There is no account recovery server.
 
 The sane default stores original bytes in the clear when the storage permissions already limit readers to the family. The signed SHA-256 is then the digest of the object itself.
 
@@ -105,7 +147,18 @@ There is no account. An invite is a file two people exchange, or a record one me
 4. The inviter appends an admit naming that public key and that token hash. Readers accept the new member only when the admit verifies and the token hash has not been admitted before. A second admit of the same token is ignored.
 5. On a shared bucket or drive, the storage owner creates the invitee's prefix and a credential that can create objects only there, and takes write access away from everyone else on that prefix. Albumen prints that change. It does not rewrite objects to apply it.
 
-Revocation is another signed record. The founder, the inviter, or the member themselves may sign it. After a reader has verified the revoke, new records from that key are not applied. Records and objects already verified stay. The storage owner removes the write credential. The revoked member's namespace remains readable so the library does not lose those originals. A revoked member keeps every local copy they already verified, and they can `albumen export` it.
+Revocation is another signed record. The founder, the inviter, or the member themselves may sign it. After a reader has verified the revoke, new records from that key are not applied. Records and objects already verified stay. The storage owner removes the write credential for that member and leaves the read credential in place. Albumen prints that change. It does not rewrite or remove objects to apply it.
+
+### Member removal keeps their originals
+
+Removing a member is the revoke record plus the write-credential change. It is not a delete.
+
+- The removed member's namespace stays on disk and in the bucket: genesis stays, their log stays, and every object and sidecar stays.
+- Bytes, byte length, SHA-256, mtime, camera filename, and sidecars are unchanged by the revoke.
+- Other members keep every local copy they already `copy_verify`'d, including sidecars.
+- The removed member keeps every local copy on their own machines. `albumen export --apply` still copies that library out. `verify-manifest` still checks it.
+- Their older signatures still verify. New records from the revoked key are not applied. A hide they signed before the revoke still applies only to their own view.
+- No CLI command, MCP tool, or `albumen-receive` path unlinks that namespace as part of revoke. There is no tool that takes a member id and removes their tree.
 
 A self-leave is the member signing their own revoke. It is the same record. It does not delete their photos.
 
@@ -120,8 +173,13 @@ Across members, the photo's identity is the SHA-256.
 - An album add and a concurrent album remove merge by the observed-remove set. The remove drops only the adds it names. A concurrent add remains. The file's bytes are not part of that merge.
 - Two captions stay. Two album titles stay until a member appends a choice. The log still contains the other title.
 - A hash mismatch on a path that claims a digest is a failed `copy_verify`. The new object is removed. The existing object and the source stay.
+- Two successor records for one old key both stay. Both new keys may sign until a choice record names one. Already stored objects stay either way.
+- A hide and an unshare do not conflict into a delete. The hide changes that viewer's presentation. The unshare changes whether new readers are offered the file. Bytes, mtime, and sidecars stay in the author's namespace and on any disk that already verified them.
+- A repeated sequence number on one device, with different bytes, breaks that device's hash link at the repeat. Records through the last valid link stay applied. The conflicting record is not applied. Objects already `copy_verify`'d stay.
+- A missing sequence is a gap. The reader applies the chain it can verify and reports the gap. It does not invent a record to fill it.
+- Caption against embedded metadata: the file's embedded metadata stays. The caption is an extra signed record. They are both shown.
 
-Wall-clock timestamps are claims inside records. They are not the order of the log. Order on one device is the hash chain. Order across devices is partial, which is what the CRDT merge uses.
+Wall-clock timestamps are claims inside records. They are not the order of the log. Order on one device is the hash chain. Order across devices is partial, which is what the CRDT merge uses. A clock that jumps does not reorder a chain and does not drop a record.
 
 ## Offline
 
@@ -159,7 +217,10 @@ Synthetic fixtures only. No real photos, no real names, no account service.
 - Concurrent album add and remove: the add the remover had not seen stays in the album. The object bytes stay in the author's namespace.
 - Two synthetic files with the same camera filename and different bytes both remain, with both digests. The same bytes from two members are one object and two custody records.
 - Invite and admit use two key files and no network to an identity service. Replaying the token does not create a second member.
-- After a revoke, a new record from that key is ignored, and an object already verified still matches its SHA-256.
+- After a revoke, a new record from that key is ignored, and an object already verified still matches its SHA-256. The revoked member's log, objects, sidecars, and mtimes are byte-for-byte the same as before the revoke. Their local export still verifies.
+- Self-rotation appends a successor signed by the old key. New records use the new key. Objects already stored keep their bytes, mtime, and sidecars. A compromised key is revoked in the same pass as the successor, and a later record from the old key is ignored.
+- On a local tree, a second member's create inside the first member's directory is refused before any write. On S3, including MinIO, the second member's `PutObject` is not sent for the first member's prefix, and an existing object with different bytes is left in place.
+- The shared album manifest is rebuilt from signed records. A snapshot whose head list does not match the verified logs is ignored. Album membership in the rebuild matches the observed-remove set.
 - Two devices of one member, each with a log written while storage is unreachable, merge by union when storage is back. Every verified object is present. `copy_verify` covers the sync.
 - `albumen export --apply` of the local library and `albumen verify-manifest` succeed. The export is ordinary files.
 - The implementation has no tool named delete, remove, unlink, move, or quarantine for a member object. A failed `copy_verify` removes only the new object that check just wrote.
