@@ -16,6 +16,7 @@ path = "src/main.rs"
 albumen-ingest = { path = "../ingest" }
 albumen-receive = { path = "../receive" }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 [dev-dependencies]
 flate2 = "1"
