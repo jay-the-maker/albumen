@@ -96,20 +96,20 @@ The manifest lists SHA-256, byte length, and the relative path. `verify-manifest
 
 ## Google Takeout
 
-`albumen import-takeout` streams a Google Takeout download of `.zip` and `.tgz` parts. The archives are opened read-only and are not extracted in place. Each file is `copy_verify`'d. Takeout JSON is kept byte-for-byte next to its original. `photoTakenTime` stays in that sidecar and is not written into the original. The command writes a reconciliation report and exits non-zero unless the count in equals the count out and every SHA-256 matches.
+`albumen import-takeout` reads a Google Takeout download of `.zip` and `.tgz` parts, or an extracted folder, read-only. Each file is `copy_verify`'d. Takeout JSON is kept byte-for-byte next to its original. Capture time and GPS are restored into a new `.albumen.json` sidecar and are not written into the original. The reconciliation report names every unmatched file. Without `--apply` or `--execute` the command prints a plan and writes nothing. With `--apply` it exits non-zero unless the count in equals the count out and every SHA-256 matches.
 
 ```bash
-albumen import-takeout --from ~/Downloads/takeout --to ~/library --report ~/takeout-report.jsonl
+albumen import-takeout --from ~/Downloads/takeout --to ~/library --report ~/takeout-report.jsonl --apply
 ```
 
 The design note is [docs/importers/takeout.md](docs/importers/takeout.md).
 
 ## iCloud Photos
 
-`albumen import-icloud` copies an iCloud Photos download, a Photos export, or a copy of a Photos library. A download may be several zip parts plus Photo Details CSVs. The source is opened read-only. Originals and edited versions stay bit-exact. Live Photo pairs and AAE/XMP sidecars are kept, and the CSVs are copied byte-for-byte. Album, favorite, and caption metadata from a Photos library is exported beside the original. The database is opened in SQLite read-only immutable mode and is not modified. A capture time read from a sidecar stays in the reconciliation report and is not written into an original. The command exits non-zero unless the count in equals the count out and every SHA-256 matches.
+`albumen import-icloud` copies an iCloud Photos download, a Photos export, or a copy of a Photos library. A download may be several zip parts plus Photo Details CSVs. The source is opened read-only. Originals and edited versions stay bit-exact. Live Photo pairs and AAE/XMP sidecars are kept, and the CSVs are copied byte-for-byte. Album, favorite, caption, capture time, and GPS are exported beside the original. The database is opened in SQLite read-only immutable mode and is not modified. Without `--apply` or `--execute` the command prints a plan and writes nothing. With `--apply` it exits non-zero unless the count in equals the count out and every SHA-256 matches.
 
 ```bash
-albumen import-icloud --from ~/Pictures/Photos\ Library.photoslibrary --to ~/library --report ~/icloud-report.jsonl
+albumen import-icloud --from ~/Pictures/Photos\ Library.photoslibrary --to ~/library --report ~/icloud-report.jsonl --apply
 ```
 
 The design note is [docs/importers/icloud.md](docs/importers/icloud.md).

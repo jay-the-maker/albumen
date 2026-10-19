@@ -2,17 +2,17 @@
 
 //! Google Takeout import.
 //!
-//! Split `.zip`, `.tgz`, and `.tar.gz` parts are opened read-only and streamed.
-//! Nothing is extracted beside the archives, and the archive bytes are hashed
-//! before and after. Each file member is copied with the same write, fsync,
-//! and re-read SHA-256 check as [`crate::copy_verify`]. Takeout JSON is stored
-//! byte-for-byte next to its original. `photoTakenTime` is read from that
-//! sidecar for the reconciliation report and is never written into the original.
+//! Split `.zip`, `.tgz`, and `.tar.gz` parts, or an already extracted folder,
+//! are opened read-only. Nothing is written beside the source, and archive
+//! bytes are hashed before and after. Each file is copied with the same write,
+//! fsync, and re-read SHA-256 check as [`crate::copy_verify`]. Takeout JSON is
+//! stored byte-for-byte next to its original. Capture time and GPS are written
+//! into a new `.albumen.json` sidecar and are never written into the original.
 //! An optional derived XMP file is a new file. It is off unless the caller
 //! asks for it, and writing it does not open the original.
 
-use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,7 +26,8 @@ use crate::checksum::{sha256_file, sha256_reader, to_hex};
 use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
-use crate::local::copy_verify_reader;
+use crate::local::{copy_verify_file, copy_verify_reader};
+use crate::source::{parent_dir, SourceRoot};
 
 /// Counts from a finished Takeout import whose reconciliation matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +35,18 @@ pub struct TakeoutReport {
     pub count_in: u64,
     pub count_out: u64,
     pub mismatched: u64,
+    /// Media with no Takeout JSON, and Takeout JSON with no media partner.
+    /// These files are still copied. A non-zero count does not fail the import.
+    pub unmatched: u64,
     pub report: PathBuf,
+}
+
+/// Names a dry-run would copy. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakeoutPlan {
+    pub files: u64,
+    pub unmatched: Vec<String>,
+    pub motion_photos: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +54,7 @@ struct Counters {
     count_in: u64,
     count_out: u64,
     mismatched: u64,
+    unmatched: u64,
 }
 
 struct ReportFile {
@@ -56,19 +69,31 @@ struct ArchiveSeal {
     bytes: u64,
 }
 
-/// Copy every file member of a Takeout download into `to`.
+/// Copy every file of a Takeout download into `to`.
 ///
-/// `from` is one `.zip`, `.tgz`, or `.tar.gz` archive, or a directory whose
-/// entries are only those parts. The destination must not be that directory
-/// or a directory that contains it. `report` is a JSONL file outside both.
+/// `from` is one `.zip`, `.tgz`, or `.tar.gz` archive, a directory whose
+/// entries are only those parts, or an extracted Takeout folder. The
+/// destination must not be that directory or a directory that contains it.
+/// `report` is a JSONL file outside both.
 ///
 /// The function returns [`IngestError::TakeoutReconciliation`] when any member
 /// is missing, extra, or hashed differently, when an archive's bytes change,
-/// or when the archives contain no file members. The report is still written.
+/// or when the source contains no file members. The report is still written.
+/// Files with no metadata partner are listed and still copied.
 ///
 /// Derived XMP is off. [`import_takeout_with`] turns it on.
 pub fn import_takeout(from: &Path, to: &Path, report: &Path) -> Result<TakeoutReport, IngestError> {
     import_takeout_with(from, to, report, false)
+}
+
+/// List what [`import_takeout`] would copy. Creates nothing.
+///
+/// A destination or report that overlaps the source is still an error.
+pub fn plan_takeout(from: &Path, to: &Path, report: &Path) -> Result<TakeoutPlan, IngestError> {
+    let root = source_root(from)?;
+    refuse_layout(&root, to, report)?;
+    let names = layout_names(from)?;
+    Ok(plan_from_names(&names))
 }
 
 /// Copy every file member of a Takeout download into `to`.
@@ -84,8 +109,19 @@ pub fn import_takeout_with(
     report: &Path,
     derive_xmp: bool,
 ) -> Result<TakeoutReport, IngestError> {
-    let archives = list_archives(from)?;
-    let source_root = source_root(from)?;
+    match classify(from)? {
+        TakeoutLayout::Archives(archives) => import_archives(&archives, to, report, derive_xmp),
+        TakeoutLayout::Extracted => import_extracted(from, to, report, derive_xmp),
+    }
+}
+
+fn import_archives(
+    archives: &[PathBuf],
+    to: &Path,
+    report: &Path,
+    derive_xmp: bool,
+) -> Result<TakeoutReport, IngestError> {
+    let source_root = source_root(archives.first().map(PathBuf::as_path).unwrap_or(to))?;
     refuse_layout(&source_root, to, report)?;
     dest::create_dir_all(to)?;
     if let Some(parent) = report.parent() {
@@ -94,9 +130,12 @@ pub fn import_takeout_with(
         }
     }
 
-    let seals = seal_archives(&archives)?;
-    let partners = partner_index(&archives)?;
+    let seals = seal_archives(archives)?;
+    let names = archive_names(archives)?;
+    let partners = build_partner_index(&names);
+    let motion = motion_pairs(&names);
     let mut pending_xmp = Vec::new();
+    let mut pending_meta = Vec::new();
     let mut report_file = ReportFile::create(report)?;
     for seal in &seals {
         report_file.line(&json!({
@@ -116,14 +155,22 @@ pub fn import_takeout_with(
             report: &mut report_file,
             counters: &mut counters,
             partners: &partners,
+            motion: &motion,
             pending_xmp: &mut pending_xmp,
+            pending_meta: &mut pending_meta,
             derive_xmp,
         };
-        for archive in &archives {
+        for archive in archives {
             if let Err(err) = import_archive(archive, &mut ctx) {
                 fatal = Some(err);
                 break;
             }
+        }
+    }
+    if fatal.is_none() {
+        if let Err(err) = write_albumen_sidecars(&pending_meta, to, &mut report_file, &mut counters)
+        {
+            fatal = Some(err);
         }
     }
     if fatal.is_none() && derive_xmp {
@@ -156,6 +203,7 @@ pub fn import_takeout_with(
         "count_in": counters.count_in,
         "count_out": counters.count_out,
         "mismatched": counters.mismatched,
+        "unmatched": counters.unmatched,
         "archives_unchanged": archives_unchanged,
     });
     report_file.line(&summary)?;
@@ -177,8 +225,505 @@ pub fn import_takeout_with(
         count_in: counters.count_in,
         count_out: counters.count_out,
         mismatched: counters.mismatched,
+        unmatched: counters.unmatched,
         report: report.to_path_buf(),
     })
+}
+
+fn import_extracted(
+    from: &Path,
+    to: &Path,
+    report: &Path,
+    derive_xmp: bool,
+) -> Result<TakeoutReport, IngestError> {
+    let source = SourceRoot::open(from)?;
+    refuse_layout(from, to, report)?;
+    source.refuse_destination(to)?;
+    source.refuse_destination(report)?;
+    dest::create_dir_all(to)?;
+    if let Some(parent) = report.parent() {
+        if !parent.as_os_str().is_empty() {
+            dest::create_dir_all(parent)?;
+        }
+    }
+    let names = extracted_names(from)?;
+    let partners = build_partner_index(&names);
+    let motion = motion_pairs(&names);
+    let archive_name = file_name_str(from).unwrap_or_else(|_| from.display().to_string());
+    let mut report_file = ReportFile::create(report)?;
+    report_file.line(&json!({
+        "kind": "archive",
+        "archive": archive_name,
+        "status": "extracted-folder",
+    }))?;
+    let mut counters = Counters::default();
+    let mut pending_xmp = Vec::new();
+    let mut pending_meta = Vec::new();
+    let mut sealed = Vec::new();
+    let mut fatal = None;
+    if let Err(err) = copy_extracted(
+        from,
+        &archive_name,
+        to,
+        &partners,
+        &motion,
+        &mut report_file,
+        &mut counters,
+        &mut pending_xmp,
+        &mut pending_meta,
+        &mut sealed,
+        derive_xmp,
+    ) {
+        fatal = Some(err);
+    }
+    if fatal.is_none() {
+        if let Err(err) = write_albumen_sidecars(&pending_meta, to, &mut report_file, &mut counters)
+        {
+            fatal = Some(err);
+        }
+    }
+    if fatal.is_none() && derive_xmp {
+        if let Err(err) = write_pending_xmp(&pending_xmp, to, &mut report_file, &mut counters) {
+            fatal = Some(err);
+        }
+    }
+    let mut unchanged = true;
+    for (member, sha) in &sealed {
+        let source_path = from.join(member);
+        let again = match sha256_file(&source_path) {
+            Ok(digest) => to_hex(&digest),
+            Err(err) => {
+                unchanged = false;
+                counters.mismatched = counters.mismatched.saturating_add(1);
+                let _ = report_file.line(&json!({
+                    "kind": "original",
+                    "member": member,
+                    "sha256": "",
+                    "bytes": 0,
+                    "status": "mismatch",
+                    "detail": format!("source changed or could not be re-read: {err}"),
+                }));
+                continue;
+            }
+        };
+        if again != *sha {
+            unchanged = false;
+            counters.mismatched = counters.mismatched.saturating_add(1);
+            let _ = report_file.line(&json!({
+                "kind": "original",
+                "member": member,
+                "sha256": again,
+                "bytes": 0,
+                "status": "mismatch",
+                "detail": format!("source bytes changed; before {sha}"),
+            }));
+        }
+    }
+    if counters.count_in == 0 && fatal.is_none() {
+        counters.mismatched = counters.mismatched.saturating_add(1);
+        let _ = report_file.line(&json!({
+            "kind": "archive",
+            "status": "mismatch",
+            "detail": "extracted folder contained no files",
+        }));
+    }
+    report_file.line(&json!({
+        "summary": true,
+        "count_in": counters.count_in,
+        "count_out": counters.count_out,
+        "mismatched": counters.mismatched,
+        "unmatched": counters.unmatched,
+        "archives_unchanged": unchanged,
+    }))?;
+    report_file.finish()?;
+    if let Some(err) = fatal {
+        return Err(err);
+    }
+    if counters.count_in != counters.count_out || counters.mismatched != 0 || !unchanged {
+        return Err(IngestError::TakeoutReconciliation {
+            count_in: counters.count_in,
+            count_out: counters.count_out,
+            mismatched: counters.mismatched,
+            archives_unchanged: unchanged,
+            report: report.display().to_string(),
+        });
+    }
+    Ok(TakeoutReport {
+        count_in: counters.count_in,
+        count_out: counters.count_out,
+        mismatched: counters.mismatched,
+        unmatched: counters.unmatched,
+        report: report.to_path_buf(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_extracted(
+    root: &Path,
+    archive_name: &str,
+    dest_root: &Path,
+    partners: &PartnerIndex,
+    motion: &MotionIndex,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+    pending_xmp: &mut Vec<PendingXmp>,
+    pending_meta: &mut Vec<PendingMeta>,
+    sealed: &mut Vec<(String, String)>,
+    derive_xmp: bool,
+) -> Result<(), IngestError> {
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        dir: &Path,
+        prefix: &str,
+        root: &Path,
+        archive_name: &str,
+        dest_root: &Path,
+        partners: &PartnerIndex,
+        motion: &MotionIndex,
+        report: &mut ReportFile,
+        counters: &mut Counters,
+        pending_xmp: &mut Vec<PendingXmp>,
+        pending_meta: &mut Vec<PendingMeta>,
+        sealed: &mut Vec<(String, String)>,
+        derive_xmp: bool,
+    ) -> Result<(), IngestError> {
+        let source = SourceRoot::open(dir)?;
+        let mut names = Vec::new();
+        for entry in source.read_dir(dir)? {
+            let entry = entry.map_err(|err| IngestError::io(dir, err))?;
+            names.push(entry.file_name());
+        }
+        names.sort();
+        for name in names {
+            let Some(name) = name.to_str() else {
+                counters.count_in = counters.count_in.saturating_add(1);
+                counters.mismatched = counters.mismatched.saturating_add(1);
+                report.line(&json!({
+                    "kind": "original",
+                    "archive": archive_name,
+                    "member": "",
+                    "destination": "",
+                    "sha256": "",
+                    "bytes": 0,
+                    "status": "mismatch",
+                    "unmatched": true,
+                    "detail": "filename is not UTF-8",
+                }))?;
+                counters.unmatched = counters.unmatched.saturating_add(1);
+                continue;
+            };
+            let path = dir.join(name);
+            let relative = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
+            if meta.file_type().is_symlink() {
+                counters.count_in = counters.count_in.saturating_add(1);
+                counters.mismatched = counters.mismatched.saturating_add(1);
+                report.line(&json!({
+                    "kind": "original",
+                    "archive": archive_name,
+                    "member": relative,
+                    "destination": "",
+                    "sha256": "",
+                    "bytes": 0,
+                    "status": "mismatch",
+                    "detail": "refusing to follow a symlink",
+                }))?;
+                continue;
+            }
+            if meta.is_dir() {
+                walk(
+                    &path,
+                    &relative,
+                    root,
+                    archive_name,
+                    dest_root,
+                    partners,
+                    motion,
+                    report,
+                    counters,
+                    pending_xmp,
+                    pending_meta,
+                    sealed,
+                    derive_xmp,
+                )?;
+                continue;
+            }
+            if !meta.is_file() {
+                counters.count_in = counters.count_in.saturating_add(1);
+                counters.mismatched = counters.mismatched.saturating_add(1);
+                report.line(&json!({
+                    "kind": "original",
+                    "archive": archive_name,
+                    "member": relative,
+                    "destination": "",
+                    "sha256": "",
+                    "bytes": 0,
+                    "status": "mismatch",
+                    "detail": "not a regular file",
+                }))?;
+                continue;
+            }
+            store_extracted_file(
+                root,
+                archive_name,
+                &path,
+                &relative,
+                dest_root,
+                partners,
+                motion,
+                report,
+                counters,
+                pending_xmp,
+                pending_meta,
+                sealed,
+                derive_xmp,
+            )?;
+        }
+        Ok(())
+    }
+    walk(
+        root,
+        "",
+        root,
+        archive_name,
+        dest_root,
+        partners,
+        motion,
+        report,
+        counters,
+        pending_xmp,
+        pending_meta,
+        sealed,
+        derive_xmp,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_extracted_file(
+    root: &Path,
+    archive_name: &str,
+    source: &Path,
+    member: &str,
+    dest_root: &Path,
+    partners: &PartnerIndex,
+    motion: &MotionIndex,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+    pending_xmp: &mut Vec<PendingXmp>,
+    pending_meta: &mut Vec<PendingMeta>,
+    sealed: &mut Vec<(String, String)>,
+    derive_xmp: bool,
+) -> Result<(), IngestError> {
+    counters.count_in = counters.count_in.saturating_add(1);
+    let relative = match member_relative(member) {
+        Ok(path) => path,
+        Err(detail) => {
+            counters.mismatched = counters.mismatched.saturating_add(1);
+            return report.line(&json!({
+                "kind": "original",
+                "archive": archive_name,
+                "member": member,
+                "destination": "",
+                "sha256": "",
+                "bytes": 0,
+                "status": "mismatch",
+                "detail": detail,
+            }));
+        }
+    };
+    let destination = rel_string(&relative);
+    let dest = dest_root.join(&relative);
+    let kind = kind_of(&relative);
+    let file_name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let directory = relative.parent().map(rel_string).unwrap_or_default();
+    let partner = if kind == "sidecar" {
+        partners.lookup(&directory, file_name).map(str::to_string)
+    } else {
+        None
+    };
+    let stored = match fs::symlink_metadata(&dest) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+            counters.mismatched = counters.mismatched.saturating_add(1);
+            let mut line = json!({
+                "archive": archive_name,
+                "member": member,
+                "destination": destination,
+                "sha256": "",
+                "bytes": 0,
+                "kind": kind,
+                "status": "mismatch",
+                "detail": "destination is not a regular file; it was not overwritten",
+            });
+            mark_takeout_fields(
+                &mut line,
+                member,
+                kind,
+                if kind == "sidecar" {
+                    Some(partner.as_deref())
+                } else {
+                    None
+                },
+                partners,
+                motion,
+                counters,
+            );
+            return report.line(&line);
+        }
+        Ok(_) => {
+            let existing = sha256_file(&dest)?;
+            let incoming = sha256_file(source)?;
+            if existing == incoming {
+                let bytes = fs::metadata(&dest)
+                    .map_err(|err| IngestError::io(&dest, err))?
+                    .len();
+                (to_hex(&existing), bytes, "already-verified")
+            } else {
+                counters.mismatched = counters.mismatched.saturating_add(1);
+                let mut line = json!({
+                    "archive": archive_name,
+                    "member": member,
+                    "destination": destination,
+                    "sha256": to_hex(&incoming),
+                    "bytes": 0,
+                    "kind": kind,
+                    "status": "mismatch",
+                    "detail": "destination already has different bytes; it was not overwritten",
+                });
+                mark_takeout_fields(
+                    &mut line,
+                    member,
+                    kind,
+                    if kind == "sidecar" {
+                        Some(partner.as_deref())
+                    } else {
+                        None
+                    },
+                    partners,
+                    motion,
+                    counters,
+                );
+                return report.line(&line);
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let parent = dest.parent().unwrap_or(dest_root);
+            match copy_verify_file(source, parent) {
+                Ok(object) => (object.sha256, object.byte_len, "stored"),
+                Err(IngestError::ChecksumMismatch { message, .. }) => {
+                    counters.mismatched = counters.mismatched.saturating_add(1);
+                    let mut line = json!({
+                        "archive": archive_name,
+                        "member": member,
+                        "destination": destination,
+                        "sha256": "",
+                        "bytes": 0,
+                        "kind": kind,
+                        "status": "mismatch",
+                        "detail": message,
+                    });
+                    mark_takeout_fields(
+                        &mut line,
+                        member,
+                        kind,
+                        if kind == "sidecar" {
+                            Some(partner.as_deref())
+                        } else {
+                            None
+                        },
+                        partners,
+                        motion,
+                        counters,
+                    );
+                    return report.line(&line);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(err) => return Err(IngestError::io(&dest, err)),
+    };
+    counters.count_out = counters.count_out.saturating_add(1);
+    sealed.push((member.to_string(), stored.0.clone()));
+    let taken = if kind == "sidecar" {
+        scan_photo_taken_time(&dest)?
+    } else {
+        None
+    };
+    if kind == "sidecar" {
+        if let Some(partner_name) = partner.as_deref() {
+            let mut media = PathBuf::from(&destination);
+            media.pop();
+            media.push(partner_name);
+            pending_meta.push(PendingMeta {
+                archive_name: archive_name.to_string(),
+                member: member.to_string(),
+                json_path: dest.clone(),
+                media_relative: rel_string(&media),
+                partner: partner_name.to_string(),
+            });
+            if derive_xmp {
+                let mut xmp = PathBuf::from(&destination);
+                xmp.set_file_name(format!("{partner_name}.xmp"));
+                pending_xmp.push(PendingXmp {
+                    archive_name: archive_name.to_string(),
+                    member: member.to_string(),
+                    json_path: dest.clone(),
+                    xmp_relative: rel_string(&xmp),
+                    partner: Some(partner_name.to_string()),
+                });
+            }
+        } else if derive_xmp {
+            let mut xmp = PathBuf::from(&destination);
+            let xmp_name = format!(
+                "{}.xmp",
+                xmp.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("sidecar.json")
+            );
+            xmp.set_file_name(xmp_name);
+            pending_xmp.push(PendingXmp {
+                archive_name: archive_name.to_string(),
+                member: member.to_string(),
+                json_path: dest,
+                xmp_relative: rel_string(&xmp),
+                partner: None,
+            });
+        }
+    }
+    let mut line = json!({
+        "archive": archive_name,
+        "member": member,
+        "destination": destination,
+        "sha256": stored.0,
+        "bytes": stored.1,
+        "kind": kind,
+        "status": stored.2,
+    });
+    if kind == "sidecar" {
+        line["partner"] = json!(partner);
+        line["photo_taken_time"] = json!(taken);
+    }
+    mark_takeout_fields(
+        &mut line,
+        member,
+        kind,
+        if kind == "sidecar" {
+            Some(partner.as_deref())
+        } else {
+            None
+        },
+        partners,
+        motion,
+        counters,
+    );
+    let _ = root;
+    report.line(&line)
 }
 
 struct ImportCtx<'a> {
@@ -186,7 +731,9 @@ struct ImportCtx<'a> {
     report: &'a mut ReportFile,
     counters: &'a mut Counters,
     partners: &'a PartnerIndex,
+    motion: &'a MotionIndex,
     pending_xmp: &'a mut Vec<PendingXmp>,
+    pending_meta: &'a mut Vec<PendingMeta>,
     derive_xmp: bool,
 }
 
@@ -335,6 +882,14 @@ struct PendingXmp {
     partner: Option<String>,
 }
 
+struct PendingMeta {
+    archive_name: String,
+    member: String,
+    json_path: PathBuf,
+    media_relative: String,
+    partner: String,
+}
+
 struct Part<'a> {
     archive_path: &'a Path,
     archive_name: &'a str,
@@ -342,7 +897,9 @@ struct Part<'a> {
     report: &'a mut ReportFile,
     counters: &'a mut Counters,
     partners: &'a PartnerIndex,
+    motion: &'a MotionIndex,
     pending_xmp: &'a mut Vec<PendingXmp>,
+    pending_meta: &'a mut Vec<PendingMeta>,
     derive_xmp: bool,
 }
 
@@ -377,7 +934,9 @@ impl<'a> Part<'a> {
             report: ctx.report,
             counters: ctx.counters,
             partners: ctx.partners,
+            motion: ctx.motion,
             pending_xmp: ctx.pending_xmp,
+            pending_meta: ctx.pending_meta,
             derive_xmp: ctx.derive_xmp,
         }
     }
@@ -559,6 +1118,20 @@ impl<'a> Part<'a> {
                 partner: stored.partner.map(str::to_string),
             });
         }
+        if stored.kind == "sidecar" {
+            if let Some(partner) = stored.partner {
+                let mut media = PathBuf::from(stored.destination);
+                media.pop();
+                media.push(partner);
+                self.pending_meta.push(PendingMeta {
+                    archive_name: self.archive_name.to_string(),
+                    member: stored.member.to_string(),
+                    json_path: stored_path.to_path_buf(),
+                    media_relative: rel_string(&media),
+                    partner: partner.to_string(),
+                });
+            }
+        }
         self.emit(Note {
             member: stored.member,
             destination: stored.destination,
@@ -633,6 +1206,15 @@ impl<'a> Part<'a> {
         if let Some(detail) = note.detail {
             line["detail"] = json!(detail);
         }
+        mark_takeout_fields(
+            &mut line,
+            note.member,
+            note.kind,
+            note.partner,
+            self.partners,
+            self.motion,
+            self.counters,
+        );
         self.report.line(&line)
     }
 }
@@ -653,6 +1235,13 @@ const SUPPLEMENTAL_SUFFIX: &str = ".supplemental-metadata";
 struct PartnerIndex {
     /// `{directory}\n{json name in ascii lowercase}` → media file name.
     partners: HashMap<String, String>,
+    /// `{directory}\n{media file name}` for media that has exactly one JSON.
+    paired_media: HashSet<String>,
+}
+
+struct MotionIndex {
+    /// `{directory}\n{stem lowercase}` → the still's stem, when a video shares it.
+    stems: HashMap<String, String>,
 }
 
 impl PartnerIndex {
@@ -665,14 +1254,6 @@ impl PartnerIndex {
 
 fn partner_key(directory: &str, json_name: &str) -> String {
     format!("{directory}\n{}", json_name.to_ascii_lowercase())
-}
-
-fn partner_index(archives: &[PathBuf]) -> Result<PartnerIndex, IngestError> {
-    let mut names = Vec::new();
-    for archive in archives {
-        names.extend(archive_member_names(archive)?);
-    }
-    Ok(build_partner_index(&names))
 }
 
 fn archive_member_names(path: &Path) -> Result<Vec<String>, IngestError> {
@@ -743,6 +1324,7 @@ fn build_partner_index(members: &[String]) -> PartnerIndex {
             .push(file_name.to_string());
     }
     let mut partners = HashMap::new();
+    let mut paired_media = HashSet::new();
     for (directory, mut names) in dirs {
         names.sort();
         names.dedup();
@@ -767,10 +1349,14 @@ fn build_partner_index(members: &[String]) -> PartnerIndex {
             };
             if media.len() == 1 {
                 partners.insert(partner_key(&directory, name), media[0].clone());
+                paired_media.insert(format!("{directory}\n{}", media[0]));
             }
         }
     }
-    PartnerIndex { partners }
+    PartnerIndex {
+        partners,
+        paired_media,
+    }
 }
 
 /// Supplemental and legacy JSON names Takeout would write for `media`.
@@ -842,6 +1428,188 @@ fn trailing_paren_number(stem: &str) -> Option<usize> {
         return None;
     }
     Some(open)
+}
+
+fn write_albumen_sidecars(
+    pending: &[PendingMeta],
+    dest_root: &Path,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+) -> Result<(), IngestError> {
+    for item in pending {
+        let parsed = {
+            let file = match File::open(&item.json_path) {
+                Ok(file) => file,
+                Err(err) => {
+                    counters.mismatched = counters.mismatched.saturating_add(1);
+                    report.line(&json!({
+                        "kind": "albumen-sidecar",
+                        "archive": item.archive_name,
+                        "member": item.member,
+                        "destination": format!("{}.albumen.json", item.media_relative),
+                        "partner": item.partner,
+                        "sha256": "",
+                        "bytes": 0,
+                        "status": "mismatch",
+                        "detail": err.to_string(),
+                    }))?;
+                    continue;
+                }
+            };
+            match serde_json::from_reader::<_, serde_json::Value>(file) {
+                Ok(value) => value,
+                Err(err) => {
+                    counters.mismatched = counters.mismatched.saturating_add(1);
+                    report.line(&json!({
+                        "kind": "albumen-sidecar",
+                        "archive": item.archive_name,
+                        "member": item.member,
+                        "destination": format!("{}.albumen.json", item.media_relative),
+                        "partner": item.partner,
+                        "sha256": "",
+                        "bytes": 0,
+                        "status": "mismatch",
+                        "detail": format!("Takeout JSON could not be read for the Albumen sidecar: {err}"),
+                    }))?;
+                    continue;
+                }
+            }
+        };
+        let Some(bytes) = albumen_sidecar_bytes(&parsed, &item.media_relative) else {
+            continue;
+        };
+        let relative = format!("{}.albumen.json", item.media_relative);
+        let dest = dest_root.join(&relative);
+        let mtime = fs::metadata(&item.json_path)
+            .and_then(|meta| meta.modified())
+            .map_err(|err| IngestError::io(&item.json_path, err))?;
+        let outcome = place_derived(&item.json_path, &dest, &bytes, mtime)?;
+        if outcome.status == "mismatch" {
+            counters.mismatched = counters.mismatched.saturating_add(1);
+        }
+        let mut line = json!({
+            "kind": "albumen-sidecar",
+            "archive": item.archive_name,
+            "member": item.member,
+            "destination": relative,
+            "partner": item.media_relative,
+            "sha256": outcome.sha256,
+            "bytes": outcome.bytes,
+            "status": outcome.status,
+        });
+        if let Some(detail) = outcome.detail {
+            line["detail"] = json!(detail);
+        }
+        report.line(&line)?;
+    }
+    Ok(())
+}
+
+fn albumen_sidecar_bytes(value: &serde_json::Value, partner: &str) -> Option<Vec<u8>> {
+    let taken = value
+        .pointer("/photoTakenTime/timestamp")
+        .and_then(|item| item.as_str())
+        .filter(|text| !text.is_empty());
+    let geo = value.get("geoData").and_then(sidecar_geo);
+    if taken.is_none() && geo.is_none() {
+        return None;
+    }
+    let mut map = serde_json::Map::new();
+    map.insert("partner".to_string(), json!(partner));
+    if let Some(taken) = taken {
+        map.insert("photoTakenTime".to_string(), json!(taken));
+        if let Some(utc) = xmp_datetime(taken) {
+            map.insert("photoTakenTimeUtc".to_string(), json!(utc));
+        }
+    }
+    if let Some((lat, lon, alt)) = geo {
+        map.insert("latitude".to_string(), json!(lat));
+        map.insert("longitude".to_string(), json!(lon));
+        if let Some(alt) = alt {
+            map.insert("altitude".to_string(), json!(alt));
+        }
+    }
+    let mut bytes = serde_json::to_vec(&serde_json::Value::Object(map)).ok()?;
+    bytes.push(b'\n');
+    Some(bytes)
+}
+
+fn sidecar_geo(geo: &serde_json::Value) -> Option<(f64, f64, Option<f64>)> {
+    let lat = geo.get("latitude")?.as_f64()?;
+    let lon = geo.get("longitude")?.as_f64()?;
+    if lat == 0.0 && lon == 0.0 {
+        return None;
+    }
+    let alt = geo.get("altitude").and_then(|item| item.as_f64());
+    Some((lat, lon, alt))
+}
+
+fn place_derived(
+    label: &Path,
+    dest: &Path,
+    bytes: &[u8],
+    mtime: SystemTime,
+) -> Result<DerivedWrite, IngestError> {
+    match fs::symlink_metadata(dest) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => Ok(DerivedWrite {
+            sha256: String::new(),
+            bytes: 0,
+            status: "mismatch",
+            detail: Some("Albumen sidecar destination is not a regular file".to_string()),
+        }),
+        Ok(_) => {
+            let existing = sha256_file(dest)?;
+            let incoming = sha256_reader(Cursor::new(bytes), label)?;
+            if existing == incoming {
+                Ok(DerivedWrite {
+                    sha256: to_hex(&existing),
+                    bytes: fs::metadata(dest)
+                        .map_err(|err| IngestError::io(dest, err))?
+                        .len(),
+                    status: "already-verified",
+                    detail: None,
+                })
+            } else {
+                Ok(DerivedWrite {
+                    sha256: to_hex(&incoming),
+                    bytes: 0,
+                    status: "mismatch",
+                    detail: Some(
+                        "Albumen sidecar destination already has different bytes; it was not overwritten"
+                            .to_string(),
+                    ),
+                })
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let mut reader = Cursor::new(bytes);
+            match copy_verify_reader(&mut reader, label, dest, mtime) {
+                Ok(object) => Ok(DerivedWrite {
+                    sha256: object.sha256,
+                    bytes: object.byte_len,
+                    status: "stored",
+                    detail: None,
+                }),
+                Err(IngestError::ChecksumMismatch { message, .. }) => Ok(DerivedWrite {
+                    sha256: String::new(),
+                    bytes: 0,
+                    status: "mismatch",
+                    detail: Some(message),
+                }),
+                Err(IngestError::AlreadyExists { .. }) => Ok(DerivedWrite {
+                    sha256: String::new(),
+                    bytes: 0,
+                    status: "mismatch",
+                    detail: Some(
+                        "Albumen sidecar destination appeared during copy; it was not overwritten"
+                            .to_string(),
+                    ),
+                }),
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) => Err(IngestError::io(dest, err)),
+    }
 }
 
 fn write_pending_xmp(
@@ -1146,7 +1914,12 @@ fn archive_kind(path: &Path) -> Option<ArchiveKind> {
     }
 }
 
-fn list_archives(from: &Path) -> Result<Vec<PathBuf>, IngestError> {
+enum TakeoutLayout {
+    Archives(Vec<PathBuf>),
+    Extracted,
+}
+
+fn classify(from: &Path) -> Result<TakeoutLayout, IngestError> {
     let meta = fs::symlink_metadata(from).map_err(|err| IngestError::io(from, err))?;
     if meta.file_type().is_symlink() {
         return Err(IngestError::Symlink(from.to_path_buf()));
@@ -1156,10 +1929,10 @@ fn list_archives(from: &Path) -> Result<Vec<PathBuf>, IngestError> {
             return Err(IngestError::store(
                 "takeout",
                 display_name(from),
-                "not a .zip, .tgz, or .tar.gz archive",
+                "not a .zip, .tgz, or .tar.gz archive or an extracted folder",
             ));
         }
-        return Ok(vec![from.to_path_buf()]);
+        return Ok(TakeoutLayout::Archives(vec![from.to_path_buf()]));
     }
     if !meta.is_dir() {
         return Err(IngestError::NotAFile(from.to_path_buf()));
@@ -1171,36 +1944,271 @@ fn list_archives(from: &Path) -> Result<Vec<PathBuf>, IngestError> {
         names.push(entry.file_name());
     }
     names.sort();
+    let mut nested = false;
+    let mut other = false;
     for name in names {
         let path = from.join(&name);
         let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
         if meta.file_type().is_symlink() {
-            return Err(IngestError::Symlink(path));
+            if archives.is_empty() {
+                other = true;
+            } else {
+                return Err(IngestError::Symlink(path));
+            }
+            continue;
         }
         if meta.is_dir() {
-            return Err(IngestError::store(
-                "takeout",
-                display_name(&path),
-                "nested directory is not a Takeout part and was not skipped",
-            ));
+            nested = true;
+            continue;
         }
-        if !meta.is_file() || archive_kind(&path).is_none() {
-            return Err(IngestError::store(
-                "takeout",
-                display_name(&path),
-                "only .zip, .tgz, and .tar.gz parts are read; other files are not skipped",
-            ));
+        if meta.is_file() && archive_kind(&path).is_some() {
+            archives.push(path);
+            continue;
         }
-        archives.push(path);
+        if meta.is_file() {
+            other = true;
+            continue;
+        }
+        return Err(IngestError::store(
+            "takeout",
+            display_name(&path),
+            "not a regular file; it was not skipped",
+        ));
     }
-    if archives.is_empty() {
+    if !archives.is_empty() && (nested || other) {
         return Err(IngestError::store(
             "takeout",
             display_name(from),
-            "directory has no .zip, .tgz, or .tar.gz parts",
+            "directory mixes archives with other files or folders; nothing was skipped",
         ));
     }
-    Ok(archives)
+    if !archives.is_empty() {
+        return Ok(TakeoutLayout::Archives(archives));
+    }
+    if nested || other {
+        return Ok(TakeoutLayout::Extracted);
+    }
+    Err(IngestError::store(
+        "takeout",
+        display_name(from),
+        "directory has no Takeout archives or extracted files",
+    ))
+}
+
+fn layout_names(from: &Path) -> Result<Vec<String>, IngestError> {
+    match classify(from)? {
+        TakeoutLayout::Archives(archives) => archive_names(&archives),
+        TakeoutLayout::Extracted => extracted_names(from),
+    }
+}
+
+fn archive_names(archives: &[PathBuf]) -> Result<Vec<String>, IngestError> {
+    let mut names = Vec::new();
+    for archive in archives {
+        names.extend(archive_member_names(archive)?);
+    }
+    Ok(names)
+}
+
+fn extracted_names(root: &Path) -> Result<Vec<String>, IngestError> {
+    let mut names = Vec::new();
+    walk_extracted_names(root, "", &mut names)?;
+    Ok(names)
+}
+
+fn walk_extracted_names(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<String>,
+) -> Result<(), IngestError> {
+    let source = SourceRoot::open(dir)?;
+    let mut names = Vec::new();
+    for entry in source.read_dir(dir)? {
+        let entry = entry.map_err(|err| IngestError::io(dir, err))?;
+        names.push(entry.file_name());
+    }
+    names.sort();
+    for name in names {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let path = dir.join(name);
+        let relative = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => out.push(relative),
+            Ok(meta) if meta.is_dir() => walk_extracted_names(&path, &relative, out)?,
+            Ok(meta) if meta.is_file() => out.push(relative),
+            Ok(_) => out.push(relative),
+            Err(err) => return Err(IngestError::io(&path, err)),
+        }
+    }
+    Ok(())
+}
+
+fn plan_from_names(names: &[String]) -> TakeoutPlan {
+    let partners = build_partner_index(names);
+    let motion = motion_pairs(names);
+    let mut unmatched = Vec::new();
+    for member in names {
+        let Ok(relative) = member_relative(member) else {
+            unmatched.push(member.clone());
+            continue;
+        };
+        let file_name = relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let directory = relative.parent().map(rel_string).unwrap_or_default();
+        if ends_with_ignore_ascii_case(file_name, ".json") {
+            if partners.lookup(&directory, file_name).is_none() && takeout_json_name(file_name) {
+                unmatched.push(member.clone());
+            }
+        } else if is_media_name(file_name)
+            && !partners
+                .paired_media
+                .contains(&format!("{directory}\n{file_name}"))
+        {
+            unmatched.push(member.clone());
+        }
+    }
+    unmatched.sort();
+    unmatched.dedup();
+    let mut motion_photos = motion.stems.values().cloned().collect::<Vec<_>>();
+    motion_photos.sort();
+    motion_photos.dedup();
+    TakeoutPlan {
+        files: names.len() as u64,
+        unmatched,
+        motion_photos,
+    }
+}
+
+fn takeout_json_name(name: &str) -> bool {
+    let Some(stem) = strip_suffix_ignore_ascii_case(name, ".json") else {
+        return false;
+    };
+    if stem.to_ascii_lowercase().contains("supplemental-metadata")
+        || stem.to_ascii_lowercase().contains(".supple")
+    {
+        return true;
+    }
+    let core = stem.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    is_media_ext(core)
+}
+
+fn mark_takeout_fields(
+    line: &mut serde_json::Value,
+    member: &str,
+    kind: &str,
+    partner: Option<Option<&str>>,
+    partners: &PartnerIndex,
+    motion: &MotionIndex,
+    counters: &mut Counters,
+) {
+    let unmatched = member_unmatched(member, kind, partner, partners);
+    if unmatched {
+        line["unmatched"] = json!(true);
+        counters.unmatched = counters.unmatched.saturating_add(1);
+    }
+    if let Some(stem) = motion_stem(member, motion) {
+        line["motion_photo_stem"] = json!(stem);
+    }
+}
+
+fn member_unmatched(
+    member: &str,
+    kind: &str,
+    partner: Option<Option<&str>>,
+    partners: &PartnerIndex,
+) -> bool {
+    let Ok(relative) = member_relative(member) else {
+        return false;
+    };
+    let Some(file_name) = relative.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let directory = relative.parent().map(rel_string).unwrap_or_default();
+    if kind == "sidecar" {
+        return partner == Some(None) && takeout_json_name(file_name);
+    }
+    kind == "original"
+        && is_media_name(file_name)
+        && !partners
+            .paired_media
+            .contains(&format!("{directory}\n{file_name}"))
+}
+
+fn motion_stem(member: &str, motion: &MotionIndex) -> Option<String> {
+    let relative = member_relative(member).ok()?;
+    let file_name = relative.file_name().and_then(|name| name.to_str())?;
+    let (stem, ext) = file_name.rsplit_once('.')?;
+    if !is_still_ext(ext) && !is_video_ext(ext) {
+        return None;
+    }
+    let directory = relative.parent().map(rel_string).unwrap_or_default();
+    let key = format!("{directory}\n{}", stem.to_ascii_lowercase());
+    motion.stems.get(&key).cloned()
+}
+
+fn motion_pairs(members: &[String]) -> MotionIndex {
+    let mut stills: HashMap<String, String> = HashMap::new();
+    let mut videos: HashSet<String> = HashSet::new();
+    for member in members {
+        let Ok(relative) = member_relative(member) else {
+            continue;
+        };
+        let Some(file_name) = relative.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some((stem, ext)) = file_name.rsplit_once('.') else {
+            continue;
+        };
+        let directory = relative.parent().map(rel_string).unwrap_or_default();
+        let key = format!("{directory}\n{}", stem.to_ascii_lowercase());
+        if is_still_ext(ext) {
+            stills.entry(key).or_insert_with(|| stem.to_string());
+        } else if is_video_ext(ext) {
+            videos.insert(key);
+        }
+    }
+    let mut stems = HashMap::new();
+    for (key, stem) in stills {
+        if videos.contains(&key) {
+            stems.insert(key, stem);
+        }
+    }
+    MotionIndex { stems }
+}
+
+fn is_media_name(name: &str) -> bool {
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| is_media_ext(ext))
+}
+
+fn is_media_ext(ext: &str) -> bool {
+    is_still_ext(ext) || is_video_ext(ext) || is_raw_ext(ext)
+}
+
+fn is_still_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "heic" | "heif" | "hif" | "png" | "tif" | "tiff" | "avif" | "webp" | "gif"
+    )
+}
+
+fn is_video_ext(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "mov" | "mp4" | "m4v")
+}
+
+fn is_raw_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2" | "raw"
+    )
 }
 
 fn source_root(from: &Path) -> Result<PathBuf, IngestError> {
@@ -1340,11 +2348,8 @@ fn confirm_seals(
 }
 
 fn open_read_only(path: &Path) -> Result<File, IngestError> {
-    OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(path)
-        .map_err(|err| IngestError::io(path, err))
+    let root = SourceRoot::open(parent_dir(path))?;
+    root.open_read(path)
 }
 
 fn zip_err(path: &Path, err: zip::result::ZipError) -> IngestError {
@@ -1519,10 +2524,14 @@ fn ends_with_ignore_ascii_case(name: &str, suffix: &str) -> bool {
 }
 
 fn strip_suffix_ignore_ascii_case<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
-    if name.len() < suffix.len() {
+    if suffix.len() > name.len() {
         return None;
     }
-    let (head, tail) = name.split_at(name.len() - suffix.len());
+    let split = name.len() - suffix.len();
+    if !name.is_char_boundary(split) {
+        return None;
+    }
+    let (head, tail) = name.split_at(split);
     if tail.eq_ignore_ascii_case(suffix) {
         Some(head)
     } else {
@@ -1865,7 +2874,11 @@ mod tests {
         assert_eq!(summary["archives_unchanged"], true);
         let file_lines = lines
             .iter()
-            .filter(|line| line.get("summary").is_none() && line["kind"] != "archive")
+            .filter(|line| {
+                line.get("summary").is_none()
+                    && line["kind"] != "archive"
+                    && line["kind"] != "albumen-sidecar"
+            })
             .collect::<Vec<_>>();
         assert_eq!(file_lines.len(), 5);
         for line in &file_lines {
@@ -2247,6 +3260,66 @@ mod tests {
         import_takeout(&archive, &plain, &plain_report).unwrap();
         assert!(!plain.join("Takeout/IMG_0001.jpg.xmp").exists());
         assert_eq!(fs::read(plain.join("Takeout/IMG_0001.jpg")).unwrap(), photo);
+    }
+
+    #[test]
+    fn extracted_folder_restores_gps_and_reports_unmatched_motion_pairs() {
+        let tmp = Tmp::new();
+        let from = tmp.path().join("Takeout");
+        let album = from.join("Google Photos/Trip");
+        fs::create_dir_all(&album).unwrap();
+        let jpeg = b"\xff\xd8\xff\xd9synthetic-extracted-jpeg";
+        let motion = b"synthetic-extracted-motion";
+        let orphan = b"\xff\xd8\xff\xd9synthetic-unmatched-jpeg";
+        let json = br#"{"title":"IMG_0001.jpg","photoTakenTime":{"timestamp":"1590000000"},"geoData":{"latitude":37.5,"longitude":-122.25,"altitude":10.0}}"#;
+        fs::write(album.join("IMG_0001.jpg"), jpeg).unwrap();
+        fs::write(album.join("IMG_0001.jpg.supplemental-metadata.json"), json).unwrap();
+        fs::write(album.join("IMG_0001.mp4"), motion).unwrap();
+        fs::write(album.join("IMG_0002.jpg"), orphan).unwrap();
+        let before = fs::read(album.join("IMG_0001.jpg")).unwrap();
+        let to = tmp.path().join("library");
+        let report = tmp.path().join("report.jsonl");
+        let plan = plan_takeout(&from, &to, &report).unwrap();
+        assert!(!to.exists());
+        assert!(!report.exists());
+        assert!(plan
+            .unmatched
+            .iter()
+            .any(|name| name.ends_with("IMG_0002.jpg")));
+        assert!(plan.motion_photos.iter().any(|stem| stem == "IMG_0001"));
+        let outcome = import_takeout(&from, &to, &report).unwrap();
+        assert_eq!(outcome.count_in, outcome.count_out);
+        assert_eq!(outcome.mismatched, 0);
+        assert!(outcome.unmatched >= 1);
+        assert_eq!(fs::read(album.join("IMG_0001.jpg")).unwrap(), before);
+        assert_eq!(
+            fs::read(to.join("Google Photos/Trip/IMG_0001.jpg")).unwrap(),
+            jpeg
+        );
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &fs::read(to.join("Google Photos/Trip/IMG_0001.jpg.albumen.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["photoTakenTime"], "1590000000");
+        assert_eq!(sidecar["photoTakenTimeUtc"], "2020-05-20T18:40:00Z");
+        assert_eq!(sidecar["latitude"], 37.5);
+        assert_eq!(sidecar["longitude"], -122.25);
+        assert!(!jpeg.windows(4).any(|window| window == b"37.5"));
+        let lines = report_lines(&report);
+        let photo = lines
+            .iter()
+            .find(|line| line["member"] == "Google Photos/Trip/IMG_0001.jpg")
+            .unwrap();
+        assert_eq!(photo["motion_photo_stem"], "IMG_0001");
+        assert!(photo.get("unmatched").is_none(), "{photo}");
+        let missing = lines
+            .iter()
+            .find(|line| line["member"] == "Google Photos/Trip/IMG_0002.jpg")
+            .unwrap();
+        assert_eq!(missing["unmatched"], true);
+        let summary = lines.last().unwrap();
+        assert_eq!(summary["count_in"], summary["count_out"]);
+        assert!(summary["unmatched"].as_u64().unwrap() >= 1);
     }
 
     fn write_zip_owned(path: &Path, files: &[(String, Vec<u8>)]) {
