@@ -27,7 +27,10 @@ jobs:
   library-scale:
     name: library scale (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    # Each search walks the whole library. A 2,000-item smoke pass on
+    # windows-2025 took about 190 ms per search, so 201 searches over
+    # 380,000 items can run for hours there. 360 is the hosted-runner limit.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:

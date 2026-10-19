@@ -222,6 +222,7 @@ def main():
     server.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "library-scale", "version": "1"}})
     tools = server.send("tools/list", {})
     ready_ms = (time.perf_counter() - server.started) * 1000.0
+    print(f"library-scale {args.leg}: generated {args.items} items in {generate_s:.1f} s, ready in {ready_ms:.1f} ms", file=sys.stderr, flush=True)
     if not any(tool.get("name") == "search" for tool in tools.get("tools", [])):
         raise SystemExit("albumen-mcp did not list the search tool")
 
@@ -238,6 +239,10 @@ def main():
         page = server.search(arguments)
         latencies.append((time.perf_counter() - began) * 1000.0)
         hits += len(page.get("files", []))
+        done = len(latencies)
+        if done % 20 == 0:
+            so_far = sorted(latencies)
+            print(f"library-scale {args.leg}: {done}/{len(queries)} queries, p50 so far {nearest_rank(so_far, 50):.1f} ms, p95 so far {nearest_rank(so_far, 95):.1f} ms", file=sys.stderr, flush=True)
         if arguments["query"].startswith("no-such-item") and page.get("files"):
             raise SystemExit(f"miss query {arguments['query']} returned files")
         if not arguments["query"].startswith("no-such-item") and not page.get("files"):
@@ -272,19 +277,20 @@ def main():
     text = json.dumps(report, indent=2)
     print(text)
     if args.json:
-        with open(args.json, "w") as handle:
+        with open(args.json, "w", encoding="utf-8") as handle:
             handle.write(text + "\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         def mark(met):
             return "met" if met else "not yet"
-        with open(summary, "a") as handle:
+        with open(summary, "a", encoding="utf-8") as handle:
             handle.write(f"### library scale ({args.leg}, {args.items:,} items)\n\n")
             handle.write("| Metric | Measured | Target | Status |\n| --- | --- | --- | --- |\n")
             handle.write(f"| Cold start (spawn to first query ready) | {report['cold_start_ms']} ms | ≤ 1500 ms | {mark(report['cold_start_met'])} |\n")
             handle.write(f"| Search p95 over {len(queries)} fixed queries | {report['search_p95_ms']} ms | ≤ 200 ms | {mark(report['search_p95_met'])} |\n")
             handle.write(f"| Search p50 | {report['search_p50_ms']} ms | | |\n")
             handle.write(f"| First query after ready | {report['first_query_ms']} ms | | |\n")
+            handle.write(f"| Process start to first answer | {report['spawn_to_first_answer_ms']} ms | | |\n")
             handle.write(f"| Peak memory | {report['peak_memory_mib']} MiB | | |\n")
             handle.write(f"| Generate library (not timed against a target) | {report['generate_seconds']} s | | |\n\n")
             handle.write("Report only. A miss is a measurement, not a failed build.\n\n")
