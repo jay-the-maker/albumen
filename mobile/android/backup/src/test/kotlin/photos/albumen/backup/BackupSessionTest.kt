@@ -8,6 +8,7 @@ import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -110,6 +111,43 @@ class BackupSessionTest {
     }
 
     @Test
+    fun selectedPhotosIsAVisibleStopBeforeAnyRead() {
+        var calls = 0
+        val seen = run(
+            items = listOf(item("IMG.JPG")),
+            permission = { CameraRoll.SELECTED_ONLY_BLOCK },
+            uploader = { _, _, _, _ ->
+                calls++
+                UploadVerdict.Verified("nope")
+            },
+        )
+        assertEquals(0, calls)
+        assertEquals(BackupDisposition.FAILURE, seen.disposition)
+        assertTrue(seen.texts.last().contains("Allow all"))
+        assertTrue(seen.texts.last().isNotBlank())
+    }
+
+    @Test
+    fun accessDroppingToSelectedPhotosMidPassStopsBeforeTheNextItem() {
+        var checks = 0
+        var calls = 0
+        val seen = run(
+            items = listOf(item("A.JPG", 1), item("B.JPG", 2)),
+            permission = {
+                checks++
+                if (checks <= 2) null else CameraRoll.SELECTED_ONLY_BLOCK
+            },
+            uploader = { _, _, _, _ ->
+                calls++
+                UploadVerdict.Verified("nope")
+            },
+        )
+        assertTrue(calls <= 1)
+        assertEquals(BackupDisposition.FAILURE, seen.disposition)
+        assertTrue(seen.texts.last().contains("Allow all"))
+    }
+
+    @Test
     fun stoppedWorkResumesLater() {
         var calls = 0
         val seen = run(
@@ -187,6 +225,37 @@ class BackupSessionTest {
             Manifest.permission.READ_MEDIA_VIDEO,
         )
         assertEquals(CameraRoll.LOCATION_BLOCK, CameraRoll.permissionBlock(app, 33))
+    }
+
+    @Test
+    fun selectedPhotosOnApi34BlocksTheReadAndSaysAllowAll() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        Shadows.shadowOf(app).grantPermissions(
+            CameraRoll.READ_MEDIA_VISUAL_USER_SELECTED,
+            Manifest.permission.ACCESS_MEDIA_LOCATION,
+        )
+        assertEquals(CameraRoll.SELECTED_ONLY_BLOCK, CameraRoll.permissionBlock(app, 34))
+        assertEquals(CameraRoll.MEDIA_BLOCK, CameraRoll.permissionBlock(app, 33))
+    }
+
+    @Test
+    fun fullAccessOnApi34HasNoBlock() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        Shadows.shadowOf(app).grantPermissions(
+            CameraRoll.READ_MEDIA_VISUAL_USER_SELECTED,
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.ACCESS_MEDIA_LOCATION,
+        )
+        assertNull(CameraRoll.permissionBlock(app, 34))
+    }
+
+    @Test
+    fun requestedPermissionsAddSelectedPhotosOnlyFromApi34() {
+        assertTrue(CameraRoll.READ_MEDIA_VISUAL_USER_SELECTED in CameraRoll.requestedPermissions(34))
+        assertTrue(CameraRoll.READ_MEDIA_VISUAL_USER_SELECTED in CameraRoll.requestedPermissions(35))
+        assertFalse(CameraRoll.READ_MEDIA_VISUAL_USER_SELECTED in CameraRoll.requestedPermissions(33))
+        assertFalse(CameraRoll.READ_MEDIA_VISUAL_USER_SELECTED in CameraRoll.requiredPermissions(34))
     }
 
     @Test

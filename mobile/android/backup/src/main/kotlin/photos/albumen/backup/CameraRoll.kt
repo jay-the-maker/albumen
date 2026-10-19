@@ -39,6 +39,17 @@ object CameraRoll {
         "Images or video access is missing. Backup did not read the camera roll."
 
     /**
+     * Android 14 and newer: the person chose Select photos. Albumen backs up
+     * the whole camera roll, so it waits for full access instead of copying
+     * a subset and calling that a backup.
+     */
+    const val SELECTED_ONLY_BLOCK =
+        "You chose Select photos, so Albumen can see only some of your camera roll. Albumen backs up your whole camera roll as originals. Tap Allow all to give full photo and video access, and the backup starts. Nothing was copied yet."
+
+    /** `Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED`, API 34 and newer. */
+    const val READ_MEDIA_VISUAL_USER_SELECTED = "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+
+    /**
      * Runtime permissions the host app requests before enqueueing backup.
      * API 33 and newer use the media permissions. API 30 through 32 use
      * `READ_EXTERNAL_STORAGE`. Location is always requested with them.
@@ -57,8 +68,34 @@ object CameraRoll {
     }
 
     /**
+     * What the host puts in the permission request. On API 34 and newer it
+     * adds [READ_MEDIA_VISUAL_USER_SELECTED] to [requiredPermissions], so a
+     * Select photos answer is reported as that grant and the host can say
+     * so. That grant alone never starts a backup.
+     */
+    fun requestedPermissions(sdkInt: Int = Build.VERSION.SDK_INT): Array<String> {
+        val required = requiredPermissions(sdkInt)
+        return if (sdkInt >= 34) required + READ_MEDIA_VISUAL_USER_SELECTED else required
+    }
+
+    /**
+     * True when Android 14 or newer reports the Select photos grant without
+     * full images and video access.
+     */
+    fun isSelectedOnly(sdkInt: Int, granted: (String) -> Boolean): Boolean {
+        if (sdkInt < 34 || !granted(READ_MEDIA_VISUAL_USER_SELECTED)) {
+            return false
+        }
+        return requiredPermissions(sdkInt)
+            .filter { it != Manifest.permission.ACCESS_MEDIA_LOCATION }
+            .any { !granted(it) }
+    }
+
+    /**
      * A missing location grant means MediaStore would strip GPS, so the backup
-     * must not open the file. A missing media grant is the same refusal.
+     * must not open the file. A missing media grant is the same refusal. A
+     * Select photos grant on API 34 and newer is [SELECTED_ONLY_BLOCK]. The
+     * worker calls this before every pass and before every item.
      */
     fun permissionBlock(context: Context, sdkInt: Int = Build.VERSION.SDK_INT): String? {
         val denied = requiredPermissions(sdkInt).filter { permission ->
@@ -66,6 +103,12 @@ object CameraRoll {
         }
         if (denied.isEmpty()) {
             return null
+        }
+        val selectedOnly = isSelectedOnly(sdkInt) { permission ->
+            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
+        if (selectedOnly) {
+            return SELECTED_ONLY_BLOCK
         }
         if (Manifest.permission.ACCESS_MEDIA_LOCATION in denied) {
             return LOCATION_BLOCK
