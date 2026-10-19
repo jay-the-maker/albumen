@@ -4,10 +4,9 @@
 # the HEVC still in a single-item HEIC container because the ffmpeg build used
 # in CI has libx265 and no HEIF muxer, and heif-enc is not installed.
 # ExifTool then writes the shared UUID. The last line of stdout is the HEIC
-# tag that stuck, one of:
-#   Apple:ContentIdentifier
-#   Keys:ContentIdentifier
-#   XMP-dc:Identifier
+# tag that stuck. That is Apple:ContentIdentifier, stored by handing ExifTool
+# a generated maker-note block. -Apple:ContentIdentifier alone does not create
+# the block.
 set -euo pipefail
 
 # Git Bash rewrites arguments that look like POSIX paths before it starts a
@@ -177,23 +176,25 @@ exiftool -overwrite_original \
   -Keys:ContentIdentifier="$CONTENT_ID" \
   "$(native "$work/IMG_LIVE.mov")" >/dev/null
 
-# Apple maker notes and a QuickTime Keys box cannot be created in a HEIC that
-# does not already have them. Try those writes first, on a copy, and keep the
-# first tag ExifTool actually stores.
-clean="$work/IMG_LIVE.heic"
-heic_tag=""
-for tag in Apple:ContentIdentifier Keys:ContentIdentifier XMP-dc:Identifier; do
-  cp "$clean" "$work/try.heic"
-  exiftool -overwrite_original "-${tag}=${CONTENT_ID}" "$(native "$work/try.heic")" >/dev/null
-  if exiftool -s3 -"$tag" "$(native "$work/try.heic")" | grep -Fxq "$CONTENT_ID"; then
-    heic_tag="$tag"
-    mv "$work/try.heic" "$out/IMG_LIVE.heic"
-    break
-  fi
-done
-if [[ -z "$heic_tag" ]]; then
-  echo "exiftool stored none of Apple:ContentIdentifier, Keys:ContentIdentifier, XMP-dc:Identifier" >&2
+# -Apple:ContentIdentifier does not create a maker-note directory. ExifTool
+# will store one that already has the Apple iOS header and an IFD at byte 14.
+# Tag 0x0011 is ContentIdentifier. The string offset is from the start of the
+# block: 14 bytes of header plus an 18-byte IFD.
+"$PY" - "$CONTENT_ID" "$work/apple-makernote.bin" <<'PY'
+import struct, sys
+text = sys.argv[1].encode("ascii") + b"\x00"
+entry = struct.pack(">HHII", 0x0011, 2, len(text), 32)
+ifd = struct.pack(">H", 1) + entry + struct.pack(">I", 0)
+open(sys.argv[2], "wb").write(b"Apple iOS\x00\x00\x01MM" + ifd + text)
+PY
+exiftool -overwrite_original -m \
+  -EXIF:MakerNoteApple"<=-" \
+  "$(native "$work/IMG_LIVE.heic")" <"$work/apple-makernote.bin" >/dev/null
+heic_tag="Apple:ContentIdentifier"
+if ! exiftool -s3 -"$heic_tag" "$(native "$work/IMG_LIVE.heic")" | grep -Fxq "$CONTENT_ID"; then
+  echo "exiftool did not report Apple:ContentIdentifier on the HEIC" >&2
   exit 1
 fi
+mv "$work/IMG_LIVE.heic" "$out/IMG_LIVE.heic"
 mv "$work/IMG_LIVE.mov" "$out/IMG_LIVE.mov"
 printf '%s\n' "$heic_tag"

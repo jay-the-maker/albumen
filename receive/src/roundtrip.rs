@@ -52,6 +52,7 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
             library: root.path().to_path_buf(),
             user: "camera".into(),
             password: "roll".into(),
+            member: None,
         },
         Some("127.0.0.1:0".parse().unwrap()),
         None,
@@ -73,7 +74,7 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
     assert_eq!(asset.files()[1].role, Role::Pair);
     assert_eq!(asset.files()[1].path.file_name().unwrap(), "IMG_LIVE.mov");
     assert_eq!(
-        identifier(&stored_heic, "XMP-dc:Identifier").as_deref(),
+        identifier(&stored_heic, "Apple:ContentIdentifier").as_deref(),
         Some("A1B2C3D4-E5F6-4071-8A9B-C0D1E2F30405")
     );
     assert_eq!(

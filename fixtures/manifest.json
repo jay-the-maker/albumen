@@ -11,6 +11,16 @@
       "companions": []
     },
     {
+      "id": "iptc-jpeg",
+      "primary": "iptc/IMG_0001.jpg",
+      "companions": []
+    },
+    {
+      "id": "iptc-heic",
+      "primary": "iptc/IMG_0002.heic",
+      "companions": []
+    },
+    {
       "id": "raw-jpeg",
       "primary": "raw-jpeg/IMG_0003.dng",
       "companions": ["raw-jpeg/IMG_0003.jpg"]

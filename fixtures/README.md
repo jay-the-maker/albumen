@@ -25,11 +25,13 @@ Regenerating with different tool versions will not be bit-identical. Treat the c
 | --- | --- |
 | `jpeg-gps/IMG_0001.jpg` | JPEG with EXIF, GPS (37.8199 N, 122.4783 W), IPTC, and embedded XMP. Solid color, not a photograph of that place. |
 | `heic/IMG_0002.heic` | HEIC still with EXIF and GPS (48.8567 N, 2.3522 E). |
+| `iptc/IMG_0001.jpg` | Copy of `jpeg-gps/IMG_0001.jpg` with IPTC Core written by `scripts/write-iptc-core.sh` (ExifTool 13.59). By-line, caption, keywords, city, country, and copyright notice `CC0 1.0 Universal`, plus `XMP-iptcCore:CountryCode` and `XMP-iptcCore:Location`. |
+| `iptc/IMG_0002.heic` | Copy of `heic/IMG_0002.heic` with the same IPTC Core. The IIM block is EXIF `IPTC-NAA`, because a HEIC has no IPTC box. ExifTool reports it in the `IPTC` group. |
 | `raw-jpeg/IMG_0003.dng` | Synthetic DNG: a 64×48 TIFF with DNG version tags. ExifTool reports `FileType: DNG`. Not a capture from a commercial camera. Shares `ImageUniqueID` and `DateTimeOriginal` with the JPEG. |
 | `raw-jpeg/IMG_0003.jpg` | JPEG pair for the DNG, with its own GPS. |
 | `xmp/IMG_0004.jpg` | JPEG that ships with a sidecar. |
 | `xmp/IMG_0004.xmp` | XMP sidecar: rating, label, description, and GPS. |
-| `live-photo/IMG_0005.heic` | Live Photo still. The UUID `B4E3C1A0-7F2D-4C8A-9E11-0A1B2C3D4E5F` is in `XMP-dc:Identifier`. |
+| `live-photo/IMG_0005.heic` | Live Photo still. The UUID `B4E3C1A0-7F2D-4C8A-9E11-0A1B2C3D4E5F` is `Apple:ContentIdentifier` and `XMP-dc:Identifier`. |
 | `live-photo/IMG_0005.mov` | Live Photo video. The same UUID is the QuickTime key `Keys:ContentIdentifier`. |
 | `video/IMG_0006.mp4` | One-second H.264 video with `creation_time` 2019-08-01T12:00:00Z. |
 | `motion-photo/IMG_0007.jpg` | Synthetic Android Motion Photo. A JPEG, then an MP4 appended immediately after the JPEG EOI (`FF D9`). XMP `GCamera:MicroVideoOffset` and `Container:Item` length for the `MotionPhoto` entry are both the MP4 size (1968 bytes in this corpus). The primary item length is 0, which is the Motion Photo convention for "the rest of the file". |
@@ -39,7 +41,7 @@ Regenerating with different tool versions will not be bit-identical. Treat the c
 
 ## Live Photo note
 
-ExifTool 12.76 can write EXIF and XMP into a fresh HEIC. It will not create Apple maker notes, or a QuickTime Keys box, in a HEIC that does not already have them. The still therefore carries the pair UUID in XMP, and the movie carries the real `Keys:ContentIdentifier`. Discovery links the pair by filename (`IMG_0005.heic` + `IMG_0005.mov`), which is the same rule Albumen uses for Live Photos.
+ExifTool will not create an Apple maker-note directory from `-Apple:ContentIdentifier`. It will store a block passed to `-EXIF:MakerNoteApple<=`. That block is generated, not copied from a camera: `Apple iOS\0`, then `\0\x01MM`, then an IFD at byte 14 whose only entry is tag 0x0011. The movie carries `Keys:ContentIdentifier`. Discovery links the pair by filename (`IMG_0005.heic` + `IMG_0005.mov`), which is the same rule Albumen uses for Live Photos.
 
 ## Digests
 
@@ -47,8 +49,10 @@ ExifTool 12.76 can write EXIF and XMP into a fresh HEIC. It will not create Appl
 b60238eedb0f40b3d2ea63fb1e10df7015a5d20b3a0745706b2f3833fd150fde  aae/IMG_0008.aae
 a82cbf717e4f70eaa03f31b8e49a0a5427d4fbe4d062825cba7a64092a381ac6  aae/IMG_0008.jpg
 64d83a0994ba9e11e8dbe8ea33026b3f5d58899b30d4bfaf15bb0042378aa964  heic/IMG_0002.heic
+2f9307265d29e613457a8b434467cb8c57cfebacb5b15c8d082038cfdafabded  iptc/IMG_0001.jpg
+c724675f291a91aa073d19ef830d58ff33cb9b8f3fe2511fcbec91d849f0e21b  iptc/IMG_0002.heic
 6809efaef8e64b718cd26aafed1bb246612be1e73a4d4daf1cb40dda9a15cb2a  jpeg-gps/IMG_0001.jpg
-aafa4c2514910aa252149c2feb86401b4dcb7fb4238ad587db8b979d824b2c04  live-photo/IMG_0005.heic
+2535dad4532a6559037109d8541eaf0c1414b812c19e3d418fe977a484b93cc7  live-photo/IMG_0005.heic
 8e4f6a8900f9b4a597533f09f35f68287156654b963bfdd55fbb15afa5af922e  live-photo/IMG_0005.mov
 e3cad4aef31eb49414cbffb98851831265a5d6729438a6efb57a30c3624fa8cc  motion-photo/IMG_0007.jpg
 0ff3550a6267b189a73acb04833f73b7cd3235564dbcf6d2d10a080c78cb9ebf  raw-jpeg/IMG_0003.dng
