@@ -1,0 +1,33 @@
+{
+  "max_steps": 5,
+  "steps": [
+    {
+      "n": 1,
+      "id": "install",
+      "summary": "Install albumen, albumen-mcp, and albumen-receive into a directory you own. No Rust toolchain, no sudo, and no account.",
+      "posix": "curl -fsSL https://raw.githubusercontent.com/jay-the-maker/albumen/main/scripts/install.sh | sh",
+      "windows": "irm https://raw.githubusercontent.com/jay-the-maker/albumen/main/scripts/install.ps1 | iex"
+    },
+    {
+      "n": 2,
+      "id": "receive",
+      "summary": "Start a local receiver. The password is one you choose for this receiver. It is not an Albumen account. The command creates the library directory.",
+      "posix": "ALBUMEN_RECEIVE_PASSWORD='a receiver password' \"$HOME/.local/share/albumen/bin/albumen-receive\" --to \"$HOME/albumen-library\" --user camera --webdav 127.0.0.1:8080 --apply",
+      "windows": "$env:ALBUMEN_RECEIVE_PASSWORD = 'a receiver password'; & \"$env:LOCALAPPDATA\\albumen\\bin\\albumen-receive.exe\" --to \"$env:USERPROFILE\\albumen-library\" --user camera --webdav 127.0.0.1:8080 --apply"
+    },
+    {
+      "n": 3,
+      "id": "upload",
+      "summary": "PUT one original the way a phone does. The request is Basic auth, Content-Type application/octet-stream, and X-Albumen-Mtime. The source file is only read.",
+      "posix": "curl -sS -D - -o /dev/null -T \"$HOME/originals/IMG_QUICKSTART.jpg\" -u \"camera:${ALBUMEN_RECEIVE_PASSWORD}\" -H \"Content-Type: application/octet-stream\" -H \"X-Albumen-Mtime: $(stat -c %Y \"$HOME/originals/IMG_QUICKSTART.jpg\" 2>/dev/null || stat -f %m \"$HOME/originals/IMG_QUICKSTART.jpg\")\" http://127.0.0.1:8080/IMG_QUICKSTART.jpg",
+      "windows": "curl.exe -sS -D headers.txt -o NUL -T \"$env:USERPROFILE\\originals\\IMG_QUICKSTART.jpg\" -u \"camera:$env:ALBUMEN_RECEIVE_PASSWORD\" -H \"Content-Type: application/octet-stream\" -H \"X-Albumen-Mtime: $mtime\" http://127.0.0.1:8080/IMG_QUICKSTART.jpg"
+    },
+    {
+      "n": 4,
+      "id": "verify",
+      "summary": "Require the response X-Albumen-Sha256, the stored file, and the source to be the same SHA-256. The source bytes and mtime stay as they were.",
+      "posix": "sha256sum \"$HOME/originals/IMG_QUICKSTART.jpg\" \"$HOME/albumen-library/IMG_QUICKSTART.jpg\" || shasum -a 256 \"$HOME/originals/IMG_QUICKSTART.jpg\" \"$HOME/albumen-library/IMG_QUICKSTART.jpg\"",
+      "windows": "Get-FileHash -Algorithm SHA256 \"$env:USERPROFILE\\originals\\IMG_QUICKSTART.jpg\", \"$env:USERPROFILE\\albumen-library\\IMG_QUICKSTART.jpg\""
+    }
+  ]
+}

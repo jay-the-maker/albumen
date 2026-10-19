@@ -32,6 +32,49 @@ The backup apps call the same ingest path as a drag-and-drop import. They do not
 
 Linux, Windows, and macOS are first-class for the ingest tools. `albumen platform-dirs` prints the native config and data directories and creates nothing. The receiver can read its password from the Keychain, Windows Credential Manager, or the Secret Service, and it can write a launchd, systemd, or Task Scheduler definition. Each of those is opt-in. See [docs/platforms.md](docs/platforms.md).
 
+## Quickstart
+
+Four steps from a machine that does not have Rust. No sudo, and no account. The list is `scripts/quickstart.json`. A check fails if that list grows past five steps or if the copy is not SHA-256 verified.
+
+1. Install the release binaries into a directory you own. The script downloads the archive for this operating system, requires the sibling `.sha256` to match, checks `SHA256SUMS` inside the archive, and checks a cosign bundle or a GitHub attestation when that tool is already on `PATH`.
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/jay-the-maker/albumen/main/scripts/install.sh | sh
+   ```
+
+   ```powershell
+   irm https://raw.githubusercontent.com/jay-the-maker/albumen/main/scripts/install.ps1 | iex
+   ```
+
+   The binaries are `$HOME/.local/share/albumen/bin` on Linux and macOS, and `%LOCALAPPDATA%\albumen\bin` on Windows.
+
+2. Start a local receiver. The password is one you choose for this receiver. It is not an Albumen account. The command creates the library directory.
+
+   ```bash
+   ALBUMEN_RECEIVE_PASSWORD='a receiver password' \
+     "$HOME/.local/share/albumen/bin/albumen-receive" \
+     --to "$HOME/albumen-library" --user camera --webdav 127.0.0.1:8080 --apply
+   ```
+
+3. PUT one original the way a phone does. The request sends Basic auth, `Content-Type: application/octet-stream`, and `X-Albumen-Mtime`. The source file is only read.
+
+   ```bash
+   curl -sS -D - -o /dev/null -T "$HOME/originals/IMG_QUICKSTART.jpg" \
+     -u "camera:${ALBUMEN_RECEIVE_PASSWORD}" \
+     -H "Content-Type: application/octet-stream" \
+     -H "X-Albumen-Mtime: $(stat -c %Y "$HOME/originals/IMG_QUICKSTART.jpg" 2>/dev/null || stat -f %m "$HOME/originals/IMG_QUICKSTART.jpg")" \
+     http://127.0.0.1:8080/IMG_QUICKSTART.jpg
+   ```
+
+4. Require the response `X-Albumen-Sha256`, the file in the library, and the source to be the same SHA-256. The source bytes and mtime stay as they were.
+
+   ```bash
+   sha256sum "$HOME/originals/IMG_QUICKSTART.jpg" "$HOME/albumen-library/IMG_QUICKSTART.jpg" \
+     || shasum -a 256 "$HOME/originals/IMG_QUICKSTART.jpg" "$HOME/albumen-library/IMG_QUICKSTART.jpg"
+   ```
+
+Windows uses the same four steps. The commands are the `windows` fields in `scripts/quickstart.json`. `albumen-receive` answers `201` with `X-Albumen-Sha256` only after `copy_verify`. The source is not modified.
+
 ## Install from source
 
 The toolchain in CI is Rust 1.99.1. The workspace asks for 1.94 or newer. Metadata search needs ExifTool on `PATH`. `scripts/install-exiftool.sh` downloads Image-ExifTool 13.59 and checks its SHA-256. It does not use a distro package.

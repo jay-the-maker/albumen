@@ -273,3 +273,149 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           scripts/no-unexpected-egress.sh
+
+  package-release:
+    name: package release archive (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: albumen-linux-x86_64
+          - os: macos-14
+            label: macos-14
+            target: aarch64-apple-darwin
+            artifact: albumen-macos-arm64
+          - os: windows-2025
+            label: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: albumen-windows-x86_64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binaries
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/albumen"
+          export CARGO_INCREMENTAL=0
+          export CARGO_PROFILE_RELEASE_INCREMENTAL=false
+          export CARGO_PROFILE_RELEASE_DEBUG=false
+          export CARGO_PROFILE_RELEASE_STRIP=symbols
+          cargo build --release --locked --target "$TARGET" -p albumen -p albumen-mcp -p albumen-receive
+
+      - name: Package the archive
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: bash scripts/package-release.sh "$TARGET" "$ARTIFACT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
+          if-no-files-found: error
+
+  install-quickstart:
+    name: install without Rust (${{ matrix.label }})
+    needs: package-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: ubuntu-24.04
+            artifact: albumen-linux-x86_64
+          - os: macos-14
+            label: macos-14
+            artifact: albumen-macos-arm64
+          - os: windows-2025
+            label: windows-2025
+            artifact: albumen-windows-x86_64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: release-archive
+
+      - name: This job does not install a Rust toolchain
+        run: |
+          if [ -n "${RUSTUP_TOOLCHAIN:-}" ]; then
+            echo "RUSTUP_TOOLCHAIN is set" >&2
+            exit 1
+          fi
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/check-quickstart.py --self-test
+          "$PY" scripts/check-quickstart.py
+
+      - name: Check the installer without a release binary
+        run: bash scripts/check-install.sh
+
+      - name: Quickstart to a verified backup
+        if: runner.os != 'Windows'
+        env:
+          ALBUMEN_ARCHIVE: ${{ github.workspace }}/release-archive/${{ matrix.artifact }}.tar.gz
+        run: |
+          home="$(mktemp -d)"
+          export HOME="$home"
+          bash scripts/quickstart.sh | tee "$home/quickstart.out"
+          grep -q '^verified: ' "$home/quickstart.out"
+          grep -q '^source unchanged$' "$home/quickstart.out"
+
+      - name: Check the PowerShell installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -File scripts/check-install.ps1
+
+      - name: Quickstart to a verified backup on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $home = Join-Path $env:RUNNER_TEMP 'albumen-quickstart-home'
+          New-Item -ItemType Directory -Force -Path $home | Out-Null
+          $local = Join-Path $home 'AppData\Local'
+          New-Item -ItemType Directory -Force -Path $local | Out-Null
+          $env:USERPROFILE = $home
+          $env:LOCALAPPDATA = $local
+          $env:ALBUMEN_ARCHIVE = Join-Path $env:GITHUB_WORKSPACE 'release-archive\${{ matrix.artifact }}.tar.gz'
+          $out = Join-Path $home 'quickstart.out'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\quickstart.ps1') | Tee-Object -FilePath $out
+          if (-not (Select-String -Path $out -Pattern '^verified: ' -Quiet)) { throw 'SHA-256 verification did not print' }
+          if (-not (Select-String -Path $out -Pattern '^source unchanged$' -Quiet)) { throw 'source was not reported unchanged' }

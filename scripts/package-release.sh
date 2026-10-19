@@ -43,7 +43,9 @@ mkdir -p "$out_dir"
   set -- *
   checksum "$@" > SHA256SUMS
   COPYFILE_DISABLE=1 tar -czf "$out_dir/${artifact}.tar.gz" SHA256SUMS "$@"
-  cp -- "$@" "$out_dir/"
+  for file in "$@"; do
+    cp "$file" "$out_dir/"
+  done
 )
 (
   cd "$out_dir"
