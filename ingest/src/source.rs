@@ -111,11 +111,23 @@ impl SourceRoot {
     /// Refuse `dest` when it is this root, is inside this root, or is a
     /// hard link to a file or directory in this root.
     pub fn refuse_destination(&self, dest: &Path) -> Result<(), IngestError> {
-        if destination_aliases(self, dest)? {
-            return Err(IngestError::DestinationInsideSource {
-                destination: dest.display().to_string(),
-                source_tree: self.canonical.display().to_string(),
-            });
+        self.refuse_destinations(&[dest])
+    }
+
+    /// [`Self::refuse_destination`] for each path, in order, with one
+    /// lookup cache for the whole call. A path that two checks both resolve
+    /// (the root, the destination's parents) is canonicalized and stat-ed
+    /// once instead of once per comparison. Each check gives the same
+    /// answer it gives alone.
+    pub fn refuse_destinations(&self, dests: &[&Path]) -> Result<(), IngestError> {
+        let lookups = Lookups::default();
+        for dest in dests {
+            if destination_aliases(self, dest, &lookups)? {
+                return Err(IngestError::DestinationInsideSource {
+                    destination: dest.display().to_string(),
+                    source_tree: self.canonical.display().to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -125,7 +137,7 @@ impl SourceRoot {
     /// fits a directory this process creates for its own files.
     pub fn refuse_inside(&self, dest: &Path) -> Result<(), IngestError> {
         let resolved = resolve_dest(dest)?;
-        if path_is_inside(&self.canonical, &resolved) {
+        if path_is_inside(&self.canonical, &resolved, &Lookups::default()) {
             return Err(IngestError::DestinationInsideSource {
                 destination: dest.display().to_string(),
                 source_tree: self.canonical.display().to_string(),
@@ -265,12 +277,57 @@ fn open_rdonly(path: &Path) -> Result<File, IngestError> {
         .map_err(|err| IngestError::io(path, err))
 }
 
-fn destination_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError> {
+/// Canonical paths and metadata looked up during one destination check.
+///
+/// The Windows comparisons below resolve the root and every parent of the
+/// destination against each other, which asked the file system for the same
+/// path dozens of times per imported file. The cache lives for one
+/// [`SourceRoot::refuse_destinations`] call only, so nothing carries over
+/// between files.
+#[derive(Default)]
+struct Lookups {
+    canonical: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<PathBuf>>>,
+    #[cfg(windows)]
+    metadata: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<fs::Metadata>>>,
+}
+
+impl Lookups {
+    /// `path.canonicalize()`, remembered. An error is remembered as `None`;
+    /// callers that need the error call `canonicalize` themselves.
+    fn canonical(&self, path: &Path) -> Option<PathBuf> {
+        if let Some(found) = self.canonical.borrow().get(path) {
+            return found.clone();
+        }
+        let found = path.canonicalize().ok();
+        self.canonical
+            .borrow_mut()
+            .insert(path.to_path_buf(), found.clone());
+        found
+    }
+
+    #[cfg(windows)]
+    fn metadata(&self, path: &Path) -> Option<fs::Metadata> {
+        if let Some(found) = self.metadata.borrow().get(path) {
+            return found.clone();
+        }
+        let found = fs::metadata(path).ok();
+        self.metadata
+            .borrow_mut()
+            .insert(path.to_path_buf(), found.clone());
+        found
+    }
+}
+
+fn destination_aliases(
+    root: &SourceRoot,
+    dest: &Path,
+    lookups: &Lookups,
+) -> Result<bool, IngestError> {
     let resolved = resolve_dest(dest)?;
-    if path_is_inside(&root.canonical, &resolved) {
+    if path_is_inside(&root.canonical, &resolved, lookups) {
         return Ok(true);
     }
-    hardlink_aliases(root, dest)
+    hardlink_aliases(root, dest, lookups)
 }
 
 /// `dest` is `root` or a path under it.
@@ -279,32 +336,34 @@ fn destination_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestErr
 /// and 8.3 short names (`RUNNER~1` and `runneradmin` are one directory).
 /// A string prefix is not enough. The same directory also matches on
 /// creation time, size, and attributes.
-fn path_is_inside(root: &Path, dest: &Path) -> bool {
+fn path_is_inside(root: &Path, dest: &Path, lookups: &Lookups) -> bool {
     if normalized_starts_with(dest, root) {
         return true;
     }
     #[cfg(windows)]
     {
         dest.ancestors()
-            .any(|ancestor| same_directory(ancestor, root))
+            .any(|ancestor| same_directory(ancestor, root, lookups))
     }
     #[cfg(not(windows))]
     {
+        let _ = lookups;
         false
     }
 }
 
-fn root_is_under(root: &Path, dir: &Path) -> bool {
+fn root_is_under(root: &Path, dir: &Path, lookups: &Lookups) -> bool {
     if normalized_starts_with(root, dir) {
         return true;
     }
     #[cfg(windows)]
     {
         root.ancestors()
-            .any(|ancestor| same_directory(ancestor, dir))
+            .any(|ancestor| same_directory(ancestor, dir, lookups))
     }
     #[cfg(not(windows))]
     {
+        let _ = lookups;
         false
     }
 }
@@ -343,8 +402,10 @@ fn normalize_path(path: &Path) -> String {
 }
 
 #[cfg(windows)]
-fn same_directory(left: &Path, right: &Path) -> bool {
-    if let (Ok(left_canon), Ok(right_canon)) = (left.canonicalize(), right.canonicalize()) {
+fn same_directory(left: &Path, right: &Path, lookups: &Lookups) -> bool {
+    if let (Some(left_canon), Some(right_canon)) =
+        (lookups.canonical(left), lookups.canonical(right))
+    {
         if normalize_path(&left_canon) == normalize_path(&right_canon) {
             return true;
         }
@@ -355,7 +416,8 @@ fn same_directory(left: &Path, right: &Path) -> bool {
     if left.file_name() != right.file_name() {
         return false;
     }
-    let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(left), fs::metadata(right)) else {
+    let (Some(left_meta), Some(right_meta)) = (lookups.metadata(left), lookups.metadata(right))
+    else {
         return false;
     };
     if !left_meta.is_dir() || !right_meta.is_dir() {
@@ -414,8 +476,12 @@ fn resolve_dest(dest: &Path) -> Result<PathBuf, IngestError> {
     }
 }
 
-fn hardlink_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError> {
-    let (interesting, only_dirs) = dest_ids(root, dest)?;
+fn hardlink_aliases(
+    root: &SourceRoot,
+    dest: &Path,
+    lookups: &Lookups,
+) -> Result<bool, IngestError> {
+    let (interesting, only_dirs) = dest_ids(root, dest, lookups)?;
     if interesting.is_empty() {
         return Ok(false);
     }
@@ -463,7 +529,11 @@ fn hardlink_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError>
 
 /// Identities of `dest` and its existing ancestors, and whether all of them
 /// are directories.
-fn dest_ids(root: &SourceRoot, dest: &Path) -> Result<(Vec<(u64, u64)>, bool), IngestError> {
+fn dest_ids(
+    root: &SourceRoot,
+    dest: &Path,
+    lookups: &Lookups,
+) -> Result<(Vec<(u64, u64)>, bool), IngestError> {
     let mut ids = Vec::new();
     let mut only_dirs = true;
     let mut cursor = dest.to_path_buf();
@@ -478,10 +548,13 @@ fn dest_ids(root: &SourceRoot, dest: &Path) -> Result<(Vec<(u64, u64)>, bool), I
         if !cursor.exists() {
             break;
         }
-        let canon = cursor
-            .canonicalize()
-            .map_err(|err| IngestError::io(&cursor, err))?;
-        if root_is_under(&root.canonical, &canon) {
+        let canon = match lookups.canonical(&cursor) {
+            Some(canon) => canon,
+            None => cursor
+                .canonicalize()
+                .map_err(|err| IngestError::io(&cursor, err))?,
+        };
+        if root_is_under(&root.canonical, &canon, lookups) {
             break;
         }
         let meta = fs::symlink_metadata(&cursor).map_err(|err| IngestError::io(&cursor, err))?;

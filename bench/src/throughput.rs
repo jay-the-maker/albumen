@@ -732,6 +732,7 @@ fn phase_ms(phases: &CopyPhases) -> Value {
         "readback_hash": ns_to_ms(phases.readback_hash_ns),
         "dir_sync": ns_to_ms(phases.dir_sync_ns),
         "preflight": ns_to_ms(phases.preflight_ns),
+        "case_check": ns_to_ms(phases.case_check_ns),
         "metadata": ns_to_ms(phases.metadata_ns),
     })
 }
@@ -746,6 +747,7 @@ fn phase_share(phases: &CopyPhases) -> Value {
         "readback_hash": phases.share(phases.readback_hash_ns),
         "dir_sync": phases.share(phases.dir_sync_ns),
         "preflight": phases.share(phases.preflight_ns),
+        "case_check": phases.share(phases.case_check_ns),
         "metadata": phases.share(phases.metadata_ns),
     })
 }
@@ -828,7 +830,7 @@ pub fn optional_rate(rate: Option<f64>) -> String {
 
 pub fn phase_share_line(phases: &CopyPhases) -> String {
     format!(
-        "source_read:{:.3},hash:{:.3},write:{:.3},file_sync:{:.3},readback_read:{:.3},readback_hash:{:.3},dir_sync:{:.3},preflight:{:.3},metadata:{:.3}",
+        "source_read:{:.3},hash:{:.3},write:{:.3},file_sync:{:.3},readback_read:{:.3},readback_hash:{:.3},dir_sync:{:.3},preflight:{:.3},case_check:{:.3},metadata:{:.3}",
         phases.share(phases.source_read_ns),
         phases.share(phases.hash_ns),
         phases.share(phases.write_ns),
@@ -837,6 +839,7 @@ pub fn phase_share_line(phases: &CopyPhases) -> String {
         phases.share(phases.readback_hash_ns),
         phases.share(phases.dir_sync_ns),
         phases.share(phases.preflight_ns),
+        phases.share(phases.case_check_ns),
         phases.share(phases.metadata_ns)
     )
 }

@@ -143,6 +143,30 @@ pub fn process_cpu_time() -> std::io::Result<std::time::Duration> {
     ))
 }
 
+/// The 8.3 short form of an existing path, from `GetShortPathNameW`. A
+/// volume with 8.3 names turned off returns the long path unchanged.
+#[cfg(windows)]
+pub fn short_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut out = vec![0u16; 1024];
+    loop {
+        let len = unsafe { GetShortPathNameW(wide.as_ptr(), out.as_mut_ptr(), out.len() as u32) };
+        if len == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let len = len as usize;
+        if len < out.len() {
+            out.truncate(len);
+            return Ok(OsString::from_wide(&out).into());
+        }
+        out.resize(len + 1, 0);
+    }
+}
+
 /// User plus kernel CPU time the calling thread has used, from `GetThreadTimes`.
 #[cfg(windows)]
 pub fn thread_cpu_time() -> std::io::Result<std::time::Duration> {

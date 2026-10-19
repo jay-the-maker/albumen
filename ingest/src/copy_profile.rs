@@ -22,6 +22,7 @@ thread_local! {
 #[derive(Clone, Copy)]
 enum Phase {
     Preflight = 0,
+    CaseCheck,
     SourceRead,
     Hash,
     Write,
@@ -32,7 +33,7 @@ enum Phase {
     DirSync,
 }
 
-const PHASES: usize = 9;
+const PHASES: usize = 10;
 
 #[allow(clippy::declare_interior_mutable_const)]
 const ZERO: AtomicU64 = AtomicU64::new(0);
@@ -49,8 +50,10 @@ pub struct CopyPhases {
     pub readback_read_ns: u64,
     pub readback_hash_ns: u64,
     pub dir_sync_ns: u64,
-    /// Destination checks before the copy: alias, case collision, exists.
+    /// Destination checks before the copy: source root, alias, exists.
     pub preflight_ns: u64,
+    /// The case-collision listing of the destination directory.
+    pub case_check_ns: u64,
     /// Named streams and setting the preserved mtime.
     pub metadata_ns: u64,
     /// Thread CPU time per phase, same order as [`CopyPhases::cpu_named`].
@@ -60,6 +63,7 @@ pub struct CopyPhases {
 /// Phase names in [`CopyPhases::cpu_ns`] order.
 pub const PHASE_NAMES: [&str; PHASES] = [
     "preflight",
+    "case_check",
     "source_read",
     "hash",
     "write",
@@ -80,6 +84,7 @@ impl CopyPhases {
             .saturating_add(self.readback_hash_ns)
             .saturating_add(self.dir_sync_ns)
             .saturating_add(self.preflight_ns)
+            .saturating_add(self.case_check_ns)
             .saturating_add(self.metadata_ns)
     }
 
@@ -133,6 +138,7 @@ pub fn snapshot() -> CopyPhases {
         readback_hash_ns: wall(Phase::ReadbackHash),
         dir_sync_ns: wall(Phase::DirSync),
         preflight_ns: wall(Phase::Preflight),
+        case_check_ns: wall(Phase::CaseCheck),
         metadata_ns: wall(Phase::Metadata),
         cpu_ns,
     }
@@ -174,6 +180,10 @@ fn thread_cpu_ns() -> u64 {
 
 pub(crate) fn add_preflight(start: Option<Tic>) {
     add(Phase::Preflight, start);
+}
+
+pub(crate) fn add_case_check(start: Option<Tic>) {
+    add(Phase::CaseCheck, start);
 }
 
 pub(crate) fn add_source_read(start: Option<Tic>) {
