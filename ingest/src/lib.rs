@@ -7,7 +7,9 @@
 //! preserves the filename and mtime, and verifies SHA-256. A mismatch is a
 //! hard error: the bad destination is removed, and both hashes are reported.
 
-#![forbid(unsafe_code)]
+// Windows directory durability calls `MoveFileExW`. That one block is
+// `unsafe`. Everything else in this crate stays safe.
+#![deny(unsafe_code)]
 
 mod checksum;
 pub mod dest;
