@@ -189,7 +189,11 @@ pub(crate) fn finalize_verified(
     expected: &[u8; 32],
     mtime: std::time::SystemTime,
 ) -> Result<VerifiedObject, IngestError> {
+    // Camera-to-cloud CI times this re-read only. The hash made while
+    // copying, and the fsync before it, stay outside the clock.
+    let started = std::time::Instant::now();
     let actual = sha256_file(path)?;
+    let sha256_verify_ms = started.elapsed().as_millis();
     if actual != *expected {
         let removed = dest::remove_file(path).is_ok();
         return Err(IngestError::checksum_mismatch(
@@ -223,6 +227,7 @@ pub(crate) fn finalize_verified(
         sha256: to_hex(expected),
         byte_len,
         mtime: stored_mtime,
+        sha256_verify_ms,
     })
 }
 

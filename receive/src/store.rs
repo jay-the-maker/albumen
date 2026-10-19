@@ -171,9 +171,18 @@ impl Library {
             let _ = self.write_tombstone(&verified.filename, "receipt sidecar was not written");
             return Err(err);
         }
+        println!(
+            "camera-verify protocol={} bytes={} sha256={} verify_ms={}",
+            protocol.as_str(),
+            verified.byte_len,
+            verified.sha256,
+            verified.sha256_verify_ms
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
         Ok(Commit::Stored {
             sha256: verified.sha256,
             stored_name: verified.filename,
+            verify_ms: verified.sha256_verify_ms,
         })
     }
 
@@ -574,8 +583,16 @@ struct MtimeConflict {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Commit {
-    Stored { sha256: String, stored_name: String },
-    Deduped { sha256: String, stored_name: String },
+    Stored {
+        sha256: String,
+        stored_name: String,
+        /// Milliseconds spent re-reading the stored bytes and hashing them.
+        verify_ms: u128,
+    },
+    Deduped {
+        sha256: String,
+        stored_name: String,
+    },
 }
 
 impl Commit {

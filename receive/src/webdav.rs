@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! WebDAV for cameras and card writers. PUT commits through `copy_verify`.
-//! A 201 response carries `X-Albumen-Sha256`, the digest `copy_verify` checked.
+//! A 201 response carries `X-Albumen-Sha256`, the digest `copy_verify` checked,
+//! and `X-Albumen-Verify-Ms`, the milliseconds of that re-read.
 //! A different file with the same camera filename is stored under another name.
 //! A 409 means those exact bytes are already stored. DELETE and MOVE are refused.
 
@@ -254,7 +255,9 @@ async fn put(
         }
     }
     match library.commit(&mut spool, &arrival, crate::store::MtimeProtocol::WebDav) {
-        Ok(Commit::Stored { sha256, .. }) => created(socket, &sha256).await,
+        Ok(Commit::Stored {
+            sha256, verify_ms, ..
+        }) => created(socket, &sha256, verify_ms).await,
         Ok(Commit::Deduped { sha256, .. }) => deduped(socket, &sha256).await,
         Err(err) => write_status(socket, 500, &err, &[]).await,
     }
@@ -287,9 +290,19 @@ async fn write_body_to_spool(
     Ok(())
 }
 
-async fn created(socket: &mut impl Stream, sha256: &str) -> std::io::Result<()> {
+async fn created(socket: &mut impl Stream, sha256: &str, verify_ms: u128) -> std::io::Result<()> {
     let sha256 = sha256.replace(['\r', '\n'], "");
-    write_status(socket, 201, "Created", &[("X-Albumen-Sha256", &sha256)]).await
+    let verify_ms = verify_ms.to_string();
+    write_status(
+        socket,
+        201,
+        "Created",
+        &[
+            ("X-Albumen-Sha256", &sha256),
+            ("X-Albumen-Verify-Ms", &verify_ms),
+        ],
+    )
+    .await
 }
 
 async fn deduped(socket: &mut impl Stream, sha256: &str) -> std::io::Result<()> {

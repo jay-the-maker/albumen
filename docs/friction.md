@@ -32,6 +32,10 @@ The Android host sends to a receiver, so the five steps above come first. The ph
 
 The first job is queued with no initial delay and a network constraint, so a verified copy can finish within 5 minutes of setup. Later backups run while the phone is idle, charging, and on a network. The upload does not delete the camera-roll item. iOS background upload is still the scoped extension in [camera-roll-scope.md](camera-roll-scope.md).
 
+## Camera body
+
+A camera that cannot scan the pairing QR uses the WebDAV and FTP lines under `camera setup`. The same settings are one machine-readable line, `camera-setup-steps`. That line is five actions, shared by both protocols: enter host, enter port, enter user, enter password or path, and enable auto-transfer. CI counts the printed list and fails when there are more than five. The password on the line is the phrase "the password for this process". The secret stays in the command that started the receiver.
+
 ## Hard rules
 
 ### Sane defaults

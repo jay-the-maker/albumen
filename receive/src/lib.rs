@@ -5,6 +5,7 @@
 //! Nothing is overwritten, and nothing already in the library is deleted.
 //! A hide or a failed receipt writes a tombstone and leaves the original.
 
+pub mod camera_setup;
 mod ftp;
 pub mod pairing;
 pub mod secrets;

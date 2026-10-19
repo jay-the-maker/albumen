@@ -7,13 +7,30 @@ use crate::discover::{file_name_str, Asset, Role};
 use crate::error::IngestError;
 
 /// A file that was written and hashed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Equality is the filename, digest, length, and mtime. The verify clock is
+/// not part of it, so a second look at the same bytes still matches.
+#[derive(Debug, Clone)]
 pub struct VerifiedObject {
     pub filename: String,
     pub sha256: String,
     pub byte_len: u64,
     pub mtime: SystemTime,
+    /// Milliseconds spent re-reading the stored bytes and hashing them.
+    /// Zero when this record was not produced by that re-read.
+    pub sha256_verify_ms: u128,
 }
+
+impl PartialEq for VerifiedObject {
+    fn eq(&self, other: &Self) -> bool {
+        self.filename == other.filename
+            && self.sha256 == other.sha256
+            && self.byte_len == other.byte_len
+            && self.mtime == other.mtime
+    }
+}
+
+impl Eq for VerifiedObject {}
 
 /// A verified file plus its role in the asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +169,7 @@ mod tests {
                 sha256: "abc".to_string(),
                 byte_len: 1,
                 mtime: UNIX_EPOCH,
+                sha256_verify_ms: 0,
             })
         }
 
