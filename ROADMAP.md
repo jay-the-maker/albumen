@@ -18,6 +18,18 @@ Shipped. A source is opened read-only. Scan, import, and export read through tha
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
 
+## Sync is not backup
+
+Next, after the importers above. Deletes never propagate. Library content is append-only, and a removal is a tombstone or a hide. The stored original stays. Receivers and importers leave the source and the stored library in place. How that is met, and the gaps that remain, are in [docs/architecture.md](docs/architecture.md).
+
+Test idea: a delete-propagation test. Two copies of one library. A hide or a tombstone on the first copy leaves the second copy's original bytes, name, and mtime in place. `cli/tests/deletes_never_propagate.rs` already runs in CI. It rejects an unlink in the receiver, the importers, the CLI, and the MCP server. It does not yet use two copies.
+
+## No account lockout
+
+Next, with the item above. There is no vendor account. The library is plain files on the user's own storage, readable without Albumen. Keys and config stay local. Export to a directory needs no service.
+
+Test idea: an offline/no-account restore test. `cli/tests/offline_restore.rs` is that test and runs in CI. It exports a synthetic library and runs `verify-manifest` with a cleared environment, and on Linux with `connect()` blocked.
+
 ## Family library
 
 Not built. A design for a shared library on storage the family already has, with no server the owner runs, is [docs/design/family-sharing.md](docs/design/family-sharing.md). Each member has an append-only namespace. Originals stay bit-exact under `copy_verify`. A hide is per viewer and leaves the other member's files in place.
