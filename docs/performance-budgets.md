@@ -53,6 +53,23 @@ These are the product bars on a 380,000-item library. CI does not fail a job for
 
 1 MB is 1,000,000 bytes. 100 MB/s of 5 MB files is 20 items/s. The 80% bar is import MB/s divided by a raw write that uses the same per-file `fsync` and directory `fsync`. It is measured below. The absolute 100 MB/s bar stays a product target. CI does not fail a ratio below 0.80. A per-leg regression gate, when one is recorded, is a separate check and is not this 80% bar.
 
+### Proposal: a macOS target based on the same-job copy ceiling
+
+Status: proposed, pending XO acceptance. This is a team scorecard target. It is not a product requirement. Until it is accepted, the 0.80 target above applies to every leg.
+
+Proposal: on `macos-14`, the import throughput target is **import MB/s at 90% or more of the copy ceiling measured in the same job**. The copy ceiling uses the same workers and the import's durability, `F_FULLFSYNC` on every file and on its directory, and reads each source once, with no hash and no read-back. The other legs keep the 0.80-of-raw target. The import throughput job prints the copy ceiling as `copy_ceiling_mb_s` and `copy_ceiling_ratio` once [#102](https://github.com/jay-the-maker/albumen/pull/102) is merged.
+
+Why: the copy ceiling is the most an import can reach on that runner with one read of each source and the required syncs. CI measured it between 0.72 and 1.07 of the raw rate on `macos-14`, depending on the runner. On a runner where it is 0.72, 0.80 of raw is above anything an import with the required durability can reach, whatever the code does. A target relative to the same-job ceiling follows the runner and keeps measuring the import code.
+
+| run | commit | raw MB/s (`F_FULLFSYNC`) | copy ceiling MB/s | copy ceiling / raw | import MB/s | import / copy ceiling |
+| --- | --- | --- | --- | --- | --- | --- |
+| [39259267570](https://github.com/jay-the-maker/albumen/actions/runs/39259267570) | c401adb | 557.637 | 595.083 | 1.0672 | 302.937 | 0.509 |
+| [39262347854](https://github.com/jay-the-maker/albumen/actions/runs/39262347854) | cf42e75 | 706.932 | 509.054 | 0.7201 | 381.610 | 0.750 |
+
+Both runs reconciled 100 percent. In the same runs the sync-only ceiling, which writes from a warm buffer with the same syncs, was 1.4665 and 1.2790 of raw. So the per-file and directory `F_FULLFSYNC` alone leave room above 0.80. The source read sets the lower copy ceiling.
+
+What stays the same: the durability calls, both SHA-256 passes, the destination read-back, the raw sample, and the 100 percent reconciliation gate. The job keeps printing the 0.80-of-raw ratio on every leg, macOS included, so both numbers stay visible. The latest measurement is 0.750 of the copy ceiling, and 0.90 is the next step.
+
 ## Camera RAW verify
 
 `albumen-receive` re-reads a stored file and SHA-256s those bytes before it reports the copy. CI uploads a synthetic 100 MB RAW-sized file (100,000,000 bytes, generated in the test, not a photograph and not committed) over WebDAV and over FTP. The clock is that re-read. It fails when the re-read takes more than 5 seconds. The source file's bytes and mtime stay as they were. The dev and test profiles compile the SHA-256 crates optimized so this clock is the hash, which is how a release binary already builds them.
