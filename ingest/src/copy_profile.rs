@@ -81,6 +81,12 @@ pub fn enable_thread() {
     ON.with(|on| on.set(true));
 }
 
+/// Whether this thread records phase times. A pipeline copies this onto
+/// the threads it starts.
+pub(crate) fn thread_enabled() -> bool {
+    ON.with(|on| on.get())
+}
+
 pub(crate) fn tic() -> Option<Instant> {
     if ON.with(|on| on.get()) {
         Some(Instant::now())
