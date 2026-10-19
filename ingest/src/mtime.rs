@@ -104,5 +104,8 @@ pub(crate) fn from_unix_nanos_string(
 }
 
 pub(crate) fn sync_file(file: &File, path: &Path) -> Result<(), IngestError> {
-    file.sync_all().map_err(|err| IngestError::io(path, err))
+    let started = crate::copy_profile::tic();
+    let result = file.sync_all().map_err(|err| IngestError::io(path, err));
+    crate::copy_profile::add_file_sync(started);
+    result
 }

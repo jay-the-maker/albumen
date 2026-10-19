@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod checksum;
+mod copy_profile;
 pub mod dest;
 mod discover;
 mod error;
@@ -32,6 +33,10 @@ mod store;
 mod takeout;
 
 pub use checksum::{sha256_file, sha256_hex};
+pub use copy_profile::{
+    enable_thread as enable_copy_profile_thread, reset as reset_copy_profile,
+    snapshot as copy_phases, CopyPhases,
+};
 pub use discover::{discover, Asset, AssetFile, Role};
 pub use error::IngestError;
 pub use exiftool::exiftool_command;

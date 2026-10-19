@@ -12,9 +12,12 @@
 //! pool so that hash work overlaps I/O. The pool is `available_parallelism`
 //! capped at [`MAX_IMPORT_WORKERS`]. The raw write stays sequential. It uses
 //! the same durability calls as one file of the import: `open_new`,
-//! `File::sync_all`, and `dest::sync_dir` after every file. It does not hash
-//! and it does not preserve a source mtime. The ratio is import MB/s divided
-//! by that raw MB/s. 1 MB is 1,000,000 bytes.
+//! `File::sync_all`, and `dest::sync_dir` after every file. On macOS that
+//! `sync_all` is `F_FULLFSYNC`. A plain `fsync` sample is also recorded
+//! there, and the ratio uses `F_FULLFSYNC`, which is what the import uses.
+//! The raw rate is the median of samples taken before and after the import.
+//! The raw write does not hash and it does not preserve a source mtime. The
+//! ratio is import MB/s divided by that raw MB/s. 1 MB is 1,000,000 bytes.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -25,7 +28,10 @@ use std::thread;
 use std::time::{Instant, SystemTime};
 
 use albumen_ingest::dest::{self, open_new};
-use albumen_ingest::{copy_verify, sha256_hex, Asset, AssetFile, LocalStore, Role};
+use albumen_ingest::{
+    copy_phases, copy_verify, enable_copy_profile_thread, reset_copy_profile, sha256_hex, Asset,
+    AssetFile, CopyPhases, LocalStore, Role,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -41,6 +47,11 @@ pub const THROUGHPUT_RATIO_FLOOR: f64 = 0.80;
 /// Upper bound on import workers. The pool is also limited by the CPU count
 /// and by the number of files.
 pub const MAX_IMPORT_WORKERS: usize = 8;
+/// Raw samples before the import, and the same number after it.
+///
+/// The reported raw rate is the median of all of them. One sample on either
+/// side of a warm or cold disk moves the ratio.
+pub const RAW_SAMPLES_PER_SIDE: usize = 3;
 
 const JPEG_PREFIX: &[u8] = &[
     0xFF, 0xD8, // SOI
@@ -61,6 +72,21 @@ pub struct ThroughputReport {
     pub import_items_s: f64,
     pub raw_seconds: f64,
     pub raw_mb_s: f64,
+    /// Durability primitive shared by the import and [`Self::raw_mb_s`].
+    ///
+    /// `File::sync_all` is `fsync` on Linux, `F_FULLFSYNC` on macOS, and
+    /// `FlushFileBuffers` on Windows.
+    pub raw_sync: String,
+    /// Median of a plain `fsync` raw write. On Linux this is the same call
+    /// as [`Self::raw_mb_s`]. On macOS it is the other primitive. On Windows
+    /// there is no `fsync`, so this is absent.
+    pub raw_fsync_mb_s: Option<f64>,
+    /// Median of an `F_FULLFSYNC` raw write. Present on macOS, where it is
+    /// the honest raw rate. Absent where the OS has no `F_FULLFSYNC`.
+    pub raw_fullfsync_mb_s: Option<f64>,
+    /// Honest raw samples, before the import and then after it.
+    pub raw_samples: Vec<f64>,
+    pub phases: CopyPhases,
     pub ratio: f64,
     pub count_in: u64,
     pub count_out: u64,
@@ -105,6 +131,12 @@ impl ThroughputReport {
             "import_items_s": self.import_items_s,
             "raw_seconds": self.raw_seconds,
             "raw_mb_s": self.raw_mb_s,
+            "raw_sync": self.raw_sync,
+            "raw_fsync_mb_s": self.raw_fsync_mb_s,
+            "raw_fullfsync_mb_s": self.raw_fullfsync_mb_s,
+            "raw_samples": self.raw_samples,
+            "phase_ms": phase_ms(&self.phases),
+            "phase_share": phase_share(&self.phases),
             "ratio": self.ratio,
             "count_in": self.count_in,
             "count_out": self.count_out,
@@ -160,23 +192,40 @@ pub fn measure_throughput(
     fs::create_dir_all(&sources).map_err(|err| format!("create sources: {err}"))?;
     let (snaps, _unlock) = generate(&sources, files, bytes_each)?;
 
+    let mut raw_samples = Vec::with_capacity(RAW_SAMPLES_PER_SIDE * 2);
+    let mut plain_samples = Vec::new();
+    sample_raw(
+        &root.path.join("raw-before"),
+        files,
+        bytes_each,
+        &mut raw_samples,
+        &mut plain_samples,
+    )?;
+
     fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
     let workers = import_workers(files);
+    reset_copy_profile();
     let started = Instant::now();
     let (count_out, mismatched, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
     let import_seconds = started.elapsed().as_secs_f64().max(1e-9);
+    let phases = copy_phases();
     let source_changed = sources_changed(&snaps)?;
     // The destination was created by this process for the measurement. It is
     // not a source. Removing it frees the disk for the raw write. The source
     // directory stays, read-only, until the temp root drops.
     fs::remove_dir_all(&dest).map_err(|err| format!("remove measured destination: {err}"))?;
 
-    let raw_started = Instant::now();
-    raw_write(&root.path.join("raw"), files, bytes_each)?;
-    let raw_seconds = raw_started.elapsed().as_secs_f64().max(1e-9);
+    sample_raw(
+        &root.path.join("raw-after"),
+        files,
+        bytes_each,
+        &mut raw_samples,
+        &mut plain_samples,
+    )?;
     let expected_bytes = files.saturating_mul(bytes_each);
     let import_mb_s = (imported_bytes as f64) / 1_000_000.0 / import_seconds;
-    let raw_mb_s = (expected_bytes as f64) / 1_000_000.0 / raw_seconds;
+    let raw_mb_s = median(&mut raw_samples.clone());
+    let (raw_fsync_mb_s, raw_fullfsync_mb_s) = raw_primitive_rates(raw_mb_s, &plain_samples);
     if !(raw_mb_s.is_finite() && raw_mb_s > 0.0 && import_mb_s.is_finite() && import_mb_s > 0.0) {
         return Err("import or raw throughput was not a positive number".to_string());
     }
@@ -188,8 +237,13 @@ pub fn measure_throughput(
         import_seconds,
         import_mb_s,
         import_items_s: (count_out as f64) / import_seconds,
-        raw_seconds,
+        raw_seconds: (expected_bytes as f64) / 1_000_000.0 / raw_mb_s,
         raw_mb_s,
+        raw_sync: IMPORT_FILE_SYNC.to_string(),
+        raw_fsync_mb_s,
+        raw_fullfsync_mb_s,
+        raw_samples,
+        phases,
         ratio: import_mb_s / raw_mb_s,
         count_in: files,
         count_out,
@@ -215,25 +269,28 @@ fn import_parallel(snaps: &[Snap], dest: &Path, workers: usize) -> Result<(u64, 
     let error: Mutex<Option<String>> = Mutex::new(None);
     thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                if error_is_set(&error) {
-                    break;
-                }
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(snap) = snaps.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
-                    break;
-                };
-                match import_one(snap, dest) {
-                    Ok(ImportOne::Stored(bytes)) => {
-                        count_out.fetch_add(1, Ordering::Relaxed);
-                        imported_bytes.fetch_add(bytes, Ordering::Relaxed);
-                    }
-                    Ok(ImportOne::Mismatch) => {
-                        mismatched.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(err) => {
-                        record_error(&error, err);
+            scope.spawn(|| {
+                enable_copy_profile_thread();
+                loop {
+                    if error_is_set(&error) {
                         break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(snap) = snaps.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
+                        break;
+                    };
+                    match import_one(snap, dest) {
+                        Ok(ImportOne::Stored(bytes)) => {
+                            count_out.fetch_add(1, Ordering::Relaxed);
+                            imported_bytes.fetch_add(bytes, Ordering::Relaxed);
+                        }
+                        Ok(ImportOne::Mismatch) => {
+                            mismatched.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(err) => {
+                            record_error(&error, err);
+                            break;
+                        }
                     }
                 }
             });
@@ -384,12 +441,152 @@ fn sources_changed(snaps: &[Snap]) -> Result<u64, String> {
     Ok(changed)
 }
 
+/// What `File::sync_all` does for the import on this OS.
+///
+/// The honest raw sample uses this same call. On macOS it is `F_FULLFSYNC`,
+/// not `fsync`.
+const IMPORT_FILE_SYNC: &str = {
+    #[cfg(target_vendor = "apple")]
+    {
+        "F_FULLFSYNC"
+    }
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    {
+        "fsync"
+    }
+    #[cfg(windows)]
+    {
+        "FlushFileBuffers"
+    }
+};
+
+#[derive(Clone, Copy)]
+enum RawSync {
+    /// `File::sync_all` on the file and `dest::sync_dir` on the directory.
+    Import,
+    /// Plain `fsync(2)` on the file and the directory. On Apple this is not
+    /// what `File::sync_all` does.
+    PosixFsync,
+}
+
+fn sample_raw(
+    dir: &Path,
+    files: u64,
+    bytes_each: u64,
+    honest: &mut Vec<f64>,
+    plain: &mut Vec<f64>,
+) -> Result<(), String> {
+    for _ in 0..RAW_SAMPLES_PER_SIDE {
+        honest.push(raw_sample(dir, files, bytes_each, RawSync::Import)?);
+        if cfg!(target_vendor = "apple") {
+            plain.push(raw_sample(dir, files, bytes_each, RawSync::PosixFsync)?);
+        }
+    }
+    Ok(())
+}
+
+fn raw_sample(dir: &Path, files: u64, bytes_each: u64, kind: RawSync) -> Result<f64, String> {
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|err| format!("remove raw sample: {err}"))?;
+    }
+    let started = Instant::now();
+    raw_write(dir, files, bytes_each, kind)?;
+    let seconds = started.elapsed().as_secs_f64().max(1e-9);
+    fs::remove_dir_all(dir).map_err(|err| format!("remove raw sample: {err}"))?;
+    let mb_s = (files.saturating_mul(bytes_each) as f64) / 1_000_000.0 / seconds;
+    if !mb_s.is_finite() || mb_s <= 0.0 {
+        return Err("a raw sample was not a positive number".to_string());
+    }
+    Ok(mb_s)
+}
+
+fn raw_primitive_rates(honest: f64, plain: &[f64]) -> (Option<f64>, Option<f64>) {
+    #[cfg(target_vendor = "apple")]
+    {
+        let mut plain = plain.to_vec();
+        let plain_rate = median(&mut plain);
+        (Some(plain_rate), Some(honest))
+    }
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    {
+        let _ = plain;
+        (Some(honest), None)
+    }
+    #[cfg(windows)]
+    {
+        let _ = (honest, plain);
+        (None, None)
+    }
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = values.len() / 2;
+    if values.len() % 2 == 1 {
+        values[mid]
+    } else {
+        (values[mid - 1] + values[mid]) / 2.0
+    }
+}
+
+fn phase_ms(phases: &CopyPhases) -> Value {
+    json!({
+        "source_read": ns_to_ms(phases.source_read_ns),
+        "hash": ns_to_ms(phases.hash_ns),
+        "write": ns_to_ms(phases.write_ns),
+        "file_sync": ns_to_ms(phases.file_sync_ns),
+        "readback_read": ns_to_ms(phases.readback_read_ns),
+        "readback_hash": ns_to_ms(phases.readback_hash_ns),
+        "dir_sync": ns_to_ms(phases.dir_sync_ns),
+    })
+}
+
+fn phase_share(phases: &CopyPhases) -> Value {
+    json!({
+        "source_read": phases.share(phases.source_read_ns),
+        "hash": phases.share(phases.hash_ns),
+        "write": phases.share(phases.write_ns),
+        "file_sync": phases.share(phases.file_sync_ns),
+        "readback_read": phases.share(phases.readback_read_ns),
+        "readback_hash": phases.share(phases.readback_hash_ns),
+        "dir_sync": phases.share(phases.dir_sync_ns),
+    })
+}
+
+fn ns_to_ms(ns: u64) -> f64 {
+    (ns as f64) / 1_000_000.0
+}
+
+pub fn optional_rate(rate: Option<f64>) -> String {
+    match rate {
+        Some(rate) => format!("{rate:.3}"),
+        None => "none".to_string(),
+    }
+}
+
+pub fn phase_share_line(phases: &CopyPhases) -> String {
+    format!(
+        "source_read:{:.3},hash:{:.3},write:{:.3},file_sync:{:.3},readback_read:{:.3},readback_hash:{:.3},dir_sync:{:.3}",
+        phases.share(phases.source_read_ns),
+        phases.share(phases.hash_ns),
+        phases.share(phases.write_ns),
+        phases.share(phases.file_sync_ns),
+        phases.share(phases.readback_read_ns),
+        phases.share(phases.readback_hash_ns),
+        phases.share(phases.dir_sync_ns)
+    )
+}
+
 /// Durable write of `files` new files, `bytes_each` bytes each.
 ///
-/// `sync_all` then `sync_dir` is the durability `copy_verify` uses for the
-/// bytes. This writer does not hash those bytes and does not set a preserved
-/// mtime, so the ratio is the cost of verification on top of the same fsyncs.
-fn raw_write(dir: &Path, files: u64, bytes_each: u64) -> Result<(), String> {
+/// `Import` uses `sync_all` then `sync_dir`, the durability `copy_verify`
+/// uses for the bytes. This writer does not hash those bytes and does not
+/// set a preserved mtime, so the ratio is the cost of verification on top
+/// of the same fsyncs. `PosixFsync` is the comparison sample on macOS.
+fn raw_write(dir: &Path, files: u64, bytes_each: u64, kind: RawSync) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|err| format!("create raw dest: {err}"))?;
     let mut buf = vec![0u8; 1024 * 1024];
     fill(&mut buf, 0);
@@ -403,12 +600,49 @@ fn raw_write(dir: &Path, files: u64, bytes_each: u64) -> Result<(), String> {
                 .map_err(|err| format!("raw write {}: {err}", path.display()))?;
             left -= n as u64;
         }
-        file.sync_all()
-            .map_err(|err| format!("sync raw {}: {err}", path.display()))?;
+        sync_raw_file(&file, &path, kind)?;
         drop(file);
-        dest::sync_dir(dir).map_err(|err| err.to_string())?;
+        sync_raw_dir(dir, kind)?;
     }
     Ok(())
+}
+
+fn sync_raw_file(file: &File, path: &Path, kind: RawSync) -> Result<(), String> {
+    match kind {
+        RawSync::Import => file
+            .sync_all()
+            .map_err(|err| format!("sync raw {}: {err}", path.display())),
+        RawSync::PosixFsync => posix_fsync_file(file, path),
+    }
+}
+
+fn sync_raw_dir(dir: &Path, kind: RawSync) -> Result<(), String> {
+    match kind {
+        RawSync::Import => dest::sync_dir(dir).map_err(|err| err.to_string()),
+        RawSync::PosixFsync => posix_fsync_dir(dir),
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn posix_fsync_file(file: &File, path: &Path) -> Result<(), String> {
+    rustix::fs::fsync(file).map_err(|err| format!("fsync raw {}: {err}", path.display()))
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn posix_fsync_file(file: &File, path: &Path) -> Result<(), String> {
+    file.sync_all()
+        .map_err(|err| format!("sync raw {}: {err}", path.display()))
+}
+
+#[cfg(target_vendor = "apple")]
+fn posix_fsync_dir(dir: &Path) -> Result<(), String> {
+    let file = File::open(dir).map_err(|err| format!("open raw dir {}: {err}", dir.display()))?;
+    rustix::fs::fsync(&file).map_err(|err| format!("fsync raw dir {}: {err}", dir.display()))
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn posix_fsync_dir(dir: &Path) -> Result<(), String> {
+    dest::sync_dir(dir).map_err(|err| err.to_string())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -510,6 +744,11 @@ mod tests {
             import_items_s: 56.0,
             raw_seconds: 8.0,
             raw_mb_s: 625.0,
+            raw_sync: "fsync".to_string(),
+            raw_fsync_mb_s: Some(625.0),
+            raw_fullfsync_mb_s: None,
+            raw_samples: vec![600.0, 625.0, 650.0],
+            phases: CopyPhases::default(),
             ratio: 0.448,
             count_in: 1_000,
             count_out: 1_000,
@@ -535,6 +774,27 @@ mod tests {
         assert_eq!(report.bytes, 2 * 8192);
         assert!(report.workers >= 1);
         assert!(report.workers <= 2);
+        assert_eq!(report.raw_sync, IMPORT_FILE_SYNC);
+        assert_eq!(report.raw_samples.len(), RAW_SAMPLES_PER_SIDE * 2);
+        assert!(report.phases.total_ns() > 0, "{:?}", report.phases);
+        #[cfg(target_vendor = "apple")]
+        {
+            assert_eq!(report.raw_sync, "F_FULLFSYNC");
+            assert_eq!(report.raw_fullfsync_mb_s, Some(report.raw_mb_s));
+            assert!(report.raw_fsync_mb_s.unwrap() > 0.0);
+        }
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        {
+            assert_eq!(report.raw_sync, "fsync");
+            assert_eq!(report.raw_fsync_mb_s, Some(report.raw_mb_s));
+            assert_eq!(report.raw_fullfsync_mb_s, None);
+        }
+    }
+
+    #[test]
+    fn raw_median_uses_the_middle_of_an_even_sample() {
+        assert_eq!(median(&mut [1.0, 4.0, 2.0, 9.0]), 3.0);
+        assert_eq!(median(&mut [3.0, 1.0, 2.0]), 2.0);
     }
 
     #[test]

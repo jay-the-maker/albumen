@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::checksum::{copy_hashed, sha256_file, to_hex};
+use crate::checksum::{copy_hashed, sha256_file, sha256_readback, to_hex};
 use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
@@ -114,7 +114,9 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     drop(output);
 
     let record = finalize_verified(&dest, &filename, &written_hash, mtime)?;
+    let dir_at = crate::copy_profile::tic();
     dest::sync_dir(dest_dir)?;
+    crate::copy_profile::add_dir_sync(dir_at);
     guard.armed = false;
     Ok(record)
 }
@@ -189,7 +191,9 @@ pub(crate) fn copy_verify_reader<R: Read>(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
+        let dir_at = crate::copy_profile::tic();
         dest::sync_dir(parent)?;
+        crate::copy_profile::add_dir_sync(dir_at);
     }
     guard.armed = false;
     Ok(record)
@@ -206,7 +210,7 @@ pub(crate) fn finalize_verified(
     // CI times this re-read only. The hash made while copying, and the
     // fsync before it, stay outside the clock.
     let started = std::time::Instant::now();
-    let actual = sha256_file(path)?;
+    let actual = sha256_readback(path)?;
     let sha256_verify_ms = started.elapsed().as_millis();
     if actual != *expected {
         let removed = dest::remove_file(path).is_ok();
