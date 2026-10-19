@@ -86,6 +86,7 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
         &filename,
         dest_dir,
         mtime,
+        false,
         |root, output, dest| {
             let input = root.open_read(source)?;
             copy_hashed(input, output, source, dest)
@@ -233,6 +234,7 @@ pub fn store_prefetched(
         &filename,
         dest_dir,
         mtime,
+        PREFETCH_STAGED,
         |_, output, dest| {
             let write_at = crate::copy_profile::tic();
             reserve_space(output, data.len());
@@ -450,6 +452,8 @@ enum Synced {
 /// has not been read back. Dropping it removes the file.
 struct Pending {
     dest: PathBuf,
+    /// Where the file goes once verified. Equal to `dest` unless staged.
+    final_dest: PathBuf,
     filename: String,
     sha256: [u8; 32],
     mtime: std::time::SystemTime,
@@ -457,8 +461,27 @@ struct Pending {
 }
 
 impl Pending {
-    fn verify(self) -> Result<Verified, IngestError> {
+    fn verify(mut self) -> Result<Verified, IngestError> {
         let record = finalize_verified(&self.dest, &self.filename, &self.sha256, self.mtime)?;
+        if self.final_dest != self.dest {
+            // Only verified bytes get the final name. A hard link never
+            // replaces an existing path; the partial name is removed after.
+            match fs::hard_link(
+                crate::platform::io_path(&self.dest),
+                crate::platform::io_path(&self.final_dest),
+            ) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(IngestError::AlreadyExists {
+                        filename: self.filename.clone(),
+                        destination: self.final_dest.display().to_string(),
+                    });
+                }
+                Err(err) => return Err(IngestError::io(&self.final_dest, err)),
+            }
+            dest::remove_file_best_effort(&self.dest);
+            self.guard.path = self.final_dest.clone();
+        }
         Ok(Verified {
             record,
             guard: self.guard,
@@ -498,6 +521,7 @@ fn write_prefetched(
         &filename,
         dest_dir,
         mtime,
+        PREFETCH_STAGED,
         |_, output, dest| {
             let write_at = crate::copy_profile::tic();
             reserve_space(output, data.len());
@@ -518,24 +542,44 @@ fn write_prefetched(
 /// short and fails the read-back. A refusal (no space, unsupported
 /// filesystem) leaves the plain write. Elsewhere it does nothing.
 fn reserve_space(output: &fs::File, len: usize) {
-    let _ = albumen_win::reserve_blocks(output, u64::try_from(len).unwrap_or(u64::MAX));
+    let len = u64::try_from(len).unwrap_or(u64::MAX);
+    if albumen_win::reserve_blocks(output, len).is_ok() && cfg!(target_vendor = "apple") {
+        // The file is staged under a partial name (see [`PREFETCH_STAGED`])
+        // and only gets its final name after the read-back, so a size set
+        // here never makes a short copy look complete.
+        let _ = output.set_len(len);
+    }
+}
+
+/// Prefetched writes on macOS reserve and size the file first, so they are
+/// written under a partial name and linked to the final name only after the
+/// read-back verifies.
+const PREFETCH_STAGED: bool = cfg!(target_vendor = "apple");
+
+/// Name a staged file is written under in the destination folder until it
+/// verifies. It never matches a final name the import writes.
+fn partial_name(filename: &str) -> String {
+    format!(".{filename}.albumen-partial")
 }
 
 /// The destination half of a copy: checks, write, streams, mtime, file
 /// sync, read-back, and directory sync. `write` puts the bytes in `output`
 /// and returns the SHA-256 of what it wrote.
+#[allow(clippy::too_many_arguments)]
 fn store_checked<W>(
     root: &SourceRoot,
     source: &Path,
     filename: &str,
     dest_dir: &Path,
     mtime: std::time::SystemTime,
+    staged: bool,
     write: W,
 ) -> Result<VerifiedObject, IngestError>
 where
     W: FnOnce(&SourceRoot, &fs::File, &Path) -> Result<[u8; 32], IngestError>,
 {
-    let verified = write_synced(root, source, filename, dest_dir, mtime, write)?.verify()?;
+    let verified =
+        write_synced(root, source, filename, dest_dir, mtime, staged, write)?.verify()?;
     let dir_at = crate::copy_profile::tic();
     dest::sync_dir(dest_dir)?;
     crate::copy_profile::add_dir_sync(dir_at);
@@ -544,12 +588,14 @@ where
 
 /// Checks, write, streams, mtime, and file sync. The read-back and the
 /// directory sync are left to the caller.
+#[allow(clippy::too_many_arguments)]
 fn write_synced<W>(
     root: &SourceRoot,
     source: &Path,
     filename: &str,
     dest_dir: &Path,
     mtime: std::time::SystemTime,
+    staged: bool,
     write: W,
 ) -> Result<Pending, IngestError>
 where
@@ -577,13 +623,27 @@ where
     // `create_new` is the existence check: it never opens or replaces a
     // path that is already there. The guard is armed only once this call
     // created the file, so a failed open never removes anything.
+    // A staged file is written under a partial name; the final name must
+    // still be free now, and is claimed again without replacing at link time.
+    let final_dest = dest.clone();
+    let dest = if staged {
+        if fs::symlink_metadata(crate::platform::io_path(&final_dest)).is_ok() {
+            return Err(IngestError::AlreadyExists {
+                filename: filename.clone(),
+                destination: final_dest.display().to_string(),
+            });
+        }
+        dest_dir.join(partial_name(&filename))
+    } else {
+        dest
+    };
     let output = match dest::open_new(&dest) {
         Err(IngestError::Io { source: err, .. })
             if err.kind() == std::io::ErrorKind::AlreadyExists =>
         {
             return Err(IngestError::AlreadyExists {
                 filename: filename.clone(),
-                destination: dest.display().to_string(),
+                destination: final_dest.display().to_string(),
             });
         }
         other => other?,
@@ -607,6 +667,7 @@ where
     drop(output);
     Ok(Pending {
         dest,
+        final_dest,
         filename,
         sha256,
         mtime,
@@ -933,39 +994,43 @@ mod tests {
     }
 
     #[test]
-    fn reserved_space_never_grows_the_file_and_a_cut_copy_leaves_nothing() {
+    fn a_sized_staged_copy_cut_short_never_gets_its_final_name() {
         let tmp = Tmp::new();
         let src_dir = tmp.path().join("src");
         fs::create_dir_all(&src_dir).unwrap();
         let data = vec![7u8; 3 * 1024 * 1024];
         let source = write_file(&src_dir, "cut.jpg", &data, fixed_mtime());
         let dest_dir = tmp.path().join("dest");
-
-        // Reserving blocks leaves the logical size at what was written.
-        fs::create_dir_all(&dest_dir).unwrap();
-        let probe = dest_dir.join("probe");
-        let file = fs::File::create(&probe).unwrap();
-        reserve_space(&file, data.len());
-        assert_eq!(file.metadata().unwrap().len(), 0);
-        drop(file);
-        fs::remove_file(&probe).unwrap();
-
-        // A copy that fails halfway after reserving space: an error, no
-        // record, and no destination file left behind.
+        let final_path = dest_dir.join("cut.jpg");
+        let partial_path = dest_dir.join(partial_name("cut.jpg"));
         let root = SourceRoot::open(parent_dir(&source)).unwrap();
+        let sha = crate::sha256_hex(&source).unwrap();
+        let mut digest = [0u8; 32];
+        for (i, byte) in digest.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&sha[2 * i..2 * i + 2], 16).unwrap();
+        }
+        // Reserve, size to the full length as macOS does, write half.
+        let half_write = |output: &fs::File, dest: &Path| -> Result<(), IngestError> {
+            reserve_space(output, data.len());
+            output.set_len(data.len() as u64).unwrap();
+            let mut writer = output;
+            writer
+                .write_all(&data[..data.len() / 2])
+                .map_err(|err| IngestError::io(dest, err))?;
+            assert_eq!(output.metadata().unwrap().len(), data.len() as u64);
+            Ok(())
+        };
+
+        // Aborted with an error: no record, no final name, no partial file.
         let result = store_checked(
             &root,
             &source,
             "cut.jpg",
             &dest_dir,
             fixed_mtime(),
+            true,
             |_, output, dest| {
-                reserve_space(output, data.len());
-                let mut writer = output;
-                writer
-                    .write_all(&data[..data.len() / 2])
-                    .map_err(|err| IngestError::io(dest, err))?;
-                assert_eq!(output.metadata().unwrap().len(), (data.len() / 2) as u64);
+                half_write(output, dest)?;
                 Err(IngestError::io(
                     dest,
                     std::io::Error::other("copy cut short"),
@@ -973,32 +1038,86 @@ mod tests {
             },
         );
         assert!(result.is_err());
-        assert!(!dest_dir.join("cut.jpg").exists());
+        assert!(!final_path.exists());
+        assert!(!partial_path.exists());
 
-        // A copy that stops short but claims the source hash fails the
-        // read-back and leaves nothing.
-        let sha = crate::sha256_hex(&source).unwrap();
-        let mut digest = [0u8; 32];
-        for (i, byte) in digest.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&sha[2 * i..2 * i + 2], 16).unwrap();
-        }
+        // Full-size but half-written, claiming the source hash: the
+        // read-back refuses it and nothing is left.
         let result = store_checked(
             &root,
             &source,
             "cut.jpg",
             &dest_dir,
             fixed_mtime(),
+            true,
             |_, output, dest| {
-                reserve_space(output, data.len());
-                let mut writer = output;
-                writer
-                    .write_all(&data[..data.len() / 2])
-                    .map_err(|err| IngestError::io(dest, err))?;
+                half_write(output, dest)?;
                 Ok(digest)
             },
         );
         assert!(result.is_err());
-        assert!(!dest_dir.join("cut.jpg").exists());
+        assert!(!final_path.exists());
+        assert!(!partial_path.exists());
+
+        // Killed before the read-back (the guard never runs): the full-size
+        // file exists only under its partial name, never the final one.
+        let pending = write_synced(
+            &root,
+            &source,
+            "cut.jpg",
+            &dest_dir,
+            fixed_mtime(),
+            true,
+            |_, output, dest| {
+                half_write(output, dest)?;
+                Ok(digest)
+            },
+        )
+        .unwrap();
+        std::mem::forget(pending);
+        assert!(!final_path.exists());
+        assert_eq!(
+            fs::metadata(&partial_path).unwrap().len(),
+            data.len() as u64
+        );
+        fs::remove_file(&partial_path).unwrap();
+
+        // A whole staged copy verifies, takes the final name, and leaves no
+        // partial file.
+        let stored = store_checked(
+            &root,
+            &source,
+            "cut.jpg",
+            &dest_dir,
+            fixed_mtime(),
+            true,
+            |_, output, dest| {
+                reserve_space(output, data.len());
+                let mut writer = output;
+                writer
+                    .write_all(&data)
+                    .map_err(|err| IngestError::io(dest, err))?;
+                Ok(digest)
+            },
+        )
+        .unwrap();
+        assert_eq!(stored.sha256, sha);
+        assert_eq!(fs::read(&final_path).unwrap(), data);
+        assert!(!partial_path.exists());
+        assert_eq!(mtime_of(&final_path).unwrap(), mtime_of(&source).unwrap());
+
+        // A staged copy never replaces an existing final name.
+        let again = store_checked(
+            &root,
+            &source,
+            "cut.jpg",
+            &dest_dir,
+            fixed_mtime(),
+            true,
+            |_, _, _| Ok(digest),
+        );
+        assert!(matches!(again, Err(IngestError::AlreadyExists { .. })));
+        assert_eq!(fs::read(&final_path).unwrap(), data);
     }
 
     #[test]
