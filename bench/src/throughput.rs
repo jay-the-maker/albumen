@@ -139,6 +139,14 @@ pub struct ThroughputReport {
     pub resident_before_raw: Vec<Option<f64>>,
     pub resident_before_import: Vec<Option<f64>>,
     pub resident_before_copy_ceiling: Vec<Option<f64>>,
+    /// `cpu_seconds / (bytes / 10^9)`: CPU seconds per GB imported, per
+    /// round. Unlike `cpu_percent`, it does not move with disk speed.
+    pub cpu_seconds_per_gb: f64,
+    /// The CPU has the SHA-256 instructions `sha2` checks for (SHA-NI on
+    /// x86_64, SHA2 on aarch64).
+    pub sha_hw: bool,
+    /// In-memory SHA-256 rate on one thread, for the same `sha2` build.
+    pub sha256_mb_s: f64,
 }
 
 impl ThroughputReport {
@@ -167,7 +175,7 @@ impl ThroughputReport {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "leg": self.leg,
             "files": self.files,
             "bytes_each": self.bytes_each,
@@ -211,7 +219,13 @@ impl ThroughputReport {
             "cpu_seconds_per_1000": self.cpu_seconds_per_1000,
             "cpu_percent_target": CPU_PERCENT_TARGET,
             "cpu_percent_met": self.cpu_percent <= CPU_PERCENT_TARGET,
-        })
+        });
+        // A second step keeps the json! macro under its recursion limit.
+        value["cpu_seconds_per_gb"] = json!(self.cpu_seconds_per_gb);
+        value["phase_cpu_ms_per_round"] = phase_cpu_ms(self);
+        value["sha_hw"] = json!(self.sha_hw);
+        value["sha256_mb_s"] = json!(self.sha256_mb_s);
+        value
     }
 }
 
@@ -372,6 +386,9 @@ pub fn measure_throughput(
         cores,
         cpu_percent: cpu_seconds / (import_seconds_total.max(1e-9) * cores as f64) * 100.0,
         cpu_seconds_per_1000: cpu_seconds / rounds as f64 * 1000.0 / (files as f64),
+        cpu_seconds_per_gb: cpu_seconds / rounds as f64 / ((expected_bytes.max(1) as f64) / 1e9),
+        sha_hw: sha_hw(),
+        sha256_mb_s: sha256_mb_s(),
     })
 }
 
@@ -679,6 +696,8 @@ fn phase_ms(phases: &CopyPhases) -> Value {
         "readback_read": ns_to_ms(phases.readback_read_ns),
         "readback_hash": ns_to_ms(phases.readback_hash_ns),
         "dir_sync": ns_to_ms(phases.dir_sync_ns),
+        "preflight": ns_to_ms(phases.preflight_ns),
+        "metadata": ns_to_ms(phases.metadata_ns),
     })
 }
 
@@ -691,7 +710,74 @@ fn phase_share(phases: &CopyPhases) -> Value {
         "readback_read": phases.share(phases.readback_read_ns),
         "readback_hash": phases.share(phases.readback_hash_ns),
         "dir_sync": phases.share(phases.dir_sync_ns),
+        "preflight": phases.share(phases.preflight_ns),
+        "metadata": phases.share(phases.metadata_ns),
     })
+}
+
+/// Thread CPU per phase for one round, in milliseconds. The counters sum
+/// every round's import threads.
+fn phase_cpu_ms(report: &ThroughputReport) -> Value {
+    let rounds = report.rounds.max(1) as f64;
+    let mut map = serde_json::Map::new();
+    for (name, ns) in report.phases.cpu_named() {
+        map.insert(name.to_string(), json!(ns_to_ms(ns) / rounds));
+    }
+    Value::Object(map)
+}
+
+/// Thread CPU per phase for one round in milliseconds, then `untimed`: the
+/// process CPU of the round that no phase counted (thread hand-offs, the
+/// harness).
+pub fn phase_cpu_line(report: &ThroughputReport) -> String {
+    let rounds = report.rounds.max(1) as f64;
+    let phases = report.phases;
+    let mut parts: Vec<String> = phases
+        .cpu_named()
+        .iter()
+        .map(|(name, ns)| format!("{name}:{:.0}", ns_to_ms(*ns) / rounds))
+        .collect();
+    let untimed = (report.cpu_seconds * 1000.0 - ns_to_ms(phases.cpu_total_ns()) / rounds).max(0.0);
+    parts.push(format!("untimed:{untimed:.0}"));
+    parts.join(",")
+}
+
+/// The same runtime check `sha2` 0.10 makes before it takes its hardware
+/// path: `sha`, `sse2`, `ssse3`, and `sse4.1` on x86_64 (SHA-NI), and
+/// `sha2` on aarch64. The aarch64 path exists only with the `asm` feature,
+/// which `albumen-ingest` turns on for aarch64.
+fn sha_hw() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("sha")
+            && std::arch::is_x86_feature_detected!("sse2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("sha2")
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
+
+/// Hash 256 MB already in memory on one thread. Software SHA-256 runs near
+/// 200-500 MB/s; the hardware instructions run near 1,500-2,500 MB/s.
+fn sha256_mb_s() -> f64 {
+    let buf = vec![0x5au8; 8 * 1024 * 1024];
+    let rounds = 32;
+    let started = Instant::now();
+    let mut hasher = Sha256::new();
+    for _ in 0..rounds {
+        hasher.update(&buf);
+    }
+    let digest = hasher.finalize();
+    let seconds = started.elapsed().as_secs_f64().max(1e-9);
+    std::hint::black_box(digest);
+    (buf.len() * rounds) as f64 / 1_000_000.0 / seconds
 }
 
 fn ns_to_ms(ns: u64) -> f64 {
@@ -707,14 +793,16 @@ pub fn optional_rate(rate: Option<f64>) -> String {
 
 pub fn phase_share_line(phases: &CopyPhases) -> String {
     format!(
-        "source_read:{:.3},hash:{:.3},write:{:.3},file_sync:{:.3},readback_read:{:.3},readback_hash:{:.3},dir_sync:{:.3}",
+        "source_read:{:.3},hash:{:.3},write:{:.3},file_sync:{:.3},readback_read:{:.3},readback_hash:{:.3},dir_sync:{:.3},preflight:{:.3},metadata:{:.3}",
         phases.share(phases.source_read_ns),
         phases.share(phases.hash_ns),
         phases.share(phases.write_ns),
         phases.share(phases.file_sync_ns),
         phases.share(phases.readback_read_ns),
         phases.share(phases.readback_hash_ns),
-        phases.share(phases.dir_sync_ns)
+        phases.share(phases.dir_sync_ns),
+        phases.share(phases.preflight_ns),
+        phases.share(phases.metadata_ns)
     )
 }
 
@@ -1003,6 +1091,9 @@ mod tests {
             cores: 4,
             cpu_percent: 5.6,
             cpu_seconds_per_1000: 4.0,
+            cpu_seconds_per_gb: 0.8,
+            sha_hw: true,
+            sha256_mb_s: 2000.0,
             verifiers: 2,
             rounds: 6,
             import_samples: vec![480.0],
