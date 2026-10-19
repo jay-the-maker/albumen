@@ -1,6 +1,6 @@
 [package]
 name = "albumen-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stdio MCP server for searching, browsing, exporting, and uploading an Albumen library."
 edition.workspace = true
 license.workspace = true
