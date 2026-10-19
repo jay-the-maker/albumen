@@ -291,80 +291,94 @@ $script:ObservedPids = $null
 $script:ObservedImages = @{}
 $script:WatchProcesses = $false
 
-function Invoke-Quiet([scriptblock]$Command) {
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        return (& $Command 2>&1 | Out-String)
-    } finally {
-        $ErrorActionPreference = $previous
+# Trace tools run through System.Diagnostics.Process with one command line, so
+# Windows PowerShell 5.1 never binds their arguments. Its native-command path
+# threw "Argument types do not match" before logman started. The name stays
+# apart from Invoke-Native, which the build uses.
+function Format-TraceArg([string]$Value) {
+    if ($Value -eq '') { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Invoke-TraceTool([string]$Tool, [string[]]$Arguments) {
+    $exe = Join-Path $env:SystemRoot "System32\$Tool.exe"
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $exe
+    $info.Arguments = (@($Arguments | ForEach-Object { Format-TraceArg $_ }) -join ' ')
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.CreateNoWindow = $true
+    $proc = [Diagnostics.Process]::Start($info)
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $proc.WaitForExit()
+    $stderr = $stderrTask.Result
+    $result = [pscustomobject]@{
+        Exit = [int]$proc.ExitCode
+        Text = "$Tool $($info.Arguments)`n$stdout$stderr"
     }
+    $proc.Dispose()
+    $result
 }
 
 function Enable-KernelAnalytic {
-    $status = Invoke-Quiet { wevtutil gl 'Microsoft-Windows-Kernel-Network/Analytic' }
-    if ($status -match 'enabled:\s*true') { return }
-    $set = Invoke-Quiet { wevtutil sl 'Microsoft-Windows-Kernel-Network/Analytic' /e:true /q:true }
-    if ($LASTEXITCODE -eq 0) { $script:AnalyticEnabled = $true }
+    $status = Invoke-TraceTool 'wevtutil' @('gl', 'Microsoft-Windows-Kernel-Network/Analytic')
+    if ($status.Text -match 'enabled:\s*true') { return }
+    $set = Invoke-TraceTool 'wevtutil' @('sl', 'Microsoft-Windows-Kernel-Network/Analytic', '/e:true', '/q:true')
+    if ($set.Exit -eq 0) { $script:AnalyticEnabled = $true }
 }
 
 function Start-KernelTrace([string]$Etl, [string]$Keywords) {
     if (Test-Path -LiteralPath $Etl) { Remove-Item -LiteralPath $Etl -Force }
-    [void](Invoke-Quiet { logman stop $script:TraceSession -ets })
+    [void](Invoke-TraceTool 'logman' @('stop', $script:TraceSession, '-ets'))
     Enable-KernelAnalytic
-    # Windows PowerShell 5.1 throws "Argument types do not match" and never
-    # starts the process when a native argument is an int. Every logman number is a string.
-    $text = Invoke-Quiet {
-        logman start $script:TraceSession -ets -o $Etl -max '128' -nb '32' '32' -bs '128' `
-            -p Microsoft-Windows-Kernel-Network $Keywords '0xff' `
-            -p Microsoft-Windows-Kernel-Process '0x10' '0xff'
-    }
-    if ($LASTEXITCODE -eq 0) { return }
-    $text = Invoke-Quiet {
-        logman start $script:TraceSession -ets -o $Etl -max '128' -nb '32' '32' -bs '128' `
-            -p Microsoft-Windows-Kernel-Network $Keywords '0xff'
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "logman could not start Microsoft-Windows-Kernel-Network (keywords $Keywords)`n$text"
+    $common = @('start', $script:TraceSession, '-ets', '-o', $Etl, '-max', '128', '-nb', '32', '32', '-bs', '128',
+        '-p', 'Microsoft-Windows-Kernel-Network', $Keywords, '0xff')
+    $first = Invoke-TraceTool 'logman' ($common + @('-p', 'Microsoft-Windows-Kernel-Process', '0x10', '0xff'))
+    if ($first.Exit -eq 0) { return }
+    [void](Invoke-TraceTool 'logman' @('stop', $script:TraceSession, '-ets'))
+    $second = Invoke-TraceTool 'logman' $common
+    if ($second.Exit -ne 0) {
+        throw "logman could not start Microsoft-Windows-Kernel-Network (keywords $Keywords)`n$($first.Text)`n$($second.Text)"
     }
 }
 
 function Stop-KernelTrace {
-    [void](Invoke-Quiet { logman stop $script:TraceSession -ets })
+    [void](Invoke-TraceTool 'logman' @('stop', $script:TraceSession, '-ets'))
 }
 
 function Start-NtKernelLogger([string]$Etl) {
     if (Test-Path -LiteralPath $Etl) { Remove-Item -LiteralPath $Etl -Force }
-    $existing = Invoke-Quiet { logman query 'NT Kernel Logger' -ets }
-    if ($LASTEXITCODE -eq 0 -and $existing -match 'Running') {
+    $existing = Invoke-TraceTool 'logman' @('query', 'NT Kernel Logger', '-ets')
+    if ($existing.Exit -eq 0 -and $existing.Text -match 'Running') {
         throw @"
 NT Kernel Logger is already running on this runner, so a second kernel network
 session cannot start.
-$existing
+$($existing.Text)
 "@
     }
     # 0x10000 is EVENT_TRACE_FLAG_NETWORK_TCPIP.
-    $text = Invoke-Quiet {
-        logman start 'NT Kernel Logger' -ets -o $Etl -max '128' -p 'Windows Kernel Trace' '0x10000'
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "logman could not start the NT Kernel Logger network provider`n$text"
+    $started = Invoke-TraceTool 'logman' @('start', 'NT Kernel Logger', '-ets', '-o', $Etl, '-max', '128',
+        '-p', 'Windows Kernel Trace', '0x10000')
+    if ($started.Exit -ne 0) {
+        throw "logman could not start the NT Kernel Logger network provider`n$($started.Text)"
     }
     $script:KernelLoggerStarted = $true
 }
 
 function Stop-NtKernelLogger {
     if (-not $script:KernelLoggerStarted) { return }
-    [void](Invoke-Quiet { logman stop 'NT Kernel Logger' -ets })
+    [void](Invoke-TraceTool 'logman' @('stop', 'NT Kernel Logger', '-ets'))
     $script:KernelLoggerStarted = $false
 }
 
 function Convert-TraceXml([string]$Etl, [string]$Xml) {
     if (Test-Path -LiteralPath $Xml) { Remove-Item -LiteralPath $Xml -Force }
-    $text = Invoke-Quiet { tracerpt $Etl -o $Xml -of XML -y }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $Xml)) {
-        $help = Invoke-Quiet { tracerpt -? }
-        throw "tracerpt could not decode the kernel network trace`n$text`n$help"
+    $decoded = Invoke-TraceTool 'tracerpt' @($Etl, '-o', $Xml, '-of', 'XML', '-y')
+    if ($decoded.Exit -ne 0 -or -not (Test-Path -LiteralPath $Xml)) {
+        throw "tracerpt could not decode the kernel network trace`n$($decoded.Text)"
     }
 }
 
@@ -483,7 +497,7 @@ function Invoke-TracedCanary([string]$Etl) {
             $script:TraceKeywords = [string]$attempt.Keywords
             return
         } catch {
-            $errors.Add($_.Exception.Message)
+            $errors.Add("$($attempt.Mode) $($attempt.Keywords): $($_.Exception.Message)`n$($_.InvocationInfo.PositionMessage)`n$($_.ScriptStackTrace)")
             Stop-KernelTrace
             Stop-NtKernelLogger
         }
@@ -542,10 +556,20 @@ Sample:
 $sample
 "@
     }
-    Write-Output "zero-network: kernel ETW saw canary PID $CanaryPid external ($($external.Count)), DNS ($($dns.Count)), and loopback 127.0.0.1:53 ($($loopback.Count))"
+    $withPid = @($Events | Where-Object { $_.Pid -ge 0 -and $_.Daddr })
+    Write-Output "zero-network: kernel ETW canary trace parsed $($Events.Count) events, $($withPid.Count) network events with a PID, $($mine.Count) from canary PID $CanaryPid"
+    Write-Output "zero-network: kernel ETW canary PID $CanaryPid external connect 203.0.113.5: $($external.Count), DNS send 203.0.113.5:53: $($dns.Count), loopback send 127.0.0.1:53: $($loopback.Count)"
 }
 
 function Assert-CleanTrace($Events) {
+    $network = @($Events | Where-Object { $_.Pid -ge 0 -and ($_.Daddr -or $_.Saddr) })
+    $others = @($network | Where-Object { -not $script:ObservedPids.Contains([int]$_.Pid) })
+    Write-Output "zero-network: kernel ETW clean trace parsed $($Events.Count) events, $($network.Count) network events with a PID, $($others.Count) from other processes"
+    foreach ($entry in @($script:ObservedImages.GetEnumerator() | Sort-Object { [int]$_.Key })) {
+        $observedPid = [int]$entry.Key
+        $count = @($network | Where-Object { [int]$_.Pid -eq $observedPid }).Count
+        Write-Output "zero-network: kernel ETW PID $observedPid ($($entry.Value)) network events: $count"
+    }
     $hits = @($Events | Where-Object { $_.Pid -ge 0 -and $script:ObservedPids.Contains([int]$_.Pid) -and ($_.Daddr -or $_.Saddr) })
     if ($hits.Count -gt 0) {
         $hit = $hits[0]
@@ -702,6 +726,13 @@ try {
         Write-Output 'zero-network: windows pktmon process filter and firewall failure audit saw no packet and no blocked connection from scan, index, or search'
     } else {
         Write-Output 'zero-network: pktmon filter add has no process-name on this image, so the observer is the firewall audit'
+        # The kernel ETW canary runs before the canary block rule, so a send the
+        # firewall would drop at connect time still reaches the TCP/IP stack.
+        $script:CanaryNotes = @()
+        $script:TraceMode = ''
+        $script:TraceKeywords = ''
+        Invoke-TracedCanary (Join-Path $work 'kernel-canary.etl')
+        Write-Output "zero-network: kernel ETW mode $($script:TraceMode) $($script:TraceKeywords)"
         $powershell = (Get-Process -Id $PID).Path
         $loopbackRuleNote = ''
         try {
@@ -712,12 +743,9 @@ try {
         }
         Enable-FailureAudit 'Filtering Platform Connection'
         Enable-FailureAudit 'Filtering Platform Packet Drop'
+        Start-Sleep -Seconds 1
         $canaryStart = (Get-Date).AddSeconds(-2)
-        $script:CanaryNotes = @()
-        $script:TraceMode = ''
-        $script:TraceKeywords = ''
-        Invoke-TracedCanary (Join-Path $work 'kernel-canary.etl')
-        $canaryNotes = @($script:CanaryNotes)
+        $canaryNotes = @(Invoke-Canary)
         $canaryEvents = @()
         for ($attempt = 0; $attempt -lt 10; $attempt++) {
             Start-Sleep -Seconds 1
