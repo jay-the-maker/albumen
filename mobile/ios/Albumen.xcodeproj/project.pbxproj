@@ -21,6 +21,8 @@
 		B1000000000000000000000C /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000004 /* AlbumenUpload */; };
 		E10000000000000000000004 /* SimulatorBackupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* SimulatorBackupTests.swift */; };
 		E1000000000000000000000A /* SimulatorScaleSoakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000000000000000000000B /* SimulatorScaleSoakTests.swift */; };
+		E1000000000000000000000C /* PhoneFrictionSimulatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000000000000000000000D /* PhoneFrictionSimulatorTests.swift */; };
+		E1000000000000000000000E /* phone-friction-steps.txt in Resources */ = {isa = PBXBuildFile; fileRef = E1000000000000000000000F /* phone-friction-steps.txt */; };
 		E10000000000000000000005 /* SyntheticGpsJpeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* SyntheticGpsJpeg.swift */; };
 		E10000000000000000000006 /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = E10000000000000000000007 /* AlbumenUpload */; };
 		B20000000000000000000001 /* SimulatorHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* SimulatorHostApp.swift */; };
@@ -72,6 +74,8 @@
 		F1000000000000000000000C /* BackgroundUpload.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BackgroundUpload.entitlements; sourceTree = "<group>"; };
 		E10000000000000000000001 /* SimulatorBackupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorBackupTests.swift; sourceTree = "<group>"; };
 		E1000000000000000000000B /* SimulatorScaleSoakTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorScaleSoakTests.swift; sourceTree = "<group>"; };
+		E1000000000000000000000D /* PhoneFrictionSimulatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneFrictionSimulatorTests.swift; sourceTree = "<group>"; };
+		E1000000000000000000000F /* phone-friction-steps.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "phone-friction-steps.txt"; sourceTree = "<group>"; };
 		E10000000000000000000002 /* SyntheticGpsJpeg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticGpsJpeg.swift; sourceTree = "<group>"; };
 		E10000000000000000000003 /* AlbumenSimulatorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AlbumenSimulatorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F20000000000000000000001 /* SimulatorHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorHostApp.swift; sourceTree = "<group>"; };
@@ -164,6 +168,8 @@
 			children = (
 				E10000000000000000000001 /* SimulatorBackupTests.swift */,
 				E1000000000000000000000B /* SimulatorScaleSoakTests.swift */,
+				E1000000000000000000000D /* PhoneFrictionSimulatorTests.swift */,
+				E1000000000000000000000F /* phone-friction-steps.txt */,
 				E10000000000000000000002 /* SyntheticGpsJpeg.swift */,
 			);
 			path = SimulatorTests;
@@ -240,6 +246,7 @@
 			buildPhases = (
 				S10000000000000000000006 /* Sources */,
 				S10000000000000000000007 /* Frameworks */,
+				R10000000000000000000001 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -339,6 +346,7 @@
 			files = (
 				E10000000000000000000004 /* SimulatorBackupTests.swift in Sources */,
 				E1000000000000000000000A /* SimulatorScaleSoakTests.swift in Sources */,
+				E1000000000000000000000C /* PhoneFrictionSimulatorTests.swift in Sources */,
 				E10000000000000000000005 /* SyntheticGpsJpeg.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -352,6 +360,17 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXResourcesBuildPhase section */
+		R10000000000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E1000000000000000000000E /* phone-friction-steps.txt in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
 		D10000000000000000000001 /* PBXTargetDependency */ = {

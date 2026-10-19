@@ -2,7 +2,7 @@
 
 The host is `mobile/ios/Albumen.xcodeproj`. The embedded extension is `AlbumenBackgroundUpload`. Both link the Swift package in `mobile/ios`. CI builds them on a Mac. The app is not published to a store, and this repository has no signing identity.
 
-There is no Albumen account. The receiver is the address you type.
+There is no Albumen account. The receiver user is the name printed beside the pairing QR. The one-time token in that QR is the receiver password.
 
 ## What is copied
 
@@ -56,6 +56,8 @@ scripts/ios-simulator.sh
 
 Setup is saving the receiver address and the Keychain password, which is what **Save and back up** does before it copies. The clock starts there. The test then uploads a generated one-pixel JPEG, with synthetic GPS EXIF at 1°2'3" N, 4°5'6" E, through `ForegroundUpload`. That type builds `BackgroundPut.request`, answers the receiver's Basic challenge from the Keychain, and records `BackgroundOutcome`. The copy counts when `albumen-receive` returns `X-Albumen-Sha256` for those bytes. The test reads the stored file back and requires its Exif APP1 segment, marker included, to equal the source segment. The elapsed time has to be under 5 minutes.
 
+`PhoneFrictionSimulatorTests` counts the same step list as the Android host, from [phone-friction-steps.txt](../mobile/ios/SimulatorTests/phone-friction-steps.txt). The list is four steps: install the simulator host, open it, grant media and location, and scan the `albumen-pair://v1` URI. More than five steps fails the job. The test feeds the decoded URI to `Pairing.parse` and `Pairing.pin` the way a camera scanner would, then uploads the synthetic JPEG. The verified copy is not another tap.
+
 A closed port, and a loopback that answers `201` with a different SHA-256, each write a non-blank line to `albumen-backup-status.txt`. That file is the text the status screen shows. The same text is posted with `BackupNotice`, the local notification `FailureNotice` sends. The test fails if either surface is blank, if the failure line is missing from either, or if the summary says `Failures 0.`
 
 The mismatch loopback is there because a correct `albumen-receive` returns the digest of the bytes it stored. It cannot produce a mismatch.
@@ -64,7 +66,7 @@ The mismatch loopback is there because a correct `albumen-receive` returns the d
 
 The simulator does not finish a background `URLSession`. This job does not create `photos.albumen.backup.background-upload`, does not wait for `sessionSendsLaunchEvents`, and does not relaunch the camera-roll host. It also does not submit `photos.albumen.backup.refresh` or launch the `AlbumenBackgroundUpload` extension. Those stay in the device path. The generic iOS build still compiles that host and extension, unsigned. This job installs `AlbumenSimulatorHost` only.
 
-The job does not tap **Save and back up**, and it does not present the Photos permission dialog. It calls the save and the upload the button uses, and it reads the status file the screen renders.
+The job does not tap **Save and back up**, and it does not present the Photos permission dialog. It calls the save and the upload the button uses, and it reads the status file the screen renders. The friction test counts that grant as one step in the shared list. The dialog itself stays on the device path.
 
 It does not export a `PHAssetResource`. Photos can rewrite a file it imports, so the bytes in this job are the synthetic original the export would hand to the upload. GPS in that file is the generated block above. It is not a photograph, and it is not a location from a camera roll.
 

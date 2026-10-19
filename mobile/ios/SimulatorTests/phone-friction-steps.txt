@@ -1,0 +1,6 @@
+# User-facing steps from install to the first SHA-256-verified copy.
+# The verified copy is not another tap. There is no account.
+install
+open
+grant-media-and-location
+scan-pairing-qr
