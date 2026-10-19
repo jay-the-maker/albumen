@@ -2,6 +2,10 @@
 
 The ingest tools run on Linux, Windows, and macOS. Originals stay bit-exact on each. A source is opened read-only. A destination inside that source is refused.
 
+## Known issues
+
+- **Windows: directory entries are not yet made durable ([#141](https://github.com/jay-the-maker/albumen/issues/141)).** The directory flush opens the destination directory read-only. `FlushFileBuffers` needs write access, so every flush fails with Access denied, and today the failure is only a warning. File data is flushed, but a crash right after an import can lose the new names. The fix is [#139](https://github.com/jay-the-maker/albumen/pull/139), which opens the destination directory for write with `FILE_FLAG_BACKUP_SEMANTICS` and makes a failed flush an error. This note comes out when #139 merges.
+
 ## Paths
 
 `albumen platform-dirs` prints two directories and creates nothing:
