@@ -9,7 +9,8 @@ Cold start, the first thumbnail, scroll, and backup CPU and battery are targets 
 | Metric | Budget |
 | --- | --- |
 | Cold start | ≤ 2.0 seconds from process start to the library shell |
-| Time to first thumbnail | ≤ 1.0 second on a 380,000-item library |
+| Time to first thumbnail (app first paint) | ≤ 1.0 second on a 380,000-item library: the ceiling for the app's first painted thumbnail, from launch. Team target. |
+| First thumbnail (library scale) | ≤ 300 ms at 380,000 items: `albumen-mcp` `thumbnail`, request to bytes and spawn to bytes, measured by the `library scale` job. Team target. |
 | Scroll | ≥ 60 FPS on a 380,000-item library, which is a p95 frame time ≤ 16.7 ms |
 | Backup CPU | Average ≤ 25% of one core across a background backup. A hash may use one core. It does not fan out across every core. |
 | Backup battery | Backup does not run on battery by default. Once a client can measure drain, screen-off backup stays ≤ 5% battery per hour. |
@@ -49,26 +50,29 @@ These are the product bars on a 380,000-item library. CI does not fail a job for
 | --- | --- |
 | Search, warm | p50 ≤ 500 ms and p95 ≤ 1.5 s |
 | Import | ≥ 100 MB/s on a local SSD, and ≥ 20 items/s for originals of about 5 MB |
-| Import vs raw write | Target ≥ 80% of a same-disk durable write for 1,000 files of about 5 MB |
+| Import vs raw write | Target ≥ 80% of a same-disk durable write for 1,000 files of about 5 MB, on `ubuntu-24.04`, `ubuntu-26.04`, and `windows-2025` |
+| Import vs copy ceiling (`macos-14`) | Team target: import ≥ 90% of the copy ceiling measured in the same job, under per-file plus directory `F_FULLFSYNC`. The ratio to the raw write is still reported. |
 
 1 MB is 1,000,000 bytes. 100 MB/s of 5 MB files is 20 items/s. The 80% bar is import MB/s divided by a raw write that uses the same per-file `fsync` and directory `fsync`. It is measured below. The absolute 100 MB/s bar stays a product target. CI does not fail a ratio below 0.80. A per-leg regression gate, when one is recorded, is a separate check and is not this 80% bar.
 
-### Proposal: a macOS target based on the same-job copy ceiling
+### macOS target: 90% of the same-job copy ceiling
 
-Status: proposed, pending XO acceptance. This is a team scorecard target. It is not a product requirement. Until it is accepted, the 0.80 target above applies to every leg.
+This is a team target, adopted by the XO on 2026-10-19. It is not a product requirement from Jay.
 
-Proposal: on `macos-14`, the import throughput target is **import MB/s at 90% or more of the copy ceiling measured in the same job**. The copy ceiling uses the same workers and the import's durability, `F_FULLFSYNC` on every file and on its directory, and reads each source once, with no hash and no read-back. The other legs keep the 0.80-of-raw target. The import throughput job prints the copy ceiling as `copy_ceiling_mb_s` and `copy_ceiling_ratio`, added in [#110](https://github.com/jay-the-maker/albumen/pull/110), which is on main.
+On `macos-14`, the import target is **import MB/s at 90% or more of the copy ceiling measured in the same job**, under the current durability: `F_FULLFSYNC` on every file and on its directory. The copy ceiling uses the import's workers and syncs and reads each source once, with no hash and no read-back. The import throughput job prints it as `copy_ceiling_mb_s` and `copy_ceiling_ratio`, added in [#110](https://github.com/jay-the-maker/albumen/pull/110), which is on main. The other legs keep the 0.80-of-raw target. The macOS ratio to the raw write is still printed and is kept in the table below.
 
-Why: the copy ceiling is the most an import can reach on that runner with one read of each source and the required syncs. CI measured it between 0.72 and 1.07 of the raw rate on `macos-14`, depending on the runner. On a runner where it is 0.72, 0.80 of raw is above anything an import with the required durability can reach, whatever the code does. A target relative to the same-job ceiling follows the runner and keeps measuring the import code.
+Why the target changed: on `macos-14` the copy ceiling swung between 0.72 and 1.07 of the raw write across runners, and the sources were often not in the page cache, so 0.80 of raw could sit above what one read plus the required syncs can reach.
 
-| run | commit | raw MB/s (`F_FULLFSYNC`) | copy ceiling MB/s | copy ceiling / raw | import MB/s | import / copy ceiling |
-| --- | --- | --- | --- | --- | --- | --- |
-| [39259267570](https://github.com/jay-the-maker/albumen/actions/runs/39259267570) | c401adb | 557.637 | 595.083 | 1.0672 | 302.937 | 0.509 |
-| [39262347854](https://github.com/jay-the-maker/albumen/actions/runs/39262347854) | cf42e75 | 706.932 | 509.054 | 0.7201 | 381.610 | 0.750 |
+| run | commit | sampling | raw MB/s (`F_FULLFSYNC`) | import MB/s | import / raw | copy ceiling MB/s | copy ceiling / raw | **import / copy ceiling** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [39259267570](https://github.com/jay-the-maker/albumen/actions/runs/39259267570) | c401adb | single import | 557.637 | 302.937 | 0.5433 | 595.083 | 1.0672 | 0.509 |
+| [39262347854](https://github.com/jay-the-maker/albumen/actions/runs/39262347854) | cf42e75 | single import | 706.932 | 381.610 | 0.5398 | 509.054 | 0.7201 | 0.750 |
+| [39265120601](https://github.com/jay-the-maker/albumen/actions/runs/39265120601) | 60d6745 | 6 interleaved rounds | 552.450 | 328.938 | 0.5954 | 435.168 | 0.7877 | 0.756 |
+| [#110 checks](https://github.com/jay-the-maker/albumen/pull/110/checks) | d37b6f2 | 6 interleaved rounds | 575.409 | 350.927 | 0.6099 | 488.676 | 0.8493 | 0.718 |
 
-Both runs reconciled 100 percent. In the same runs the sync-only ceiling, which writes from a warm buffer with the same syncs, was 1.4665 and 1.2790 of raw. So the per-file and directory `F_FULLFSYNC` alone leave room above 0.80. The source read sets the lower copy ceiling.
+Every run reconciled 100 percent. In the interleaved runs, `vmtouch` found 0 to 67 percent of the source pages in the page cache before each macOS import, while both Ubuntu legs were at 100 percent. `macos-14` is at about 72 to 76 percent of its copy ceiling, so this target is still open there.
 
-What stays the same: the durability calls, both SHA-256 passes, the destination read-back, the raw sample, and the 100 percent reconciliation gate. The job keeps printing the 0.80-of-raw ratio on every leg, macOS included, so both numbers stay visible. The latest measurement is 0.750 of the copy ceiling, and 0.90 is the next step.
+The durability calls, both SHA-256 passes, the destination read-back, the raw sample, and the 100 percent reconciliation gate are unchanged.
 
 ## Camera RAW verify
 
@@ -269,3 +273,15 @@ These are the walk-based numbers from before the index, when every search walked
 | `windows-2025` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623/job/118035984598) | 9.1 ms | 27,114.3 ms | 26,280.8 ms | 27,645.0 ms | 6.4 MiB |
 
 The 2,000-item smoke pass on `windows-2025` measured a search p95 of 192.2 ms with the walk. With the index, search p95 is 25 ms on `ubuntu-24.04`, 17 ms on `macos-14`, and 40 ms on `windows-2025`.
+
+## First thumbnail at 380,000 items
+
+`albumen-mcp` has a `thumbnail` tool. It reads one library JPEG through the read-only source root, decodes it in memory, scales it to fit 256 px (or `size`), and returns a new JPEG as base64. The original is not changed. Thumbnails are cached outside the library: `--thumbnail-dir`, else `ALBUMEN_THUMBNAIL_DIR`, else `thumbnails` in the platform data directory. A directory inside the library is refused. The cache key includes the original's size and modification time.
+
+The `library scale` workflow places 32 copies of the CC0 fixture `fixtures/jpeg-gps/IMG_0001.jpg` (640 × 480) at fixed positions among the 380,000 stub items. A fresh `albumen-mcp` with the saved index and an empty thumbnail cache asks for one of them. The job reports the time from that request to the decoded thumbnail bytes and the time from process spawn to those bytes, both against the 300 ms library-scale budget, then the other 31 cold and all 32 from the cache. Report only.
+
+Two thumbnail numbers are budgets, and both are team targets. The 1.0 s ceiling is for the full app's first painted thumbnail, from launch, and is measured once an app exists. The 300 ms budget is for the library-scale first thumbnail at 380,000 items: the `thumbnail` tool's bytes, measured in CI now. The 300 ms budget sits inside the 1.0 s ceiling and leaves room for the app's own startup and paint.
+
+## Import CPU
+
+The `import throughput` job reports `cpu_percent` for the 1,000-photo import against a 10 percent target. Definition: process CPU time (user plus system, all threads, measured around the timed `copy_verify` import only) divided by (import wall time × logical cores), times 100. 100 means every core was busy for the whole import. CPU time is `CLOCK_PROCESS_CPUTIME_ID` on Linux and macOS and `GetProcessTimes` on Windows; cores are `std::thread::available_parallelism`. The job also prints `cpu_seconds_per_1000`, the CPU seconds spent per 1,000 imported photos. Report only.
