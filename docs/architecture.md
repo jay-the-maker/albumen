@@ -58,9 +58,31 @@ The bytes on disk are the library. The catalog is a cache. If the catalog is del
 
 `copy_verify` is the only default path. `copy_verify_quarantine` cannot target a source. It returns an error and does not copy or rename. There is no flag that turns that off. The CLI does not call it.
 
-A stored original is not unlinked after that check. The receiver refuses WebDAV `DELETE` and `MOVE`, SFTP remove and rename, and FTP `DELE`, `RMD`, and rename. If the receipt sidecar cannot be written, or the library is asked to hide a file, Albumen writes `{filename}.albumen-tombstone` and leaves the original in place. Importers and the MCP server have no remove tool. `BlobStore::delete` and an export rollback remove only a destination this call just wrote, before that call has finished.
-
 Android motion photos are one JPEG with an embedded video and XMP. They stay intact because the file is never rewritten. There is no separate pair to discover.
+
+A stored original is not unlinked after that check. The two guarantees below say how, and where the tree is still short of them.
+
+## Guarantees
+
+### Sync is not backup
+
+Deletes never propagate. Library content is append-only. A removal is a tombstone or a hide, and the stored original stays. A new file arrives through `copy_verify`. An existing stored original is left as it is.
+
+The receiver refuses WebDAV `DELETE` and `MOVE`, SFTP remove and rename, and FTP `DELE`, `RMD`, and rename. A hide writes `{filename}.albumen-tombstone` beside the original. A second hide replaces that sidecar by rename. The original stays. When the receipt sidecar cannot be written after `copy_verify`, the same tombstone is written and the original stays. Both importers open the source read-only and `copy_verify` into the destination. The MCP server has no remove tool. `BlobStore::delete`, and an export rollback, remove only a destination this call just wrote, before that call has finished. The source is unchanged.
+
+Receivers and importers are tested. The receiver round-trip sends `DELETE` and `DELE`, and the stored file stays. The receiver store tests a hide and a failed receipt. `cli/tests/deletes_never_propagate.rs` fails the build when the receiver, either importer, the CLI, or the MCP server unlinks a stored original.
+
+Current gaps. A hide stays on the library where it was written. Nothing yet carries that hide to a second copy, and there is no sync. The delete-propagation test still to add uses two copies: a hide or a tombstone on the first, and the second copy's original bytes, name, and mtime stay. The test that runs today is a source scan, so it does not yet do that. A per-viewer hide is described in [design/family-sharing.md](design/family-sharing.md) and is not built. The library is a directory of ordinary files, so another program that can write the directory can unlink a file. Albumen's own commands leave the stored original in place.
+
+### No account lockout
+
+There is no vendor account. The library is plain files on storage the user already has: originals, sidecars, and tombstones in a directory. Those files are readable without Albumen. Keys and config stay on that machine. Export to a directory needs no service.
+
+`albumen export --apply` copies the library to a directory. `albumen verify-manifest` checks that directory. Neither command contacts a service. The export is the same files. The receiver password is one the user chooses for that process. On a phone it is kept in the Keychain or in Keystore. S3 and rclone use the endpoint and keys the user already holds. Those values stay in the environment or in the local rclone config.
+
+`cli/tests/offline_restore.rs` is the offline, no-account restore. It exports a synthetic library and runs `verify-manifest` with a cleared environment. On Linux the process runs with `connect()` blocked. The exported bytes match the library.
+
+Current gaps. Signing keys for a shared library are described in the family design and are not built. In that design the private key stays in a local file, and reading a stored file does not require it. An `s3://` export uses the user's own endpoint and keys. The offline test covers a directory. The macOS library UI is not started, so the way to open the library today is the directory itself.
 
 ## Companions discovered today
 
