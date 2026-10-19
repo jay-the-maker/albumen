@@ -790,7 +790,15 @@ async fn http_exchange(
     socket.write_all(request.as_bytes()).await.unwrap();
     socket.write_all(body).await.unwrap();
     let mut response = Vec::new();
-    socket.read_to_end(&mut response).await.unwrap();
+    // macOS loopback can reset the socket after the response has arrived.
+    // A response that already starts is the reply. An empty reset still fails.
+    match socket.read_to_end(&mut response).await {
+        Ok(_) => {}
+        Err(err)
+            if err.kind() == std::io::ErrorKind::ConnectionReset
+                && response.starts_with(b"HTTP/1.1") => {}
+        Err(err) => panic!("read response: {err}"),
+    }
     String::from_utf8_lossy(&response).into_owned()
 }
 

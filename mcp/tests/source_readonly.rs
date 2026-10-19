@@ -346,6 +346,15 @@ fn exercise(library: &Path, upload_from: &Path, outside: &Path, read_only_librar
     assert!(err, "{body}");
     assert!(body.as_str().unwrap().contains("inside"), "{body}");
     assert!(!inside.exists());
+    let (err, body) = call(&mut reading, 7, "ledger", json!({}));
+    assert!(!err, "{body}");
+    let paths = body["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|object| object["path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(paths.iter().any(|path| path.ends_with("IMG.jpg")), "{body}");
     reading.close();
 
     if read_only_library {

@@ -323,7 +323,6 @@ function Add-BlockRule([string]$Program, [string[]]$RemoteAddress) {
         Action = 'Block'
         Program = $Program
         Profile = 'Any'
-        Enabled = $true
         ErrorAction = 'Stop'
     }
     if ($RemoteAddress) { $params.RemoteAddress = $RemoteAddress }

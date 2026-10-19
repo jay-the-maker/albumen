@@ -106,6 +106,8 @@ impl S3Store {
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
             .build();
         let client = Client::from_conf(client_config);
+        let (host, port) = crate::ledger::endpoint_host_port(&config.endpoint)?;
+        crate::ledger::record_anchored_connection("connect", &host, port)?;
         let store = Self {
             client,
             runtime,

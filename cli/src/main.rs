@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `albumen export`, `albumen import-takeout`, `albumen import-icloud`,
-//! `albumen scan`, `albumen verify-manifest`, and `albumen family`.
+//! `albumen scan`, `albumen ledger`, `albumen verify-manifest`, and `albumen family`.
 //!
 //! Export is `copy_verify` across a library. It does not modify sources and
 //! it does not overwrite a destination that differs. Without `--apply` or
@@ -28,7 +28,7 @@ mod family;
 #[derive(Debug, Parser)]
 #[command(
     name = "albumen",
-    about = "Bit-exact photo library export, Takeout import, iCloud import, read-only scan, and family namespaces. Export, import, and family writes require --apply or --execute. platform-dirs prints native paths and creates nothing."
+    about = "Bit-exact photo library export, Takeout import, iCloud import, read-only scan, ledger, and family namespaces. Export, import, and family writes require --apply or --execute. ledger and platform-dirs create nothing."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -139,6 +139,22 @@ enum Command {
         #[command(subcommand)]
         action: family::Command,
     },
+    /// List every stored file, every analysis, and every recorded destination.
+    ///
+    /// The library is opened read-only. The command hashes the files already
+    /// in it and reads the logs beside it. It does not open a network connection
+    /// and it does not write the library.
+    Ledger {
+        /// Library root.
+        #[arg(long)]
+        library: PathBuf,
+        /// Extra connection log. The log beside the library is always read.
+        #[arg(long)]
+        connection_log: Option<PathBuf>,
+        /// Print JSON. The default is a short text account.
+        #[arg(long)]
+        json: bool,
+    },
     /// Hash the exported files, or a scan manifest, and compare them.
     VerifyManifest {
         #[arg(long)]
@@ -178,6 +194,7 @@ fn run() -> Result<(), IngestError> {
             if !(apply || execute) {
                 return print_export_plan(&from, &to, &manifest_path);
             }
+            albumen_ingest::ledger::anchor(&from, "export");
             let dest = open_target(&to)?;
             let source = SourceRoot::open(&from)?;
             let entries = export_tree(&source, dest.as_ref())?;
@@ -274,6 +291,19 @@ fn run() -> Result<(), IngestError> {
             Ok(())
         }
         Command::Family { action } => family::run(action),
+        Command::Ledger {
+            library,
+            connection_log,
+            json,
+        } => {
+            let ledger = albumen_ingest::ledger::build(&library, connection_log.as_deref())?;
+            if json {
+                println!("{}", ledger.to_json()?);
+            } else {
+                print!("{}", ledger.to_text());
+            }
+            Ok(())
+        }
         Command::PlatformDirs => {
             let (config, data) = platform_dirs()?;
             println!("platform-dirs");

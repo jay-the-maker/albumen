@@ -133,6 +133,7 @@ pub fn scan_tree(source: &SourceRoot, manifest: &Path) -> Result<ScanStats, Inge
         }
     }
     require_exiftool()?;
+    crate::ledger::record_analysis(Some(source.canonical()), "exiftool", "on-device")?;
     let (after, already) = prepare_resume(manifest)?;
     let workers = scan_workers();
     let (job_tx, job_rx) = sync_channel::<Job>(workers);

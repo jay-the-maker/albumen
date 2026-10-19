@@ -83,6 +83,31 @@ pub fn open_append(path: &Path) -> Result<File, IngestError> {
         .map_err(|err| IngestError::io(path, err))
 }
 
+/// Append one line to a log beside a library. The line is fsynced.
+///
+/// An existing log is extended. It is not replaced and it is not removed.
+pub fn append_line(path: &Path, line: &str) -> Result<(), IngestError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent)?;
+        }
+    }
+    let mut file = open_append(path)?;
+    let mut bytes = line.as_bytes().to_vec();
+    if !line.ends_with('\n') {
+        bytes.push(b'\n');
+    }
+    std::io::Write::write_all(&mut file, &bytes).map_err(|err| IngestError::io(path, err))?;
+    file.sync_all().map_err(|err| IngestError::io(path, err))?;
+    drop(file);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn open_read_write(path: &Path) -> Result<File, IngestError> {
     let opened = opened(path);
     OpenOptions::new()

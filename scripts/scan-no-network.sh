@@ -92,12 +92,25 @@ forbidden = (
     "utimensat(",
 )
 write_flags = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC")
+
+def under_source(line, source):
+    """True when `source` is a path prefix, not a sibling such as source.ledger."""
+    start = 0
+    while True:
+        at = line.find(source, start)
+        if at < 0:
+            return False
+        end = at + len(source)
+        if end == len(line) or line[end] in "/\"' ,)}":
+            return True
+        start = at + 1
+
 for path in sys.argv[1:3]:
     for line in Path(path).read_text(errors="replace").splitlines():
         head = line.split("=", 1)[0]
         if any(name in head for name in forbidden):
             raise SystemExit(f"{path}: forbidden syscall: {line}")
-        if "openat(" in head and source in line and any(flag in line for flag in write_flags):
+        if "openat(" in head and under_source(line, source) and any(flag in line for flag in write_flags):
             raise SystemExit(f"{path}: write open under source: {line}")
 print("strace: no sockets and no source writes")
 PY

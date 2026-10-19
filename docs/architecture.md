@@ -137,9 +137,9 @@ Both paths refuse to overwrite an existing original. Success is the verified des
 
 ## Agents
 
-The MCP server covers search, browse, export, and upload/ingest.
+The MCP server covers search, browse, ledger, export, and upload/ingest.
 
-Read tools are the default: search files and sidecars by capture date, camera, lens, GPS box, keyword, and caption; browse by path; and export a copy to a path the user chose. Export is `copy_verify` out of the library. It is not a move, and it is not a delete.
+Read tools are the default: search files and sidecars by capture date, camera, lens, GPS box, keyword, and caption; browse by path; and read the ledger. The ledger lists every stored file with its path, SHA-256, size, and member, every ExifTool read and where it ran, and every destination recorded beside the library. It is built from the files and the logs on disk. It does not open a network connection. Export copies to a path the user chose. Export is `copy_verify` out of the library. It is not a move, and it is not a delete.
 
 Upload and ingest are write tools. They stay off until the user explicitly enables them. A write calls `copy_verify` and reports success only after the destination hash and mtime have been checked. It never overwrites an existing original, and it never recompresses one.
 
