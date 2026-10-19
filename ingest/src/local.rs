@@ -315,4 +315,33 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"alpha");
         assert_eq!(fs::read(&link).unwrap(), b"alpha");
     }
+
+    #[test]
+    fn copy_allows_a_sibling_library() {
+        let tmp = Tmp::new();
+        let export = tmp.path().join("export");
+        fs::create_dir(&export).unwrap();
+        for index in 0..8 {
+            write_file(
+                &export,
+                &format!("p{index}.heic"),
+                b"\xff\xd8\xff\xd9",
+                fixed_mtime(),
+            );
+        }
+        let library = tmp.path().join("library");
+        fs::create_dir(&library).unwrap();
+        let root = crate::source::SourceRoot::open(&export).unwrap();
+        root.refuse_destination(&library).unwrap();
+        let copied = copy_verify_file(&export.join("p0.heic"), &library).unwrap();
+        assert_eq!(copied.byte_len, 4);
+        assert_eq!(
+            fs::read(library.join("p0.heic")).unwrap(),
+            b"\xff\xd8\xff\xd9"
+        );
+        assert_eq!(
+            fs::read(export.join("p0.heic")).unwrap(),
+            b"\xff\xd8\xff\xd9"
+        );
+    }
 }

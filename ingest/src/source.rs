@@ -368,13 +368,18 @@ fn id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
 #[cfg(windows)]
 fn id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
     use std::os::windows::fs::MetadataExt;
-    // `file_index` is still unstable. A hard link shares the creation
-    // FILETIME of the original, so that time is the identity.
+    // `file_index` is still unstable. A hard link of a file shares that
+    // file's creation FILETIME and size. A directory's creation time is not
+    // an identity: NTFS stamps a burst of creates with one tick, so a sibling
+    // library would otherwise match the source directory.
+    if !meta.is_file() {
+        return None;
+    }
     let created = meta.creation_time();
     if created == 0 {
         return None;
     }
-    Some((0, created))
+    Some((meta.file_size(), created))
 }
 
 #[cfg(not(any(unix, windows)))]
