@@ -31,6 +31,12 @@ if [[ ! -x target/debug/albumen || ! -x target/debug/albumen-mcp ]]; then
 fi
 
 work="$(mktemp -d)"
+# macOS mktemp returns /var/folders, which is a symlink to /private/var.
+# sandbox-exec matches the path the kernel checks, so the profile has to
+# name the physical directory or the manifest create is EPERM.
+if [[ "$(uname -s)" == Darwin ]]; then
+  work="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$work")"
+fi
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/library" "$work/out" "$work/home" "$work/tmp"
 printf 'albumen synthetic original. Not a photograph.\n' >"$work/library/IMG_0001.jpg"

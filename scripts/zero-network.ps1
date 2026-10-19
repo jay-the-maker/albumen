@@ -107,8 +107,16 @@ $rules = @()
 $auditBefore = $null
 
 function Clear-Pktmon {
-    & pktmon stop 2>$null | Out-Null
-    & pktmon filter remove 2>$null | Out-Null
+    # Windows PowerShell treats pktmon's "not running" stderr as a terminating
+    # error when ErrorAction is Stop, even with 2>$null.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & pktmon stop 2>&1 | Out-Null
+        & pktmon filter remove 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 function Start-Pktmon([string[]]$ProcessNames) {
@@ -129,7 +137,16 @@ function Start-Pktmon([string[]]$ProcessNames) {
     if ($startHelp -match 'loopback') {
         & pktmon @startArgs --flags 0x10
         if ($LASTEXITCODE -eq 0) { return }
-        & pktmon stop 2>$null | Out-Null
+        # A failed start may have left the monitor running. Stopping it writes
+        # "not running" to stderr when it did not, and Windows PowerShell turns
+        # that stderr into a terminating error.
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & pktmon stop 2>&1 | Out-Null
+        } finally {
+            $ErrorActionPreference = $previous
+        }
     }
     & pktmon @startArgs
     if ($LASTEXITCODE -ne 0) {
