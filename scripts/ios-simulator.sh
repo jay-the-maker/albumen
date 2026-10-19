@@ -16,6 +16,35 @@ fi
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+
+install_applesimutils() {
+  local root=$1
+  local version=0.9.12
+  local sha=3373d85ea6051e77865b0a22960eb0b5d63f3126c7c99232d0b6b9c83ee2c133
+  local dest="$root/target/applesimutils-$version"
+  local bin="$dest/applesimutils/$version/bin/applesimutils"
+  if [[ -x "$bin" ]]; then
+    printf '%s\n' "$bin"
+    return
+  fi
+  if [[ "$(uname -m)" != "arm64" ]]; then
+    echo "applesimutils is pinned for the arm64 macOS runner" >&2
+    exit 1
+  fi
+  local archive
+  archive=$(mktemp)
+  curl -fsSL -o "$archive" -L \
+    "https://github.com/wix/AppleSimulatorUtils/releases/download/${version}/applesimutils-${version}.arm64_big_sur.bottle.tar.gz"
+  local got
+  got=$(shasum -a 256 "$archive" | awk '{print $1}')
+  if [[ "$got" != "$sha" ]]; then
+    echo "applesimutils checksum was $got" >&2
+    exit 1
+  fi
+  mkdir -p "$dest"
+  tar -xzf "$archive" -C "$dest"
+  printf '%s\n' "$bin"
+}
 cargo build --locked --release -p albumen-receive
 
 library=$(mktemp -d)
@@ -117,35 +146,12 @@ if [[ -z "$app" ]]; then
 fi
 xcrun simctl install "$udid" "$app"
 # The test posts a local notification from this host. Granting it avoids the alert.
+# simctl privacy returns "Operation not permitted" for notifications on this SDK.
 bundle=photos.albumen.ios.simulator-host
 if ! xcrun simctl privacy "$udid" grant notifications "$bundle"; then
-  echo "simctl could not grant notifications; writing the simulator permission row" >&2
-  python3 - "$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/Library/TCC/TCC.db" "$bundle" <<'PY'
-import sqlite3, sys, time
-db_path, bundle = sys.argv[1], sys.argv[2]
-connection = sqlite3.connect(db_path)
-columns = [row[1] for row in connection.execute("PRAGMA table_info(access)")]
-if not columns:
-    sys.exit(f"no access table in {db_path}")
-values = {
-    "service": "kTCCServiceUserNotifications",
-    "client": bundle,
-    "client_type": 0,
-    "auth_value": 2,
-    "auth_reason": 2,
-    "auth_version": 1,
-    "flags": 0,
-    "last_modified": int(time.time()),
-    "indirect_object_identifier": "UNUSED",
-}
-present = [name for name in values if name in columns]
-connection.execute("DELETE FROM access WHERE service = ? AND client = ?", (values["service"], bundle))
-connection.execute(
-    f"INSERT INTO access ({', '.join(present)}) VALUES ({', '.join('?' for _ in present)})",
-    [values[name] for name in present],
-)
-connection.commit()
-PY
+  echo "simctl could not grant notifications; granting them with applesimutils 0.9.12" >&2
+  tool=$(install_applesimutils "$root")
+  "$tool" --byId "$udid" --bundle "$bundle" --setPermissions "notifications=YES"
 fi
 
 xcodebuild test-without-building \

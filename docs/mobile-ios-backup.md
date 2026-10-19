@@ -48,7 +48,7 @@ scripts/ios-simulator.sh
 
 ## What the simulator job proves
 
-`scripts/ios-simulator.sh` runs on the `macos-14` runner only. It builds `albumen-receive`, listens on `127.0.0.1:18080` with `--apply`, boots an iPhone simulator whose runtime is not newer than that Xcode's simulator SDK, and runs `AlbumenSimulatorTests` inside `AlbumenSimulatorHost`. That host is ad-hoc signed so the simulator can launch it. It allows cleartext HTTP to the loopback receiver, which is the process the notification grant uses. It is not the camera-roll app, and it does not embed the upload extension. The repository still has no development team.
+`scripts/ios-simulator.sh` runs on the `macos-14` runner only. It builds `albumen-receive`, listens on `127.0.0.1:18080` with `--apply`, boots an iPhone simulator whose runtime is not newer than that Xcode's simulator SDK, and runs `AlbumenSimulatorTests` inside `AlbumenSimulatorHost`. That host is ad-hoc signed so the simulator can launch it. It allows cleartext HTTP to the loopback receiver, which is the process the notification grant uses. When `simctl privacy` cannot grant notifications, the job grants them with pinned applesimutils 0.9.12 so the permission alert does not appear. It is not the camera-roll app, and it does not embed the upload extension. The repository still has no development team.
 
 `albumen-receive` answers `100 Continue` when a PUT asks for it and the body has not arrived yet. `URLSession` waits for that interim response before it sends the file.
 
