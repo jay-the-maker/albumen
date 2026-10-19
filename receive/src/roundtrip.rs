@@ -526,6 +526,81 @@ fn hash_bytes(bytes: &[u8]) -> String {
     sha256_hex(&path).unwrap()
 }
 
+#[tokio::test]
+async fn webdav_answers_100_continue_before_the_body() {
+    let body = b"synthetic-continue";
+    let hash = hash_bytes(body);
+    let root = tempfile::tempdir().unwrap();
+    let listening = listen(
+        Settings {
+            library: root.path().to_path_buf(),
+            user: "camera".into(),
+            password: "roll".into(),
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let addr = listening.webdav.unwrap();
+    let mut socket = TcpStream::connect(addr).await.unwrap();
+    let token = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"camera:roll");
+    let request = format!(
+        "PUT /continue.jpg HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {token}\r\nExpect: 100-continue\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    let interim = tokio::time::timeout(Duration::from_secs(5), read_until_header_end(&mut socket))
+        .await
+        .expect("timed out waiting for 100 Continue")
+        .unwrap();
+    assert!(
+        interim.starts_with("HTTP/1.1 100"),
+        "expected 100 Continue, got {interim}"
+    );
+    socket.write_all(body).await.unwrap();
+    let stored = tokio::time::timeout(Duration::from_secs(5), read_until_close(&mut socket))
+        .await
+        .expect("timed out waiting for the stored response")
+        .unwrap();
+    assert!(
+        stored.starts_with("HTTP/1.1 201"),
+        "PUT continue.jpg: interim={interim} stored={stored}"
+    );
+    assert_eq!(
+        header_value(&stored, "X-Albumen-Sha256").as_deref(),
+        Some(hash.as_str()),
+        "{stored}"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("continue.jpg")).unwrap(),
+        body
+    );
+}
+
+async fn read_until_header_end(socket: &mut TcpStream) -> std::io::Result<String> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 256];
+    while buf.len() < 4 || &buf[buf.len() - 4..] != b"\r\n\r\n" {
+        let n = socket.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > 64 * 1024 {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+async fn read_until_close(socket: &mut TcpStream) -> std::io::Result<String> {
+    let mut buf = Vec::new();
+    socket.read_to_end(&mut buf).await?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 async fn http_put(addr: SocketAddr, path: &str, body: &[u8], status: &str, sha256: &str) {
     let text = http_exchange(addr, "PUT", path, body, None).await;
     assert!(

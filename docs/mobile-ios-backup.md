@@ -41,6 +41,29 @@ A limited PhotoKit selection backs up the photos you selected, still as original
 ```bash
 swift test --package-path mobile/ios
 scripts/ios-xcode.sh
+scripts/ios-simulator.sh
 ```
 
 `scripts/ios-xcode.sh` runs `xcodebuild` for generic iOS with `CODE_SIGNING_ALLOWED=NO`. CI runs that script on `macos-14` and does not run it on Ubuntu. `swift test` covers the PUT shape, the SHA-256 verdict, the status line, the queue, scratch deletion, and a source scan that rejects Photos deletion and preview rendering.
+
+## What the simulator job proves
+
+`scripts/ios-simulator.sh` runs on the `macos-14` runner only. It builds `albumen-receive`, listens on `127.0.0.1:18080` with `--apply`, boots an iPhone simulator, and runs `AlbumenSimulatorTests` inside `AlbumenSimulatorHost`. That host is ad-hoc signed so the simulator can launch it. It allows cleartext HTTP to the loopback receiver, which is the process the notification grant uses. It is not the camera-roll app, and it does not embed the upload extension. The repository still has no development team.
+
+`albumen-receive` answers `100 Continue` when a PUT asks for it and the body has not arrived yet. `URLSession` waits for that interim response before it sends the file.
+
+Setup is saving the receiver address and the Keychain password, which is what **Save and back up** does before it copies. The clock starts there. The test then uploads a generated one-pixel JPEG, with synthetic GPS EXIF at 1°2'3" N, 4°5'6" E, through `ForegroundUpload`. That type builds `BackgroundPut.request`, answers the receiver's Basic challenge from the Keychain, and records `BackgroundOutcome`. The copy counts when `albumen-receive` returns `X-Albumen-Sha256` for those bytes. The test reads the stored file back and requires its Exif APP1 segment, marker included, to equal the source segment. The elapsed time has to be under 5 minutes.
+
+A closed port, and a loopback that answers `201` with a different SHA-256, each write a non-blank line to `albumen-backup-status.txt`. That file is the text the status screen shows. The same text is posted with `BackupNotice`, the local notification `FailureNotice` sends. The test fails if either surface is blank, if the failure line is missing from either, or if the summary says `Failures 0.`
+
+The mismatch loopback is there because a correct `albumen-receive` returns the digest of the bytes it stored. It cannot produce a mismatch.
+
+## What the simulator job does not prove
+
+The simulator does not finish a background `URLSession`. This job does not create `photos.albumen.backup.background-upload`, does not wait for `sessionSendsLaunchEvents`, and does not relaunch the camera-roll host. It also does not submit `photos.albumen.backup.refresh` or launch the `AlbumenBackgroundUpload` extension. Those stay in the device path. The generic iOS build still compiles that host and extension, unsigned. This job installs `AlbumenSimulatorHost` only.
+
+The job does not tap **Save and back up**, and it does not present the Photos permission dialog. It calls the save and the upload the button uses, and it reads the status file the screen renders.
+
+It does not export a `PHAssetResource`. Photos can rewrite a file it imports, so the bytes in this job are the synthetic original the export would hand to the upload. GPS in that file is the generated block above. It is not a photograph, and it is not a location from a camera roll.
+
+The test bundle does not claim the app group or the shared keychain group. An unsigned build already falls back to the app's own container and keychain, which is the same fallback documented above. The entitlements remain in the Xcode project for a signed build. This job does not install on a phone, and it does not publish the app.

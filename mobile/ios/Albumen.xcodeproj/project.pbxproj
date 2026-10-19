@@ -19,6 +19,10 @@
 		B1000000000000000000000A /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000002 /* AlbumenUpload */; };
 		B1000000000000000000000B /* AlbumenBackup in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000003 /* AlbumenBackup */; };
 		B1000000000000000000000C /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000004 /* AlbumenUpload */; };
+		E10000000000000000000004 /* SimulatorBackupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* SimulatorBackupTests.swift */; };
+		E10000000000000000000005 /* SyntheticGpsJpeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* SyntheticGpsJpeg.swift */; };
+		E10000000000000000000006 /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = E10000000000000000000007 /* AlbumenUpload */; };
+		B20000000000000000000001 /* SimulatorHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* SimulatorHostApp.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -28,6 +32,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = A1B100000000000000000002;
 			remoteInfo = AlbumenBackgroundUpload;
+		};
+		D20000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1B100000000000000000003 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1B100000000000000000005;
+			remoteInfo = AlbumenSimulatorHost;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -58,6 +69,12 @@
 		F1000000000000000000000A /* Albumen.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Albumen.entitlements; sourceTree = "<group>"; };
 		F1000000000000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F1000000000000000000000C /* BackgroundUpload.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BackgroundUpload.entitlements; sourceTree = "<group>"; };
+		E10000000000000000000001 /* SimulatorBackupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorBackupTests.swift; sourceTree = "<group>"; };
+		E10000000000000000000002 /* SyntheticGpsJpeg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticGpsJpeg.swift; sourceTree = "<group>"; };
+		E10000000000000000000003 /* AlbumenSimulatorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AlbumenSimulatorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F20000000000000000000001 /* SimulatorHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorHostApp.swift; sourceTree = "<group>"; };
+		F20000000000000000000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F20000000000000000000003 /* AlbumenSimulatorHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AlbumenSimulatorHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -79,6 +96,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		S10000000000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E10000000000000000000006 /* AlbumenUpload in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		S20000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -88,6 +120,8 @@
 				G10000000000000000000002 /* App */,
 				G10000000000000000000003 /* BackgroundUpload */,
 				G10000000000000000000004 /* Shared */,
+				G10000000000000000000006 /* SimulatorTests */,
+				G20000000000000000000001 /* SimulatorHost */,
 				G10000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -123,11 +157,31 @@
 			path = Shared;
 			sourceTree = "<group>";
 		};
+		G10000000000000000000006 /* SimulatorTests */ = {
+			isa = PBXGroup;
+			children = (
+				E10000000000000000000001 /* SimulatorBackupTests.swift */,
+				E10000000000000000000002 /* SyntheticGpsJpeg.swift */,
+			);
+			path = SimulatorTests;
+			sourceTree = "<group>";
+		};
+		G20000000000000000000001 /* SimulatorHost */ = {
+			isa = PBXGroup;
+			children = (
+				F20000000000000000000001 /* SimulatorHostApp.swift */,
+				F20000000000000000000002 /* Info.plist */,
+			);
+			path = SimulatorHost;
+			sourceTree = "<group>";
+		};
 		G10000000000000000000005 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				F10000000000000000000009 /* Albumen.app */,
 				F10000000000000000000008 /* AlbumenBackgroundUpload.appex */,
+				E10000000000000000000003 /* AlbumenSimulatorTests.xctest */,
+				F20000000000000000000003 /* AlbumenSimulatorHost.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -177,6 +231,42 @@
 			productReference = F10000000000000000000008 /* AlbumenBackgroundUpload.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		A1B100000000000000000004 /* AlbumenSimulatorTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = L10000000000000000000004 /* Build configuration list for PBXNativeTarget "AlbumenSimulatorTests" */;
+			buildPhases = (
+				S10000000000000000000006 /* Sources */,
+				S10000000000000000000007 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D20000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = AlbumenSimulatorTests;
+			packageProductDependencies = (
+				E10000000000000000000007 /* AlbumenUpload */,
+			);
+			productName = AlbumenSimulatorTests;
+			productReference = E10000000000000000000003 /* AlbumenSimulatorTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A1B100000000000000000005 /* AlbumenSimulatorHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = L20000000000000000000001 /* Build configuration list for PBXNativeTarget "AlbumenSimulatorHost" */;
+			buildPhases = (
+				S20000000000000000000001 /* Sources */,
+				S20000000000000000000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AlbumenSimulatorHost;
+			productName = AlbumenSimulatorHost;
+			productReference = F20000000000000000000003 /* AlbumenSimulatorHost.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -212,6 +302,8 @@
 			targets = (
 				A1B100000000000000000001 /* Albumen */,
 				A1B100000000000000000002 /* AlbumenBackgroundUpload */,
+				A1B100000000000000000004 /* AlbumenSimulatorTests */,
+				A1B100000000000000000005 /* AlbumenSimulatorHost */,
 			);
 		};
 /* End PBXProject section */
@@ -238,6 +330,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		S10000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E10000000000000000000004 /* SimulatorBackupTests.swift in Sources */,
+				E10000000000000000000005 /* SyntheticGpsJpeg.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		S20000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B20000000000000000000001 /* SimulatorHostApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -245,6 +354,11 @@
 			isa = PBXTargetDependency;
 			target = A1B100000000000000000002 /* AlbumenBackgroundUpload */;
 			targetProxy = D10000000000000000000002 /* PBXContainerItemProxy */;
+		};
+		D20000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1B100000000000000000005 /* AlbumenSimulatorHost */;
+			targetProxy = D20000000000000000000002 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -394,6 +508,115 @@
 			};
 			name = Release;
 		};
+		C10000000000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios.simulator-tests;
+				PRODUCT_NAME = AlbumenSimulatorTests;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AlbumenSimulatorHost.app/AlbumenSimulatorHost";
+			};
+			name = Debug;
+		};
+		C10000000000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios.simulator-tests;
+				PRODUCT_NAME = AlbumenSimulatorTests;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AlbumenSimulatorHost.app/AlbumenSimulatorHost";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C20000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SimulatorHost/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios.simulator-host;
+				PRODUCT_NAME = AlbumenSimulatorHost;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C20000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SimulatorHost/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios.simulator-host;
+				PRODUCT_NAME = AlbumenSimulatorHost;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -424,6 +647,24 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		L10000000000000000000004 /* Build configuration list for PBXNativeTarget "AlbumenSimulatorTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000007 /* Debug */,
+				C10000000000000000000008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		L20000000000000000000001 /* Build configuration list for PBXNativeTarget "AlbumenSimulatorHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C20000000000000000000001 /* Debug */,
+				C20000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -450,6 +691,11 @@
 			productName = AlbumenBackup;
 		};
 		P10000000000000000000004 /* AlbumenUpload */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = P10000000000000000000005 /* XCLocalSwiftPackageReference "." */;
+			productName = AlbumenUpload;
+		};
+		E10000000000000000000007 /* AlbumenUpload */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = P10000000000000000000005 /* XCLocalSwiftPackageReference "." */;
 			productName = AlbumenUpload;

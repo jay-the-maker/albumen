@@ -144,6 +144,20 @@ jobs:
       - name: Build the host and the background upload extension
         run: scripts/ios-xcode.sh
 
+  ios-simulator:
+    name: ios simulator backup
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Verified copy on the iOS Simulator
+        run: scripts/ios-simulator.sh
+
   mcp-image:
     name: albumen-mcp image
     runs-on: ubuntu-24.04
