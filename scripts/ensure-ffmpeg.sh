@@ -22,23 +22,33 @@ case "$os" in
     brew install ffmpeg
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    choco install ffmpeg -y --no-progress
-    # The Chocolatey shim is not a reliable PATH entry for the next step.
-    # Publish the directory that contains ffmpeg.exe as a Windows path.
+    # Chocolatey can exit 0 when the community feed returns 503 and no
+    # ffmpeg.exe was written. Retry until the binary is actually there.
     bin=""
-    for candidate in \
-      /c/ProgramData/chocolatey/lib/ffmpeg/tools/ffmpeg/bin \
-      /c/ProgramData/chocolatey/bin
-    do
-      if [[ -x "$candidate/ffmpeg.exe" || -x "$candidate/ffmpeg" ]]; then
-        bin="$candidate"
+    attempt=1
+    while [[ "$attempt" -le 5 ]]; do
+      choco install ffmpeg -y --no-progress || true
+      for candidate in \
+        /c/ProgramData/chocolatey/lib/ffmpeg/tools/ffmpeg/bin \
+        /c/ProgramData/chocolatey/bin
+      do
+        if [[ -x "$candidate/ffmpeg.exe" || -x "$candidate/ffmpeg" ]]; then
+          bin="$candidate"
+          break
+        fi
+      done
+      if [[ -n "$bin" ]]; then
         break
       fi
+      echo "ffmpeg install did not produce ffmpeg.exe (attempt ${attempt})" >&2
+      if [[ "$attempt" -eq 5 ]]; then
+        exit 1
+      fi
+      sleep $((attempt * 10))
+      attempt=$((attempt + 1))
     done
-    if [[ -z "$bin" ]]; then
-      echo "ffmpeg install did not produce ffmpeg.exe" >&2
-      exit 1
-    fi
+    # The Chocolatey shim is not a reliable PATH entry for the next step.
+    # Publish the directory that contains ffmpeg.exe as a Windows path.
     export PATH="${bin}:${PATH}"
     if [[ -n "${GITHUB_PATH:-}" ]]; then
       if command -v cygpath >/dev/null 2>&1; then

@@ -18,11 +18,18 @@ With Rust 1.94 or newer already installed (CI uses 1.99.1), the path is five ste
 
 The password in that command is one you chose for this receiver. It is not an Albumen account. The file on your disk stays where it was.
 
-A machine without Rust has a sixth step, installing the toolchain, and that path is over the handful.
+A machine without Rust uses the release archive. `scripts/quickstart.json` is the machine-readable list, and `scripts/check-quickstart.py` fails when it has more than five steps. The path is four steps:
+
+1. Install: `curl -fsSL https://raw.githubusercontent.com/jay-the-maker/albumen/main/scripts/install.sh | sh` (Windows: `irm https://raw.githubusercontent.com/jay-the-maker/albumen/main/scripts/install.ps1 | iex`). The script checks the archive SHA-256 and, when the tool is on `PATH`, a cosign bundle or a GitHub attestation. The binaries go in a directory you own. There is no sudo and no account.
+2. Start the receiver: `ALBUMEN_RECEIVE_PASSWORD='a receiver password' "$HOME/.local/share/albumen/bin/albumen-receive" --to "$HOME/albumen-library" --user camera --webdav 127.0.0.1:8080 --apply`
+3. PUT one original the way a phone does, with `X-Albumen-Mtime`: `curl -sS -D - -o /dev/null -T "$HOME/originals/IMG_QUICKSTART.jpg" -u "camera:${ALBUMEN_RECEIVE_PASSWORD}" -H "Content-Type: application/octet-stream" -H "X-Albumen-Mtime: $(stat -c %Y "$HOME/originals/IMG_QUICKSTART.jpg" 2>/dev/null || stat -f %m "$HOME/originals/IMG_QUICKSTART.jpg")" http://127.0.0.1:8080/IMG_QUICKSTART.jpg`
+4. Require the response `X-Albumen-Sha256`, the stored file, and the source to be the same SHA-256: `sha256sum "$HOME/originals/IMG_QUICKSTART.jpg" "$HOME/albumen-library/IMG_QUICKSTART.jpg" || shasum -a 256 "$HOME/originals/IMG_QUICKSTART.jpg" "$HOME/albumen-library/IMG_QUICKSTART.jpg"`. The source bytes and mtime stay as they were.
+
+Windows commands for the same four steps are the `windows` fields in `scripts/quickstart.json`. The receiver password is still one you chose. It is not an Albumen account.
 
 ## Phone backup
 
-The Android host and the iOS simulator count the same user-facing steps. The list is [mobile/android/host/src/androidTest/assets/phone-friction-steps.txt](../mobile/android/host/src/androidTest/assets/phone-friction-steps.txt), and the iOS copy is the same file. CI fails the job when that list is longer than five. There is no account screen. The debug build is installed by you. It is not a store install. The detail is [mobile-android-backup.md](mobile-android-backup.md).
+The Android host sends to a receiver, so the quickstart above comes first. The Android host and the iOS simulator then count the same user-facing steps. The list is [mobile/android/host/src/androidTest/assets/phone-friction-steps.txt](../mobile/android/host/src/androidTest/assets/phone-friction-steps.txt), and the iOS copy is the same file. CI fails the job when that list is longer than five. There is no account screen. The debug build is installed by you. It is not a store install. The detail is [mobile-android-backup.md](mobile-android-backup.md).
 
 1. Install the app.
 2. Open it.
