@@ -10,7 +10,7 @@ Shipped as `albumen import-takeout`. Split zip and tgz parts are streamed read-o
 
 ## iCloud Photos
 
-Shipped as `albumen import-icloud`. A download archive, a Photos export, or a copied Photos library is read-only. Originals, edited versions, Live Photo pairs, and AAE/XMP sidecars are `copy_verify`'d. Capture time stays in the sidecar report line. See [docs/importers/icloud.md](docs/importers/icloud.md).
+Shipped as `albumen import-icloud`. A multi-part download (zip parts plus Photo Details CSVs), a Photos export, or a copied Photos library is read-only. Originals, edited versions, Live Photo pairs, and AAE/XMP sidecars are `copy_verify`'d. CSVs stay byte-for-byte. Album, favorite, and caption metadata is a sidecar export from `Photos.sqlite` opened `mode=ro&immutable=1`. See [docs/importers/icloud.md](docs/importers/icloud.md).
 
 ## Export everything
 

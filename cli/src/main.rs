@@ -78,9 +78,11 @@ enum Command {
     },
     /// Copy an iCloud Photos download, export, or Photos library.
     ///
-    /// The source is opened read-only. Originals, edited versions, Live Photo
-    /// pairs, and AAE/XMP sidecars are copy-verified. A capture time read from
-    /// a sidecar stays in the report and is not written into an original.
+    /// The source is opened read-only. A folder of zip parts and Photo Details
+    /// CSVs is a multi-part download: the archives are streamed and the CSVs
+    /// are copied byte-for-byte. A Photos library database is opened in
+    /// SQLite read-only immutable mode. Album, favorite, and caption metadata
+    /// is written beside the original and is not written back into the library.
     /// The command exits non-zero when the reconciliation report does not match.
     ImportIcloud {
         /// Export directory, `.photoslibrary` bundle, or one `.zip`/`.tgz` download.

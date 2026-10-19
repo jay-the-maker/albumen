@@ -16,6 +16,7 @@ mod export;
 mod icloud;
 mod local;
 mod mtime;
+mod photos_library;
 mod rclone;
 mod s3;
 mod scan;

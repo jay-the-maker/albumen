@@ -104,7 +104,7 @@ The design note is [docs/importers/takeout.md](docs/importers/takeout.md).
 
 ## iCloud Photos
 
-`albumen import-icloud` copies an iCloud Photos download, a Photos export, or a copy of a Photos library. The source is opened read-only. Originals and edited versions stay bit-exact. Live Photo pairs and AAE/XMP sidecars are kept. A capture time read from a sidecar stays in the reconciliation report and is not written into an original. The command exits non-zero unless the count in equals the count out and every SHA-256 matches.
+`albumen import-icloud` copies an iCloud Photos download, a Photos export, or a copy of a Photos library. A download may be several zip parts plus Photo Details CSVs. The source is opened read-only. Originals and edited versions stay bit-exact. Live Photo pairs and AAE/XMP sidecars are kept, and the CSVs are copied byte-for-byte. Album, favorite, and caption metadata from a Photos library is exported beside the original. The database is opened in SQLite read-only immutable mode and is not modified. A capture time read from a sidecar stays in the reconciliation report and is not written into an original. The command exits non-zero unless the count in equals the count out and every SHA-256 matches.
 
 ```bash
 albumen import-icloud --from ~/Pictures/Photos\ Library.photoslibrary --to ~/library --report ~/icloud-report.jsonl

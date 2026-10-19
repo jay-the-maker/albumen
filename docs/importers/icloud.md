@@ -13,9 +13,9 @@ albumen import-icloud \
   --report ~/icloud-report.jsonl
 ```
 
-`--from` is a directory or one archive. A directory is an export folder or a `.photoslibrary` package. An archive is one `.zip`, `.tgz`, or `.tar.gz` download. A directory source is not treated as a folder of archives: every regular file under it is a member.
+`--from` is a directory or one archive. One archive is a `.zip`, `.tgz`, or `.tar.gz` file. A directory that contains only those archives and `.csv` files is a multi-part iCloud download. Any other directory is an export folder or a `.photoslibrary` package, and every regular file under it is a member.
 
-`--to` is the library. It must not be the source, a folder inside it, or a folder that contains it. An archive's source root is the directory that holds the archive, so the library cannot sit next to that archive inside the same folder. Put the archive in its own directory.
+`--to` is the library. It must not be the source, a folder inside it, or a folder that contains it. An archive's source root, including each part of a multi-part download, is the directory that holds the archives, so the library cannot sit next to those parts inside the same folder. Put the download in its own directory.
 
 `--report` is a new JSONL file outside both trees. An existing report is left as it is.
 
@@ -25,15 +25,23 @@ No account, no network, and no prompt. The command reads the files you named and
 
 A directory is walked with `symlink_metadata`. A symlink is a mismatch and is not followed. Each regular file is opened for read. After the copies, every source file named in the report is hashed again. A changed hash is a mismatch.
 
-An archive is opened with read access only. Zip members are read one at a time. A `.tgz` or `.tar.gz` file is gzip-decoded and read as a tar stream. Member bytes are copied through a fixed buffer. The buffer is not a maximum file size. There is no compiled cap on directory size, member count, or member size.
+An archive is opened with read access only. A multi-part download is a directory of `.zip`, `.tgz`, and `.tar.gz` parts plus CSV files such as `Photo Details.csv` and `Album Details.csv`. Parts are read in file-name order. Zip members are read one at a time. A `.tgz` or `.tar.gz` file is gzip-decoded and read as a tar stream. CSV files are not parsed into a new file. They are copied byte-for-byte and reported as sidecars. Member bytes are copied through a fixed buffer. The buffer is not a maximum file size. There is no compiled cap on directory size, part count, member count, or member size.
 
 The zip central directory is the index the format uses to find members. Payloads are not loaded whole. The importer does not unpack an archive into a temporary tree and does not write next to the archive.
 
-Before any copy, an archive is hashed with SHA-256. After the last member, it is hashed again. A changed hash is a mismatch.
+Before any copy, an archive is hashed with SHA-256. After the last member, it is hashed again. A changed hash is a mismatch. A directory that is not a multi-part download is hashed again file by file after the copy. A generated metadata sidecar is not a source file, so that second pass does not look for it in the library.
 
 Directory entries are not files and are not counted. Symlinks and other non-regular members are counted as mismatches and are not created in the library. A member path that is absolute, contains `..`, a backslash, a drive prefix, or any other unsafe component is not joined onto the destination, and that member is a mismatch. A `.` component is ignored. An escape is never a silent skip: the report records it and the process exits non-zero.
 
-Package files inside a Photos library, including SQLite and other non-media files, are copied too. Dropping them would make the count in differ from the count out.
+Package files inside a Photos library, including the database, are copied too. Dropping them would make the count in differ from the count out. The copy of the database is the bytes from the library. It is not a rewrite.
+
+## Album, favorite, and caption
+
+When the copy contains `database/Photos.sqlite` or `Photos.sqlite` and the file is a SQLite database, Albumen opens it with the URI query `mode=ro&immutable=1` and sets `PRAGMA query_only=ON`. Immutable mode does not create `Photos.sqlite-wal` or `Photos.sqlite-shm`, does not apply a journal, and does not write the database. The library file is left as it was, then copied byte-for-byte with the rest of the tree.
+
+Album names, a favorite mark, and a caption are written next to the original as `{filename}.albumen.json`. The JSON is a new sidecar. It is not written into the original and it is not written back into the Photos database. A file with no favorite, no caption, and no album does not get an empty sidecar. Album names are kept in full and sorted. The sidecar's file mtime is the original's mtime, not a capture time parsed from the database.
+
+A Photos library whose database is not SQLite, such as a stand-in file in a test, is copied as a file and does not grow a metadata sidecar. A database that names a photo that was not copied is a mismatch.
 
 ## copy_verify
 
@@ -58,14 +66,14 @@ The source-relative path is the destination path. An edited render stays beside 
 
 | Path | Report `kind` |
 | --- | --- |
-| `.aae` or `.xmp`, any case | `sidecar` |
+| `.aae`, `.xmp`, `.csv`, or `.albumen.json` | `sidecar` |
 | A path component `renders`, `derivatives`, or `edited`, or a file name stem ending in `-edited` | `edited` |
 | A still, video, or RAW name, or a path under `originals` or `Masters` | `original` |
 | Anything else that was still copied | `file` |
 
 A Live Photo is the still and the video that share a file-name stem. The report records `live_photo_stem` on `.jpg`, `.jpeg`, `.heic`, `.heif`, `.hif`, `.png`, `.tif`, `.tiff`, `.avif`, `.webp`, `.mov`, `.mp4`, and `.m4v`. Both files are copied. Neither is derived from the other.
 
-A sidecar's `partner_stem` is the file name with `.xmp` or `.aae` removed, and with a trailing media extension removed when one is there. `IMG_0001.HEIC.xmp` and `IMG_0001.AAE` both partner `IMG_0001`.
+A sidecar's `partner_stem` is the file name with `.xmp`, `.aae`, or `.albumen.json` removed, and with a trailing media extension removed when one is there. `IMG_0001.HEIC.xmp`, `IMG_0001.AAE`, and `IMG_0001.HEIC.albumen.json` all partner `IMG_0001`. A Photo Details CSV describes the download, not one file, so its `partner_stem` is empty.
 
 `DateTimeOriginal` is sidecar metadata. While the report is written, the importer scans the stored sidecar for that key and the timestamp token that follows it. The token is a column on the sidecar's report line. It is not written into EXIF, XMP, IPTC, the file's mtime, or any other byte of an original. A sidecar with no `DateTimeOriginal` stays without one. Albumen does not invent a capture time and does not open an original for write.
 

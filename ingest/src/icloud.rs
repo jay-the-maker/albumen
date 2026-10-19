@@ -2,12 +2,15 @@
 
 //! iCloud Photos import.
 //!
-//! A Photos export, an iCloud download archive, or a copied Photos library is
-//! opened read-only. Every regular file is `copy_verify`'d. Originals and
-//! edited renders are both kept, byte for byte. Live Photo stills and videos
-//! stay side by side, and AAE and XMP sidecars are copied as stored. A capture
-//! timestamp read from a sidecar is reported there and is never written into
-//! an original.
+//! A Photos export, an iCloud download, or a copied Photos library is opened
+//! read-only. A download may be several zip or tgz parts plus Photo Details
+//! CSVs. Every regular file is `copy_verify`'d. Originals and edited renders
+//! are both kept, byte for byte. Live Photo stills and videos stay side by
+//! side, and AAE, XMP, and Photo Details CSVs are copied as stored. Album,
+//! favorite, and caption metadata from a Photos library is exported beside
+//! the original. The library database is opened `mode=ro&immutable=1` and is
+//! never written. A capture timestamp read from a sidecar is reported there
+//! and is never written into an original.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -48,9 +51,11 @@ struct ReportFile {
 
 /// Copy an iCloud Photos download, export, or Photos library into `to`.
 ///
-/// `from` is a directory (an export folder or a `.photoslibrary` bundle) or
-/// one `.zip`, `.tgz`, or `.tar.gz` archive. The destination must not overlap
-/// that source. `report` is a new JSONL file outside both.
+/// `from` is a directory or one `.zip`, `.tgz`, or `.tar.gz` archive. A
+/// directory of archives and CSV files is a multi-part iCloud download. Any
+/// other directory is an export folder or a `.photoslibrary` bundle. The
+/// destination must not overlap that source. `report` is a new JSONL file
+/// outside both.
 ///
 /// The function returns [`IngestError::IcloudReconciliation`] when any file is
 /// missing or hashed differently, when a source changes, or when there is
@@ -111,16 +116,37 @@ pub fn import_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudRepo
             }))?;
         }
     } else if source_meta.is_dir() {
-        if let Err(err) = import_tree(from, to, &mut report_file, &mut counters) {
-            fatal = Some(err);
-        } else {
-            match confirm_tree(from, &mut report_file, &mut counters) {
-                Ok(still) => sources_unchanged = still,
-                Err(err) => {
+        match is_download_dir(from) {
+            Ok(true) => {
+                if let Err(err) = import_download(
+                    from,
+                    to,
+                    &mut report_file,
+                    &mut counters,
+                    &mut sources_unchanged,
+                ) {
                     fatal = Some(err);
-                    sources_unchanged = false;
                 }
             }
+            Ok(false) => {
+                if let Err(err) = import_tree(from, to, &mut report_file, &mut counters) {
+                    fatal = Some(err);
+                } else {
+                    if let Err(err) =
+                        export_library_metadata(from, to, &mut report_file, &mut counters)
+                    {
+                        fatal = Some(err);
+                    }
+                    match confirm_tree(from, &mut report_file, &mut counters) {
+                        Ok(still) => sources_unchanged = still,
+                        Err(err) => {
+                            fatal = Some(err);
+                            sources_unchanged = false;
+                        }
+                    }
+                }
+            }
+            Err(err) => fatal = Some(err),
         }
     } else {
         return Err(IngestError::NotAFile(from.to_path_buf()));
@@ -161,6 +187,249 @@ pub fn import_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudRepo
         mismatched: counters.mismatched,
         report: report.to_path_buf(),
     })
+}
+
+fn is_download_dir(root: &Path) -> Result<bool, IngestError> {
+    fn walk(dir: &Path, archives: &mut bool, other: &mut bool) -> Result<(), IngestError> {
+        if *other {
+            return Ok(());
+        }
+        let mut names = Vec::new();
+        for entry in fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))? {
+            let entry = entry.map_err(|err| IngestError::io(dir, err))?;
+            names.push(entry.file_name());
+        }
+        names.sort();
+        for name in names {
+            if *other {
+                break;
+            }
+            let path = dir.join(&name);
+            let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
+            if meta.file_type().is_symlink() || meta.is_dir() {
+                if meta.is_dir() {
+                    walk(&path, archives, other)?;
+                }
+                continue;
+            }
+            if !meta.is_file() {
+                *other = true;
+                break;
+            }
+            if is_archive_name(&path) {
+                *archives = true;
+            } else if !is_csv_name(&path) {
+                *other = true;
+            }
+        }
+        Ok(())
+    }
+    let mut archives = false;
+    let mut other = false;
+    walk(root, &mut archives, &mut other)?;
+    Ok(archives && !other)
+}
+
+fn is_archive_name(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".zip") || name.ends_with(".tgz") || name.ends_with(".tar.gz")
+}
+
+fn is_csv_name(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+}
+
+fn import_download(
+    root: &Path,
+    dest_root: &Path,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+    sources_unchanged: &mut bool,
+) -> Result<(), IngestError> {
+    let archive_name = file_name_str(root).unwrap_or_else(|_| root.display().to_string());
+    let mut files = Vec::new();
+    collect_download(root, "", &mut files)?;
+    files.sort();
+    for (relative, path) in files {
+        let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
+        if meta.file_type().is_symlink() {
+            counters.count_in = counters.count_in.saturating_add(1);
+            counters.mismatched = counters.mismatched.saturating_add(1);
+            report.line(&json!({
+                "kind": "file",
+                "archive": archive_name,
+                "member": relative,
+                "destination": "",
+                "sha256": "",
+                "bytes": 0,
+                "status": "mismatch",
+                "detail": "refusing to follow a symlink",
+            }))?;
+            continue;
+        }
+        if is_archive_name(&path) {
+            seal_archive(&path, dest_root, report, counters, sources_unchanged)?;
+        } else {
+            Session {
+                label: root,
+                archive_name: &archive_name,
+                dest_root,
+                report,
+                counters,
+                on_disk: true,
+            }
+            .place_file(&path, &relative)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_download(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<(), IngestError> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))? {
+        let entry = entry.map_err(|err| IngestError::io(dir, err))?;
+        names.push(entry.file_name());
+    }
+    names.sort();
+    for name in names {
+        let Some(name) = name.to_str() else {
+            return Err(IngestError::store(
+                "icloud",
+                dir.display().to_string(),
+                "filename is not UTF-8",
+            ));
+        };
+        let path = dir.join(name);
+        let relative = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            collect_download(&path, &relative, out)?;
+            continue;
+        }
+        out.push((relative, path));
+    }
+    Ok(())
+}
+
+fn seal_archive(
+    path: &Path,
+    dest_root: &Path,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+    sources_unchanged: &mut bool,
+) -> Result<(), IngestError> {
+    let before = sha256_file(path)?;
+    let before_len = fs::metadata(path)
+        .map_err(|err| IngestError::io(path, err))?
+        .len();
+    let name = file_name_str(path)?;
+    report.line(&json!({
+        "kind": "archive",
+        "archive": name,
+        "sha256": to_hex(&before),
+        "bytes": before_len,
+        "status": "sealed",
+    }))?;
+    import_archive(path, dest_root, report, counters)?;
+    let after = sha256_file(path)?;
+    let after_len = fs::metadata(path)
+        .map_err(|err| IngestError::io(path, err))?
+        .len();
+    if after != before || after_len != before_len {
+        *sources_unchanged = false;
+        counters.mismatched = counters.mismatched.saturating_add(1);
+        report.line(&json!({
+            "kind": "archive",
+            "archive": name,
+            "sha256": to_hex(&after),
+            "bytes": after_len,
+            "status": "mismatch",
+            "detail": format!("archive bytes changed; before {}", to_hex(&before)),
+        }))?;
+    }
+    Ok(())
+}
+
+fn export_library_metadata(
+    root: &Path,
+    dest_root: &Path,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+) -> Result<(), IngestError> {
+    let archive_name = file_name_str(root).unwrap_or_else(|_| root.display().to_string());
+    crate::photos_library::for_each_metadata(root, |row| match row {
+        crate::photos_library::MetaRow::Missing { filename } => {
+            counters.count_in = counters.count_in.saturating_add(1);
+            counters.mismatched = counters.mismatched.saturating_add(1);
+            report.line(&json!({
+                "kind": "sidecar",
+                "archive": archive_name,
+                "member": filename,
+                "destination": "",
+                "sha256": "",
+                "bytes": 0,
+                "status": "mismatch",
+                "on_disk": false,
+                "detail": "photos library metadata names a file that was not copied",
+            }))
+        }
+        crate::photos_library::MetaRow::Ready {
+            relative,
+            favorite,
+            caption,
+            albums,
+        } => {
+            let bytes = metadata_json(&relative, favorite, caption.as_deref(), &albums)?;
+            let member = format!("{relative}.albumen.json");
+            let mtime = crate::mtime::mtime_of(&root.join(&relative))?;
+            Session {
+                label: root,
+                archive_name: &archive_name,
+                dest_root,
+                report,
+                counters,
+                on_disk: false,
+            }
+            .place_reader(&mut std::io::Cursor::new(bytes), &member, Some(mtime))
+        }
+    })
+}
+
+fn metadata_json(
+    partner: &str,
+    favorite: bool,
+    caption: Option<&str>,
+    albums: &[String],
+) -> Result<Vec<u8>, IngestError> {
+    let mut map = serde_json::Map::new();
+    if !albums.is_empty() {
+        map.insert("albums".to_string(), json!(albums));
+    }
+    if let Some(caption) = caption {
+        map.insert("caption".to_string(), json!(caption));
+    }
+    if favorite {
+        map.insert("favorite".to_string(), json!(true));
+    }
+    map.insert("partner".to_string(), json!(partner));
+    let mut bytes = serde_json::to_vec(&serde_json::Value::Object(map))
+        .map_err(|err| IngestError::store("icloud", partner.to_string(), err))?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 fn import_archive(
@@ -250,6 +519,7 @@ fn import_zip(
             dest_root,
             report,
             counters,
+            on_disk: false,
         }
         .place_reader(entry, &member_name, mtime)?;
     }
@@ -318,6 +588,7 @@ fn import_tgz(
             dest_root,
             report,
             counters,
+            on_disk: false,
         }
         .place_reader(&mut entry, &member_name, mtime)?;
     }
@@ -447,6 +718,7 @@ fn walk_tree(
                 dest_root,
                 report,
                 counters,
+                on_disk: true,
             }
             .place_file(&path, &relative)?;
         }
@@ -469,7 +741,8 @@ fn confirm_tree(
         let value: serde_json::Value = serde_json::from_str(&line).map_err(|err| {
             IngestError::store("icloud-report", report.path.display().to_string(), err)
         })?;
-        if value.get("summary").is_some() || value["kind"] == "archive" {
+        if value.get("summary").is_some() || value["kind"] == "archive" || value["on_disk"] == false
+        {
             continue;
         }
         let Some(sha) = value["sha256"].as_str() else {
@@ -523,6 +796,7 @@ struct Session<'a> {
     dest_root: &'a Path,
     report: &'a mut ReportFile,
     counters: &'a mut Counters,
+    on_disk: bool,
 }
 
 struct Filed<'a> {
@@ -541,6 +815,7 @@ struct Note<'a> {
     status: &'a str,
     capture_time: Option<&'a str>,
     detail: Option<&'a str>,
+    on_disk: bool,
 }
 
 impl Session<'_> {
@@ -721,6 +996,7 @@ impl Session<'_> {
             status: filed.status,
             capture_time: captured.as_deref(),
             detail: None,
+            on_disk: self.on_disk,
         })
     }
 
@@ -770,6 +1046,7 @@ impl Session<'_> {
             status: "mismatch",
             capture_time: None,
             detail: Some(detail),
+            on_disk: self.on_disk,
         })
     }
 
@@ -795,8 +1072,14 @@ impl Session<'_> {
             line["partner_stem"] = json!(sidecar_partner_stem(note.member));
             line["capture_time"] = json!(note.capture_time);
         }
+        if !note.on_disk {
+            line["on_disk"] = json!(false);
+        }
         if let Some(detail) = note.detail {
             line["detail"] = json!(detail);
+        } else if note.member.to_ascii_lowercase().ends_with(".albumen.json") {
+            line["detail"] =
+                json!("photos library metadata export; source database was not modified");
         }
         self.report.line(&line)
     }
@@ -805,7 +1088,11 @@ impl Session<'_> {
 fn kind_of(member: &str) -> &'static str {
     let name = member.rsplit('/').next().unwrap_or(member);
     let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".aae") || lower.ends_with(".xmp") {
+    if lower.ends_with(".aae")
+        || lower.ends_with(".xmp")
+        || lower.ends_with(".albumen.json")
+        || lower.ends_with(".csv")
+    {
         return "sidecar";
     }
     if is_edited_path(member) {
@@ -872,7 +1159,9 @@ fn live_photo_stem(member: &str) -> Option<&str> {
 fn sidecar_partner_stem(name: &str) -> Option<String> {
     let file = name.rsplit('/').next().unwrap_or(name);
     let lower = file.to_ascii_lowercase();
-    let stem = if lower.ends_with(".xmp") || lower.ends_with(".aae") {
+    let stem = if lower.ends_with(".albumen.json") {
+        &file[..file.len() - ".albumen.json".len()]
+    } else if lower.ends_with(".xmp") || lower.ends_with(".aae") {
         &file[..file.len() - 4]
     } else {
         return None;
@@ -1411,5 +1700,174 @@ mod tests {
             import_icloud(&from, &from.join("out"), &tmp.path().join("report.jsonl")).unwrap_err();
         assert!(matches!(err, IngestError::Store { .. }), "{err}");
         assert!(!from.join("out").exists());
+    }
+
+    #[test]
+    fn multipart_download_keeps_photo_details_byte_exact() {
+        let tmp = Tmp::new();
+        let incoming = tmp.path().join("iCloud Photos");
+        fs::create_dir(&incoming).unwrap();
+        let first = b"synthetic-part-one-heic";
+        let second = b"synthetic-part-two-heic";
+        let photo_csv = b"imgName,favorite,caption\nIMG_0001.HEIC,yes,synthetic caption\n";
+        let album_csv = b"album,photo\nSynthetic Album,IMG_0002.HEIC\n";
+        write_zip_part(
+            &incoming.join("iCloud Photos.zip"),
+            &[("iCloud Photos/IMG_0001.HEIC", first)],
+        );
+        write_zip_part(
+            &incoming.join("iCloud Photos-1.zip"),
+            &[("iCloud Photos/IMG_0002.HEIC", second)],
+        );
+        fs::write(incoming.join("Photo Details.csv"), photo_csv).unwrap();
+        fs::write(incoming.join("Album Details.csv"), album_csv).unwrap();
+        let zip_before = fs::read(incoming.join("iCloud Photos.zip")).unwrap();
+        let zip2_before = fs::read(incoming.join("iCloud Photos-1.zip")).unwrap();
+
+        let to = tmp.path().join("library");
+        let report = tmp.path().join("report.jsonl");
+        let outcome = import_icloud(&incoming, &to, &report).unwrap();
+        assert_eq!(outcome.count_in, 4);
+        assert_eq!(outcome.count_out, 4);
+        assert_eq!(
+            fs::read(to.join("iCloud Photos/IMG_0001.HEIC")).unwrap(),
+            first
+        );
+        assert_eq!(
+            fs::read(to.join("iCloud Photos/IMG_0002.HEIC")).unwrap(),
+            second
+        );
+        assert_eq!(fs::read(to.join("Photo Details.csv")).unwrap(), photo_csv);
+        assert_eq!(fs::read(to.join("Album Details.csv")).unwrap(), album_csv);
+        assert_eq!(
+            fs::read(incoming.join("iCloud Photos.zip")).unwrap(),
+            zip_before
+        );
+        assert_eq!(
+            fs::read(incoming.join("iCloud Photos-1.zip")).unwrap(),
+            zip2_before
+        );
+        assert!(!incoming.join("iCloud Photos").exists());
+        let report_text = fs::read_to_string(&report).unwrap();
+        let csv_line = report_text
+            .lines()
+            .find(|line| line.contains("Photo Details.csv"))
+            .unwrap();
+        assert!(csv_line.contains("\"kind\":\"sidecar\""), "{csv_line}");
+        assert!(report_text.contains("\"count_in\":4"));
+        assert!(report_text.contains("\"sources_unchanged\":true"));
+    }
+
+    #[test]
+    fn photos_library_metadata_is_a_read_only_sidecar() {
+        let tmp = Tmp::new();
+        let from = tmp.path().join("Photos Library.photoslibrary");
+        let heic = b"synthetic-library-heic-original";
+        let plain = b"synthetic-library-heic-unmarked";
+        write_stamped(&from.join("originals/0/IMG_0001.HEIC"), heic);
+        write_stamped(&from.join("originals/0/IMG_0002.HEIC"), plain);
+        let db_path = from.join("database/Photos.sqlite");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "
+            CREATE TABLE ZASSET (
+                Z_PK INTEGER PRIMARY KEY,
+                ZFILENAME TEXT,
+                ZDIRECTORY TEXT,
+                ZFAVORITE INTEGER
+            );
+            CREATE TABLE ZADDITIONALASSETATTRIBUTES (
+                Z_PK INTEGER PRIMARY KEY,
+                ZASSET INTEGER,
+                ZTITLE TEXT
+            );
+            CREATE TABLE ZGENERICALBUM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZTITLE TEXT
+            );
+            CREATE TABLE Z_1ASSETS (
+                Z_1ALBUMS INTEGER,
+                Z_2ASSETS INTEGER
+            );
+            INSERT INTO ZASSET (Z_PK, ZFILENAME, ZDIRECTORY, ZFAVORITE) VALUES
+                (1, 'IMG_0001.HEIC', '0', 1),
+                (2, 'IMG_0002.HEIC', '0', 0);
+            INSERT INTO ZADDITIONALASSETATTRIBUTES (Z_PK, ZASSET, ZTITLE) VALUES
+                (1, 1, 'synthetic caption');
+            INSERT INTO ZGENERICALBUM (Z_PK, ZTITLE) VALUES
+                (7, 'Zebra'),
+                (3, 'Album A');
+            INSERT INTO Z_1ASSETS (Z_1ALBUMS, Z_2ASSETS) VALUES
+                (7, 1),
+                (3, 1);
+            ",
+        )
+        .unwrap();
+        drop(db);
+        let before = snapshot(&from);
+        lock_readonly(&from);
+
+        let to = tmp.path().join("library");
+        let report = tmp.path().join("report.jsonl");
+        let outcome = import_icloud(&from, &to, &report).unwrap();
+        assert_eq!(
+            outcome.count_in, 4,
+            "two originals, the database, and one metadata sidecar"
+        );
+        assert_eq!(outcome.count_out, 4);
+        assert_eq!(
+            fs::read(to.join("originals/0/IMG_0001.HEIC")).unwrap(),
+            heic
+        );
+        assert_eq!(
+            fs::read(to.join("originals/0/IMG_0002.HEIC")).unwrap(),
+            plain
+        );
+        assert!(!heic.windows(8).any(|window| window == b"favorite"));
+        assert!(!heic.windows(8).any(|window| window == b"caption"));
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &fs::read(to.join("originals/0/IMG_0001.HEIC.albumen.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["favorite"], true);
+        assert_eq!(sidecar["caption"], "synthetic caption");
+        assert_eq!(sidecar["albums"], serde_json::json!(["Album A", "Zebra"]));
+        assert_eq!(sidecar["partner"], "originals/0/IMG_0001.HEIC");
+        assert!(!to.join("originals/0/IMG_0002.HEIC.albumen.json").exists());
+        assert_eq!(snapshot(&from), before);
+        assert!(!from.join("database/Photos.sqlite-wal").exists());
+        assert!(!from.join("database/Photos.sqlite-shm").exists());
+        let lines = fs::read_to_string(&report).unwrap();
+        let meta = lines
+            .lines()
+            .find(|line| line.contains("IMG_0001.HEIC.albumen.json"))
+            .unwrap();
+        assert!(meta.contains("\"kind\":\"sidecar\""), "{meta}");
+        assert!(meta.contains("\"partner_stem\":\"IMG_0001\""), "{meta}");
+        assert!(meta.contains("\"on_disk\":false"), "{meta}");
+        assert!(lines.contains("\"count_in\":4"));
+
+        let again = tmp.path().join("report-again.jsonl");
+        let second = import_icloud(&from, &to, &again).unwrap();
+        assert_eq!(second.count_in, second.count_out);
+        assert_eq!(snapshot(&from), before);
+        assert_eq!(
+            fs::read(to.join("originals/0/IMG_0001.HEIC.albumen.json")).unwrap(),
+            fs::read(to.join("originals/0/IMG_0001.HEIC.albumen.json")).unwrap()
+        );
+    }
+
+    fn write_zip_part(path: &Path, files: &[(&str, &[u8])]) {
+        let file = File::create(path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::from_date_and_time(2020, 5, 20, 16, 0, 0).unwrap());
+        for (name, bytes) in files {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
     }
 }
