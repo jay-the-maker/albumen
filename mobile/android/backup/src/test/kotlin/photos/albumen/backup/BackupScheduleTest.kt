@@ -48,6 +48,7 @@ class BackupScheduleTest {
         assertEquals(NetworkType.CONNECTED, spec.constraints.requiredNetworkType)
         assertEquals(TimeUnit.MINUTES.toMillis(15), spec.intervalDuration)
         assertFalse(spec.expedited)
+        assertTrue(spec.input.getBoolean(CameraRollBackupWorker.KEY_PERIODIC, false))
     }
 
     @Test

@@ -27,7 +27,7 @@ A pass reads one page (soft default 32, override `pageSize` on `enqueue`) and st
 
 ## Verify and retry
 
-The PUT is WebDAV to the receiver root, with HTTP Basic auth. `201` and a matching `X-Albumen-Sha256` is a new object. `409` and the same digest means those bytes were already stored. A mismatch names both hashes, tries the PUT three times in that pass, and then asks WorkManager to retry with exponential backoff. Three attempts is not a cap on retries across passes. `401` and `403` stop the pass and are shown. They do not spin. There is no read timeout on the body, so a large video is not failed for its size. A receiver that does not accept a connection fails after 30 seconds, and that failure is shown.
+The PUT is WebDAV to the receiver root, with HTTP Basic auth. `201` and a matching `X-Albumen-Sha256` is a new object. `409` and the same digest means those bytes were already stored. A mismatch names both hashes and tries the PUT three times in that pass. Three attempts is not a cap on retries across passes. The first job then asks WorkManager to retry with exponential backoff. The periodic job cannot carry backoff while it requires idle, so the failure stays on screen and the next idle, charging, and network window continues the unfinished items. `401` and `403` stop the pass and are shown. They do not spin. There is no read timeout on the body, so a large video is not failed for its size. A receiver that does not accept a connection fails after 30 seconds, and that failure is shown.
 
 ## Failures
 

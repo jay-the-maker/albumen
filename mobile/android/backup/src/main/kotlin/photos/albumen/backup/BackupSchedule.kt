@@ -65,7 +65,6 @@ object BackupSchedule {
         TimeUnit.MINUTES,
     )
         .setConstraints(periodicConstraints())
-        .setInputData(backupInput(endpoint, user, password, pageSize, budgetMillis))
-        .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+        .setInputData(backupInput(endpoint, user, password, pageSize, budgetMillis, periodic = true))
         .build()
 }

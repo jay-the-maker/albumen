@@ -52,9 +52,11 @@ class CameraRollBackupWorker(
                 report = report,
             )
             val output = statusOutput(report.summaryLine())
+            val periodic = inputData.getBoolean(KEY_PERIODIC, false)
             when (disposition) {
                 BackupDisposition.SUCCESS -> Result.success(output)
-                BackupDisposition.RETRY -> Result.retry()
+                // Idle periodic work cannot carry backoff. The next window resumes.
+                BackupDisposition.RETRY -> if (periodic) Result.success(output) else Result.retry()
                 BackupDisposition.FAILURE -> Result.failure(output)
             }
         } catch (thrown: Throwable) {
@@ -79,6 +81,7 @@ class CameraRollBackupWorker(
         const val KEY_USER = "user"
         const val KEY_PAGE_SIZE = "pageSize"
         const val KEY_BUDGET_MILLIS = "budgetMillis"
+        const val KEY_PERIODIC = "periodic"
         const val KEY_STATUS = "status"
 
         /**
