@@ -77,10 +77,36 @@ public enum ForegroundUpload {
 
 /// One local notification. The status screen posts this when a pass has a failure.
 public enum BackupNotice {
+    /// iOS keeps 256 UTF-16 units of a notification body. The status screen keeps the full text.
+    public static let maxBodyLength = 256
+
+    /// The notification text for one status screen. The summary with the failure
+    /// count comes first, then each failure line in order. A body over the limit
+    /// ends in an ellipsis instead of losing the count.
+    public static func body(_ message: String) -> String {
+        let lines = message.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        let isSummary: (String) -> Bool = { $0.hasPrefix("Verified ") && $0.contains("Failures ") }
+        let ordered = lines.filter(isSummary) + lines.filter { !isSummary($0) }
+        let joined = ordered.joined(separator: "\n")
+        guard joined.utf16.count > maxBodyLength else {
+            return joined
+        }
+        let ellipsis = "\u{2026}"
+        var shown = ""
+        for character in joined {
+            let next = String(character)
+            if shown.utf16.count + next.utf16.count + ellipsis.utf16.count > maxBodyLength {
+                break
+            }
+            shown += next
+        }
+        return shown + ellipsis
+    }
+
     public static func post(_ message: String, completion: @escaping (Error?) -> Void = { _ in }) {
         let content = UNMutableNotificationContent()
         content.title = "Albumen backup"
-        content.body = message
+        content.body = body(message)
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request, withCompletionHandler: completion)
     }

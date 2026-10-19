@@ -195,9 +195,21 @@ final class SimulatorBackupTests: XCTestCase {
         }
         let notification = await postNotice(screen)
         XCTAssertFalse(notification.isEmpty, "notification was blank")
+        let expected = BackupNotice.body(screen)
+        XCTAssertLessThanOrEqual(expected.utf16.count, BackupNotice.maxBodyLength)
         XCTAssertTrue(
-            notification.contains(line),
-            "notification missing the status line [\(line)]. notification: \(notification)"
+            notification.contains(expected),
+            "notification missing the posted body [\(expected)]. notification: \(notification)"
+        )
+        let summary = try XCTUnwrap(screen.split(separator: "\n").last { $0.hasPrefix("Verified ") })
+        XCTAssertTrue(notification.contains(summary), "notification missing the summary. notification: \(notification)")
+        // The failure line follows the summary. Room is the limit less the summary, a newline, and an ellipsis.
+        let room = BackupNotice.maxBodyLength - summary.utf16.count - 2
+        let shown = line.utf16.count <= room ? String(line) : String(line.prefix(room))
+        XCTAssertTrue(notification.contains(marker), "notification missing [\(marker)]. notification: \(notification)")
+        XCTAssertTrue(
+            notification.contains(shown),
+            "notification missing the status line [\(shown)]. notification: \(notification)"
         )
         XCTAssertGreaterThan(failureCount(notification), 0, "notification: \(notification)")
         XCTAssertFalse(notification.contains("Failures 0."))

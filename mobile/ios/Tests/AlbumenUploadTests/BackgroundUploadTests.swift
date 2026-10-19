@@ -139,6 +139,24 @@ final class BackgroundUploadTests: XCTestCase {
         XCTAssertFalse(UploadFailure.missingPassword.surfaced(identifier: "Backup").contains(secret))
     }
 
+    func testNoticeLeadsWithTheCountAndFitsTheBodyLimit() {
+        let short = BackupStatusText.render(verifiedThisRun: 0, alreadyVerified: 0, failures: ["a.jpg did not finish: refused"])
+        XCTAssertEqual(
+            BackupNotice.body(short),
+            "Verified 0 this run. Already verified 0. Failures 1.\na.jpg did not finish: refused"
+        )
+        let detail = String(repeating: "x", count: 400)
+        let long = BackupStatusText.render(
+            verifiedThisRun: 0,
+            alreadyVerified: 0,
+            failures: ["b.jpg did not finish: \(detail)", "c.jpg did not finish: refused"]
+        )
+        let body = BackupNotice.body(long)
+        XCTAssertEqual(body.utf16.count, BackupNotice.maxBodyLength)
+        XCTAssertTrue(body.hasPrefix("Verified 0 this run. Already verified 0. Failures 2.\nb.jpg did not finish: x"))
+        XCTAssertTrue(body.hasSuffix("\u{2026}"))
+    }
+
     func testDerivativeStaysQueuedUntilThePersonAsksAgain() {
         var queue = UploadQueue()
         queue.noteDerivative(identifier: "id", message: "id still needs the full original. A preview was not uploaded.")
