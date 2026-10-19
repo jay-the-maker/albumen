@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use albumen_ingest::import_takeout;
+use albumen_ingest::{import_icloud, import_takeout};
 use serde_json::{json, Value};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -151,6 +151,45 @@ impl Drop for TempDir {
     }
 }
 
+/// Build a directory of `items` tiny files and time one iCloud import.
+///
+/// Even counts are still/video Live Photo pairs. An odd count adds one still.
+/// The directory is deleted when this function returns. Generation is not timed.
+pub fn measure_icloud(items: u64) -> Result<TakeoutScale, String> {
+    if items == 0 {
+        return Err("icloud item count must be greater than zero".to_string());
+    }
+    let root = TempDir::new()?;
+    let incoming = root.path.join("export");
+    let library = root.path.join("library");
+    let report = root.path.join("report.jsonl");
+    fs::create_dir(&incoming).map_err(|err| format!("create icloud dir: {err}"))?;
+    let pairs = items / 2;
+    let width = decimal_width(pairs.max(1));
+    for index in 0..pairs {
+        let stem = format!("p{index:0width$}");
+        fs::write(incoming.join(format!("{stem}.heic")), b"\xff\xd8\xff\xd9")
+            .map_err(|err| format!("write still: {err}"))?;
+        fs::write(incoming.join(format!("{stem}.mov")), b"synthetic-motion")
+            .map_err(|err| format!("write video: {err}"))?;
+    }
+    if items % 2 == 1 {
+        let name = format!("p{pairs:0width$}.heic");
+        fs::write(incoming.join(name), b"\xff\xd8\xff\xd9")
+            .map_err(|err| format!("write still: {err}"))?;
+    }
+    let started = Instant::now();
+    let outcome = import_icloud(&incoming, &library, &report).map_err(|err| err.to_string())?;
+    let seconds = started.elapsed().as_secs_f64();
+    Ok(TakeoutScale {
+        items,
+        count_in: outcome.count_in,
+        count_out: outcome.count_out,
+        mismatched: outcome.mismatched,
+        seconds,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +199,13 @@ mod tests {
         let scale = measure_takeout(4).unwrap();
         assert!(scale.reconciled(), "{scale:?}");
         assert!(scale.seconds >= 0.0);
+        assert!(scale.seconds < TAKEOUT_BUDGET_SECONDS);
+    }
+
+    #[test]
+    fn a_generated_icloud_export_reconciles() {
+        let scale = measure_icloud(4).unwrap();
+        assert!(scale.reconciled(), "{scale:?}");
         assert!(scale.seconds < TAKEOUT_BUDGET_SECONDS);
     }
 

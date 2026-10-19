@@ -22,6 +22,10 @@ pub(crate) enum MetaRow {
         favorite: bool,
         caption: Option<String>,
         albums: Vec<String>,
+        /// UTC `YYYY-MM-DDTHH:MM:SSZ` from `ZDATECREATED`, when that column exists.
+        capture_time: Option<String>,
+        latitude: Option<f64>,
+        longitude: Option<f64>,
     },
     Missing {
         filename: String,
@@ -54,6 +58,23 @@ pub(crate) fn for_each_metadata(
         let filename: Option<String> = row.get(1).map_err(|err| sqlite_err(&database, err))?;
         let directory: Option<String> = row.get(2).map_err(|err| sqlite_err(&database, err))?;
         let favorite_raw: Option<i64> = row.get(3).map_err(|err| sqlite_err(&database, err))?;
+        let created_raw: Option<f64> = if asset.has_date {
+            row.get(4).map_err(|err| sqlite_err(&database, err))?
+        } else {
+            None
+        };
+        let latitude: Option<f64> = if asset.has_gps {
+            row.get(if asset.has_date { 5 } else { 4 })
+                .map_err(|err| sqlite_err(&database, err))?
+        } else {
+            None
+        };
+        let longitude: Option<f64> = if asset.has_gps {
+            row.get(if asset.has_date { 6 } else { 5 })
+                .map_err(|err| sqlite_err(&database, err))?
+        } else {
+            None
+        };
         let Some(filename) = filename.filter(|name| !name.is_empty()) else {
             continue;
         };
@@ -61,7 +82,17 @@ pub(crate) fn for_each_metadata(
         let caption = caption_for(&lookup, caption_sql.as_deref(), pk, &database)?;
         let albums = albums_for(&lookup, &album_sql, pk, &database)?;
         let caption_present = caption.as_ref().is_some_and(|text| !text.is_empty());
-        if !favorite && !caption_present && albums.is_empty() {
+        let capture_time = created_raw.and_then(apple_timestamp_utc);
+        let gps = match (latitude, longitude) {
+            (Some(lat), Some(lon)) if !(lat == 0.0 && lon == 0.0) => Some((lat, lon)),
+            _ => None,
+        };
+        if !favorite
+            && !caption_present
+            && albums.is_empty()
+            && capture_time.is_none()
+            && gps.is_none()
+        {
             continue;
         }
         let caption = caption.filter(|text| !text.is_empty());
@@ -71,6 +102,9 @@ pub(crate) fn for_each_metadata(
                 favorite,
                 caption,
                 albums,
+                capture_time,
+                latitude: gps.map(|(lat, _)| lat),
+                longitude: gps.map(|(_, lon)| lon),
             })?,
             None => emit(MetaRow::Missing { filename })?,
         }
@@ -80,6 +114,44 @@ pub(crate) fn for_each_metadata(
 
 struct AssetSql {
     select: String,
+    has_date: bool,
+    has_gps: bool,
+}
+
+/// Photos stores `ZDATECREATED` as seconds since 2001-01-01 00:00:00 UTC.
+fn apple_timestamp_utc(seconds: f64) -> Option<String> {
+    if !seconds.is_finite() {
+        return None;
+    }
+    let unix = seconds + 978_307_200.0;
+    if unix < 0.0 {
+        return None;
+    }
+    let secs = unix.floor() as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days)?;
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
+fn civil_from_days(mut z: i64) -> Option<(i32, u32, u32)> {
+    z = z.checked_add(719_468)?;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    let year = i32::try_from(year).ok()?;
+    Some((year, u32::try_from(month).ok()?, u32::try_from(day).ok()?))
 }
 
 fn find_database(root: &Path) -> Option<PathBuf> {
@@ -163,6 +235,9 @@ fn asset_table(conn: &Connection) -> Result<Option<AssetSql>, IngestError> {
     } else {
         "NULL"
     };
+    let has_date = column_exists(conn, table, "ZDATECREATED")?;
+    let has_gps =
+        column_exists(conn, table, "ZLATITUDE")? && column_exists(conn, table, "ZLONGITUDE")?;
     check_ident(table)?;
     if directory != "NULL" {
         check_ident(directory)?;
@@ -170,10 +245,21 @@ fn asset_table(conn: &Connection) -> Result<Option<AssetSql>, IngestError> {
     if favorite != "NULL" {
         check_ident(favorite)?;
     }
+    if has_date {
+        check_ident("ZDATECREATED")?;
+    }
+    let gps_sql = if has_gps {
+        ", ZLATITUDE, ZLONGITUDE"
+    } else {
+        ""
+    };
+    let date_comma = if has_date { ", ZDATECREATED" } else { "" };
     Ok(Some(AssetSql {
         select: format!(
-            "SELECT Z_PK, ZFILENAME, {directory}, {favorite} FROM {table} ORDER BY Z_PK"
+            "SELECT Z_PK, ZFILENAME, {directory}, {favorite}{date_comma}{gps_sql} FROM {table} ORDER BY Z_PK"
         ),
+        has_date,
+        has_gps,
     }))
 }
 
