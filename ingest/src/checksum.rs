@@ -8,6 +8,48 @@ use sha2::{Digest, Sha256};
 
 use crate::error::IngestError;
 
+/// Bytes per read. 8 MiB used no less CPU than 1 MiB on Linux: the bytes
+/// fall out of cache between the read, the hash, and the write.
+const IO_BUF_BYTES: usize = 1024 * 1024;
+
+thread_local! {
+    static SPARE: std::cell::Cell<Option<Vec<u8>>> = const { std::cell::Cell::new(None) };
+}
+
+/// One I/O buffer per thread, reused across files. Reads land in it and
+/// SHA-256 and the write both use those bytes in place. A fresh buffer per
+/// file cost a page fault per 4 KiB page each time.
+struct IoBuf(Vec<u8>);
+
+impl IoBuf {
+    fn take() -> Self {
+        let buf = SPARE
+            .with(|spare| spare.take())
+            .unwrap_or_else(|| vec![0u8; IO_BUF_BYTES]);
+        Self(buf)
+    }
+}
+
+impl Drop for IoBuf {
+    fn drop(&mut self) {
+        let buf = std::mem::take(&mut self.0);
+        SPARE.with(|spare| spare.set(Some(buf)));
+    }
+}
+
+impl std::ops::Deref for IoBuf {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for IoBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
 pub fn sha256_file(path: &Path) -> Result<[u8; 32], IngestError> {
     let file =
         File::open(crate::platform::io_path(path)).map_err(|err| IngestError::io(path, err))?;
@@ -16,7 +58,7 @@ pub fn sha256_file(path: &Path) -> Result<[u8; 32], IngestError> {
 
 pub(crate) fn sha256_reader<R: Read>(mut reader: R, path: &Path) -> Result<[u8; 32], IngestError> {
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut buf = IoBuf::take();
     loop {
         let n = reader
             .read(&mut buf)
@@ -59,7 +101,7 @@ pub(crate) fn copy_hashed<R: Read, W: std::io::Write>(
     dest_path: &Path,
 ) -> Result<[u8; 32], IngestError> {
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut buf = IoBuf::take();
     loop {
         let read_at = crate::copy_profile::tic();
         let n = reader
@@ -93,7 +135,7 @@ pub(crate) fn sha256_readback(path: &Path) -> Result<[u8; 32], IngestError> {
     let mut file =
         File::open(crate::platform::io_path(path)).map_err(|err| IngestError::io(path, err))?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut buf = IoBuf::take();
     loop {
         let read_at = crate::copy_profile::tic();
         let n = file
