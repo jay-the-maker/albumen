@@ -1130,12 +1130,24 @@ mod tests {
     }
 
     #[test]
-    fn the_cpu_gate_passes_the_measured_legs_and_fails_above_three() {
-        // #112 on 2026-10-19: ubuntu-24.04, ubuntu-26.04, windows-2025, macos-14.
-        for measured in [1.863, 2.790, 2.932, 1.935] {
-            assert!(cpu_gate_passes(measured), "{measured}");
+    fn the_cpu_gate_reads_normalized_cpu_and_fails_above_three() {
+        // #122 on 2026-10-19: (raw, hash + readback_hash s/GB, sha256_mb_s).
+        let windows = normalized_cpu_seconds_per_gb(3.054, 0.993, 1578.0);
+        let ubuntu = normalized_cpu_seconds_per_gb(2.326, 1.293, 1585.0);
+        let fast_sha = normalized_cpu_seconds_per_gb(1.758, 1.059, 2179.0);
+        let macos = normalized_cpu_seconds_per_gb(3.388, 1.340, 1406.0);
+        for (leg, expected) in [
+            (windows, 2.932),
+            (ubuntu, 2.172),
+            (fast_sha, 1.981),
+            (macos, 3.095),
+        ] {
+            assert!((leg - expected).abs() < 0.001, "{leg} vs {expected}");
         }
-        assert!(cpu_gate_passes(3.0));
+        // Raw 3.054 would fail; normalized it passes. macOS fails until cut.
+        assert!(!cpu_gate_passes(3.054));
+        assert!(cpu_gate_passes(windows) && cpu_gate_passes(ubuntu) && cpu_gate_passes(fast_sha));
+        assert!(!cpu_gate_passes(macos));
         assert!(cpu_gate_passes(3.0004));
         assert!(!cpu_gate_passes(3.001));
         assert!(!cpu_gate_passes(f64::NAN));
