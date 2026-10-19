@@ -13,7 +13,13 @@ use std::time::SystemTime;
 use crate::error::IngestError;
 
 pub fn create_dir_all(path: &Path) -> Result<(), IngestError> {
-    fs::create_dir_all(path).map_err(|err| IngestError::io(path, err))
+    match fs::create_dir_all(path) {
+        Ok(()) => Ok(()),
+        // Windows can deny CreateDirectory on a directory that already exists,
+        // including the process temp root. The directory is there.
+        Err(_) if path.is_dir() => Ok(()),
+        Err(err) => Err(IngestError::io(path, err)),
+    }
 }
 
 pub fn create_file(path: &Path) -> Result<File, IngestError> {

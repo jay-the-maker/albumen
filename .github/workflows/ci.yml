@@ -24,6 +24,7 @@ jobs:
         # 24.04 is the pinned image. 26.04 stays in the matrix only while
         # that leg is green. macos-14 is the arm64 leg and runs the same
         # suite, including MinIO and rclone round-trips, from pinned binaries.
+        # windows-2025 is the pinned Windows image. It is not windows-latest.
         include:
           - os: ubuntu-24.04
             label: ubuntu-24.04
@@ -34,7 +35,19 @@ jobs:
           - os: macos-14
             label: macos-14 (arm64)
             timeout: 60
+          - os: windows-2025
+            label: windows-2025
+            timeout: 90
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Keep LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -64,7 +77,7 @@ jobs:
         run: scripts/with-minio.sh cargo test --locked --all-targets
 
   android:
-    name: android camera-roll skeleton
+    name: android camera-roll backup
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -81,6 +94,36 @@ jobs:
       - name: Compile and test the backup library
         run: scripts/android-ci.sh
 
+  android-emulator:
+    name: android camera-roll emulator
+    # This job uses ubuntu-latest for KVM. The other jobs stay on ubuntu-24.04.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Java for the Android SDK
+        run: |
+          if ! command -v java >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y openjdk-17-jdk-headless unzip
+          fi
+          java -version
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: MediaStore original on an API 30 emulator
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 30
+          target: aosp_atd
+          arch: x86_64
+          script: scripts/android-emulator-connected.sh
+
   ios:
     name: ios camera-roll skeleton
     runs-on: macos-14
@@ -90,6 +133,16 @@ jobs:
 
       - name: Build and test the PhotoKit package
         run: swift test --package-path mobile/ios
+
+  ios-xcode:
+    name: ios background upload
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the host and the background upload extension
+        run: scripts/ios-xcode.sh
 
   mcp-image:
     name: albumen-mcp image

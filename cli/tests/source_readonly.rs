@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Every `albumen` command leaves a source tree byte-for-byte identical.
+//!
+//! Unix only: the proof records mode and extended attributes, and the
+//! `xattr` crate does not build on Windows.
+
+#![cfg(unix)]
 
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};

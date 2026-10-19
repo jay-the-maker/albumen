@@ -7,19 +7,26 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use albumen_ingest::{
-    copy_verify, discover, sha256_hex, BlobStore, IngestError, LocalStore, RcloneStore, S3Config,
-    S3Store,
+    copy_verify, discover, exiftool_command, sha256_hex, BlobStore, IngestError, LocalStore,
+    RcloneStore, S3Config, S3Store,
 };
 use serde_json::{Map, Value};
 
 /// Tags that describe the filesystem location rather than the original.
 /// FileModifyDate, FileName, and FileSize are not in this list: they must survive.
+///
+/// `FileCreateDate` is the name ExifTool uses on Windows for the creation time
+/// it reads from the same stat field Unix reports as `FileInodeChangeDate`.
+/// `ZoneIdentifier` is the NTFS `Zone.Identifier` stream. A byte copy does not
+/// carry that stream. Neither tag is embedded EXIF, XMP, IPTC, GPS, or QuickTime.
 const VOLATILE_TAGS: &[&str] = &[
     "SourceFile",
     "System:Directory",
     "System:FileAccessDate",
     "System:FileInodeChangeDate",
+    "System:FileCreateDate",
     "System:FilePermissions",
+    "System:ZoneIdentifier",
 ];
 
 struct Case {
@@ -152,7 +159,7 @@ fn round_trip_store(store: &impl BlobStore) {
     fs::write(&probe, b"probe-bytes-not-a-photo").expect("probe bytes");
     let file = OpenOptions::new().write(true).open(&probe).expect("probe");
     file.set_times(
-        FileTimes::new().set_modified(UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789)),
+        FileTimes::new().set_modified(UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_700)),
     )
     .expect("probe mtime");
     drop(file);
@@ -204,6 +211,8 @@ fn start_serve(kind: &str, bin: &Path) -> RcloneServe {
     fs::create_dir(&root).expect("serve root");
     let log_path = keep.path().join("serve.log");
     let log = std::fs::File::create(&log_path).expect("serve log");
+    let config = keep.path().join("rclone.conf");
+    fs::write(&config, b"").expect("empty rclone config");
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .expect("port")
         .local_addr()
@@ -211,7 +220,7 @@ fn start_serve(kind: &str, bin: &Path) -> RcloneServe {
         .port();
     let mut child = Command::new(bin)
         .arg("--config")
-        .arg("/dev/null")
+        .arg(&config)
         .arg("serve")
         .arg(kind)
         .arg(&root)
@@ -294,7 +303,7 @@ fn stage_case(case: &Case) -> Stage {
         let name = source.file_name().expect("fixture name");
         let dest = dir.join(name);
         fs::copy(&source, &dest).expect("stage copy");
-        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000 + (index as u64) * 3_600, 123_456_789);
+        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000 + (index as u64) * 3_600, 123_456_700);
         let file = OpenOptions::new().write(true).open(&dest).expect("open");
         file.set_times(FileTimes::new().set_modified(mtime))
             .expect("set mtime");
@@ -387,7 +396,7 @@ fn assert_exif_eq(source: &Path, dest: &Path) {
 }
 
 fn exif_dump(path: &Path) -> Value {
-    let output = Command::new("exiftool")
+    let output = exiftool_command()
         .args([
             "-j",
             "-G1",

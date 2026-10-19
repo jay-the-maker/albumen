@@ -157,13 +157,14 @@ pub(crate) fn finalize_verified(
         ));
     }
 
-    set_mtime(path, mtime)?;
+    let expected_mtime = crate::mtime::representable_mtime(mtime);
+    set_mtime(path, expected_mtime)?;
     let stored_mtime = mtime_of(path)?;
-    if stored_mtime != mtime {
+    if stored_mtime != expected_mtime {
         let removed = dest::remove_file(path).is_ok();
         return Err(IngestError::MtimeNotPreserved {
             filename: filename.to_string(),
-            expected_unix_nanos: to_unix_nanos_string(mtime),
+            expected_unix_nanos: to_unix_nanos_string(expected_mtime),
             actual_unix_nanos: to_unix_nanos_string(stored_mtime),
             destination: path.display().to_string(),
             removed,
@@ -201,7 +202,24 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     fn fixed_mtime() -> std::time::SystemTime {
-        UNIX_EPOCH + Duration::new(1_339_746_000, 123_456_789)
+        // 100 ns aligned so NTFS can store this exact tick.
+        UNIX_EPOCH + Duration::new(1_339_746_000, 123_456_700)
+    }
+
+    #[test]
+    fn copy_keeps_the_finest_mtime_the_filesystem_stores() {
+        let tmp = Tmp::new();
+        let requested = UNIX_EPOCH + Duration::new(1_339_746_000, 123_456_789);
+        let src_dir = tmp.path().join("src");
+        fs::create_dir(&src_dir).unwrap();
+        let source = write_file(&src_dir, "tick.jpg", b"tick-bytes", requested);
+        let stored = mtime_of(&source).unwrap();
+        assert_eq!(stored, crate::mtime::representable_mtime(requested));
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&dest_dir).unwrap();
+        copy_verify_file(&source, &dest_dir).unwrap();
+        assert_eq!(mtime_of(&dest_dir.join("tick.jpg")).unwrap(), stored);
+        assert_eq!(fs::read(dest_dir.join("tick.jpg")).unwrap(), b"tick-bytes");
     }
 
     #[test]
@@ -296,5 +314,34 @@ mod tests {
         );
         assert_eq!(fs::read(&source).unwrap(), b"alpha");
         assert_eq!(fs::read(&link).unwrap(), b"alpha");
+    }
+
+    #[test]
+    fn copy_allows_a_sibling_library() {
+        let tmp = Tmp::new();
+        let export = tmp.path().join("export");
+        fs::create_dir(&export).unwrap();
+        for index in 0..8 {
+            write_file(
+                &export,
+                &format!("p{index}.heic"),
+                b"\xff\xd8\xff\xd9",
+                fixed_mtime(),
+            );
+        }
+        let library = tmp.path().join("library");
+        fs::create_dir(&library).unwrap();
+        let root = crate::source::SourceRoot::open(&export).unwrap();
+        root.refuse_destination(&library).unwrap();
+        let copied = copy_verify_file(&export.join("p0.heic"), &library).unwrap();
+        assert_eq!(copied.byte_len, 4);
+        assert_eq!(
+            fs::read(library.join("p0.heic")).unwrap(),
+            b"\xff\xd8\xff\xd9"
+        );
+        assert_eq!(
+            fs::read(export.join("p0.heic")).unwrap(),
+            b"\xff\xd8\xff\xd9"
+        );
     }
 }

@@ -1,11 +1,13 @@
-# Android camera-roll skeleton
+# Android camera-roll backup
 
-`backup` is the camera-roll library. `host` is the application that requests its permissions. `CameraRoll` opens each MediaStore image and video with `MediaStore.setRequireOriginal` and `ContentResolver.openFileDescriptor`. That is the original file, including a motion photo's embedded video. `requiredPermissions` is `READ_MEDIA_IMAGES` and `READ_MEDIA_VIDEO` on API 33 and newer, and `READ_EXTERNAL_STORAGE` on API 30 through 32, plus `ACCESS_MEDIA_LOCATION` in both cases. The library has no Activity. `HostActivity` requests the set. If images or video are denied, it does not enqueue. If location is denied, it says MediaStore would strip GPS and does not treat the backup as finished. The receiver password is not part of the permission request. CI does not click the system dialog. The runtime flow is [docs/camera-roll-scope.md](../../docs/camera-roll-scope.md).
+`backup` is the camera-roll library. `host` is the app that requests permission, shows backup status, and enqueues the worker. The path is [docs/mobile-android-backup.md](../../docs/mobile-android-backup.md).
 
-`CameraRollBackupWorker` is a WorkManager worker. It runs while the device is idle, charging, and on a network. The receiver password is written with `EncryptedSharedPreferences` under a Keystore key. WorkManager input has the endpoint and the user, and a unit test checks that the password string is absent from that `Data`. The upload sends `X-Albumen-Mtime` from the file's last-modified time and counts only when `X-Albumen-Sha256` matches the SHA-256 of the bytes copied into the app cache. The worker deletes that cache file. It does not delete the MediaStore row.
+`CameraRoll` opens each MediaStore image and video with `MediaStore.setRequireOriginal` and `ContentResolver.openFileDescriptor` in mode `"r"`. That is the original, including a motion photo's embedded video and its GPS, when the host holds `ACCESS_MEDIA_LOCATION`. If location is denied, the backup does not read the roll. The library has no Activity. `HostActivity` requests the permissions, enqueues only when images, video, and location are granted, and shows every failure the worker records. The receiver password is stored in the Keystore and is not part of the permission request or the WorkManager input.
+
+The first WorkManager job runs on a network and is aimed at a verified copy within 5 minutes of setup. Later jobs run while the phone is idle, charging, and on a network. An upload counts when `X-Albumen-Sha256` matches the SHA-256 of the bytes copied into the app cache. A mismatch is retried. The worker deletes that cache file. It does not delete or update the MediaStore row. The debug APK is not published to a store.
 
 ```bash
 scripts/android-ci.sh
 ```
 
-The script installs command-line tools `13114758` and Gradle `8.11.1` after checking their SHA-256 sums, then runs `:backup:testDebugUnitTest`, `:host:testDebugUnitTest`, and `:host:assembleDebug`.
+The script installs command-line tools `13114758` and Gradle `8.11.1` after checking their SHA-256 sums, then runs `:backup:testDebugUnitTest`, `:host:testDebugUnitTest`, and `:host:assembleDebug`. CI boots an API 30 emulator with KVM and runs `scripts/android-emulator-connected.sh`. That run includes the host test that times the first verified backup and checks that a down receiver and a SHA-256 mismatch show on the status screen and as a notification. `scripts/android-emulator-ci.sh` is the same test on a local machine that has KVM.

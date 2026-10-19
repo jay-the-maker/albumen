@@ -18,29 +18,31 @@ This is the gap after the safety work and before the storage backends. Both impo
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
 
+## Family library
+
+Not built. A design for a shared library on storage the family already has, with no server the owner runs, is [docs/design/family-sharing.md](docs/design/family-sharing.md). Each member has an append-only namespace. Originals stay bit-exact under `copy_verify`. A hide is per viewer and leaves the other member's files in place.
+
 ## Export everything
 
 Shipped as `albumen export` and `albumen verify-manifest`. The command copy-verifies the library, sidecars, and pairs to a directory or `s3://` prefix, writes a SHA-256 manifest, and can be run again without overwriting. See the README.
 
 ## Camera-roll background backup spike
 
-Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one exports the camera original, uploads it to `albumen-receive`, and accepts the copy only when the client's SHA-256 matches `X-Albumen-Sha256` from `copy_verify`. Nothing in the camera roll is deleted. No transcode on the way in.
+`mobile/ios` is the host app and the background upload extension. `mobile/android` is the camera-roll library and host. Each one exports the camera original, uploads it to `albumen-receive`, and accepts the copy only when the client's SHA-256 matches `X-Albumen-Sha256` from `copy_verify`. Nothing in the camera roll is deleted. No transcode on the way in.
 
 ### iOS
 
 - `mobile/ios` reads PhotoKit `PHAssetResource` originals. A Live Photo is the still plus the paired video. An edited asset prefers the full-size unadjusted resource when PhotoKit has one. An iCloud-optimized asset is downloaded with `isNetworkAccessAllowed`. If only a derivative is available, the export fails and logs that refusal. Adjustment data is kept as `{filename}.adjustment`. `PHImageManager.requestImage` is not used.
 - The package builds with `swift test` on a macOS runner. PhotoKit is present there.
-- The receiver password is stored in the Keychain.
-- Still open: an iOS 26.1 background upload extension, so new photos and videos leave the device without the app staying in the foreground. The scope is [docs/camera-roll-scope.md](docs/camera-roll-scope.md). That target needs an Xcode project and a signing identity, which this package does not have.
-- Still open: a host that requests PhotoKit access without a version that strips GPS.
+- The receiver password is stored in the Keychain. The host and the background upload extension share it through a keychain access group. The PUT request does not carry it.
+- The Xcode host and the `AlbumenBackgroundUpload` extension are in `mobile/ios/Albumen.xcodeproj`. The host requests PhotoKit access and copies `PHAssetResource` originals, so location stays in the file that is uploaded. A background `URLSession` and a background-processing task continue the PUT after the app leaves the foreground. SHA-256 is checked against `X-Albumen-Sha256`. Failures are written to the shared status file and posted as a local notification. Nothing in Photos is deleted. See [docs/mobile-ios-backup.md](docs/mobile-ios-backup.md).
+- CI builds that Xcode project on `macos-14` only, with code signing off. A signing identity is not in this repository, and the app is not published.
 
 ### Android
 
-- `mobile/android` reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor`. `requiredPermissions` is the media permissions on API 33 and newer, and `READ_EXTERNAL_STORAGE` on API 30 through 32, plus `ACCESS_MEDIA_LOCATION`. The library does not show the dialog. Without location permission, MediaStore removes GPS.
-- `CameraRollBackupWorker` schedules the backup with WorkManager while the device is idle and charging, so a killed process resumes the same queue.
-- A motion photo is one JPEG with the video still appended. The worker copies that file whole.
-- The receiver password is in Keystore-backed storage. WorkManager input does not contain it.
-- `mobile/android/host` requests those permissions and enqueues only when images, video, and location are all granted. A location denial is explained as stripped GPS and is not a finished backup. CI compiles the app and unit-tests that decision. It does not click the system dialog. Android 14 selected-photos (`READ_MEDIA_VISUAL_USER_SELECTED`) is still not a grant. The flow is [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
+Shipped as `mobile/android/host`. The host reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor` in mode `"r"`. `ACCESS_MEDIA_LOCATION` is required, because without it MediaStore would strip GPS and the backup does not start. A motion photo is copied whole. The first WorkManager job runs on a network and is aimed at a verified copy within 5 minutes of setup. Later jobs run while the phone is idle, charging, and on a network. A killed pass resumes from a progress file of URI, size, and modified time. The upload counts when `X-Albumen-Sha256` matches, and a mismatch is retried and shown. The receiver password is in Keystore-backed storage. WorkManager input does not contain it. Nothing in the camera roll is deleted or updated. The debug APK is not published to a store. See [docs/mobile-android-backup.md](docs/mobile-android-backup.md).
+
+Still open: Android 14 selected-photos (`READ_MEDIA_VISUAL_USER_SELECTED`) is not a grant. The library does not open the photo picker.
 
 ## Connectors
 

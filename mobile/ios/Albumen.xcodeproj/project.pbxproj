@@ -1,0 +1,460 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B10000000000000000000001 /* AlbumenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* AlbumenApp.swift */; };
+		B10000000000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* AppDelegate.swift */; };
+		B10000000000000000000003 /* StatusScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* StatusScreen.swift */; };
+		B10000000000000000000004 /* LibraryObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* LibraryObserver.swift */; };
+		B10000000000000000000005 /* FailureNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* FailureNotice.swift */; };
+		B10000000000000000000006 /* FailureNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* FailureNotice.swift */; };
+		B10000000000000000000007 /* BackgroundUploadProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000006 /* BackgroundUploadProcessor.swift */; };
+		B10000000000000000000008 /* AlbumenBackgroundUpload.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F10000000000000000000008 /* AlbumenBackgroundUpload.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		B10000000000000000000009 /* AlbumenBackup in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000001 /* AlbumenBackup */; };
+		B1000000000000000000000A /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000002 /* AlbumenUpload */; };
+		B1000000000000000000000B /* AlbumenBackup in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000003 /* AlbumenBackup */; };
+		B1000000000000000000000C /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000004 /* AlbumenUpload */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		D10000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1B100000000000000000003 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1B100000000000000000002;
+			remoteInfo = AlbumenBackgroundUpload;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		S10000000000000000000003 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				B10000000000000000000008 /* AlbumenBackgroundUpload.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		F10000000000000000000001 /* AlbumenApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlbumenApp.swift; sourceTree = "<group>"; };
+		F10000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		F10000000000000000000003 /* StatusScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusScreen.swift; sourceTree = "<group>"; };
+		F10000000000000000000004 /* LibraryObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryObserver.swift; sourceTree = "<group>"; };
+		F10000000000000000000005 /* FailureNotice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FailureNotice.swift; sourceTree = "<group>"; };
+		F10000000000000000000006 /* BackgroundUploadProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundUploadProcessor.swift; sourceTree = "<group>"; };
+		F10000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F10000000000000000000008 /* AlbumenBackgroundUpload.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AlbumenBackgroundUpload.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000009 /* Albumen.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Albumen.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1000000000000000000000A /* Albumen.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Albumen.entitlements; sourceTree = "<group>"; };
+		F1000000000000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F1000000000000000000000C /* BackgroundUpload.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BackgroundUpload.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		S10000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000009 /* AlbumenBackup in Frameworks */,
+				B1000000000000000000000A /* AlbumenUpload in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		S10000000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1000000000000000000000B /* AlbumenBackup in Frameworks */,
+				B1000000000000000000000C /* AlbumenUpload in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		G10000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				G10000000000000000000002 /* App */,
+				G10000000000000000000003 /* BackgroundUpload */,
+				G10000000000000000000004 /* Shared */,
+				G10000000000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		G10000000000000000000002 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000001 /* AlbumenApp.swift */,
+				F10000000000000000000002 /* AppDelegate.swift */,
+				F10000000000000000000003 /* StatusScreen.swift */,
+				F10000000000000000000004 /* LibraryObserver.swift */,
+				F10000000000000000000007 /* Info.plist */,
+				F1000000000000000000000A /* Albumen.entitlements */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		G10000000000000000000003 /* BackgroundUpload */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000006 /* BackgroundUploadProcessor.swift */,
+				F1000000000000000000000B /* Info.plist */,
+				F1000000000000000000000C /* BackgroundUpload.entitlements */,
+			);
+			path = BackgroundUpload;
+			sourceTree = "<group>";
+		};
+		G10000000000000000000004 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000005 /* FailureNotice.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		G10000000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000009 /* Albumen.app */,
+				F10000000000000000000008 /* AlbumenBackgroundUpload.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A1B100000000000000000001 /* Albumen */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = L10000000000000000000001 /* Build configuration list for PBXNativeTarget "Albumen" */;
+			buildPhases = (
+				S10000000000000000000001 /* Sources */,
+				S10000000000000000000002 /* Frameworks */,
+				S10000000000000000000003 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D10000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = Albumen;
+			packageProductDependencies = (
+				P10000000000000000000001 /* AlbumenBackup */,
+				P10000000000000000000002 /* AlbumenUpload */,
+			);
+			productName = Albumen;
+			productReference = F10000000000000000000009 /* Albumen.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A1B100000000000000000002 /* AlbumenBackgroundUpload */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = L10000000000000000000002 /* Build configuration list for PBXNativeTarget "AlbumenBackgroundUpload" */;
+			buildPhases = (
+				S10000000000000000000004 /* Sources */,
+				S10000000000000000000005 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AlbumenBackgroundUpload;
+			packageProductDependencies = (
+				P10000000000000000000003 /* AlbumenBackup */,
+				P10000000000000000000004 /* AlbumenUpload */,
+			);
+			productName = AlbumenBackgroundUpload;
+			productReference = F10000000000000000000008 /* AlbumenBackgroundUpload.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A1B100000000000000000003 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					A1B100000000000000000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					A1B100000000000000000002 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = L10000000000000000000003 /* Build configuration list for PBXProject "Albumen" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = G10000000000000000000001;
+			packageReferences = (
+				P10000000000000000000005 /* XCLocalSwiftPackageReference "." */,
+			);
+			productRefGroup = G10000000000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A1B100000000000000000001 /* Albumen */,
+				A1B100000000000000000002 /* AlbumenBackgroundUpload */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		S10000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* AlbumenApp.swift in Sources */,
+				B10000000000000000000002 /* AppDelegate.swift in Sources */,
+				B10000000000000000000003 /* StatusScreen.swift in Sources */,
+				B10000000000000000000004 /* LibraryObserver.swift in Sources */,
+				B10000000000000000000005 /* FailureNotice.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		S10000000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000007 /* BackgroundUploadProcessor.swift in Sources */,
+				B10000000000000000000006 /* FailureNotice.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D10000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1B100000000000000000002 /* AlbumenBackgroundUpload */;
+			targetProxy = D10000000000000000000002 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		C10000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C10000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		C10000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
+				CODE_SIGN_ENTITLEMENTS = App/Albumen.entitlements;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios;
+				PRODUCT_NAME = Albumen;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C10000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
+				CODE_SIGN_ENTITLEMENTS = App/Albumen.entitlements;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios;
+				PRODUCT_NAME = Albumen;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C10000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
+				CODE_SIGN_ENTITLEMENTS = BackgroundUpload/BackgroundUpload.entitlements;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BackgroundUpload/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios.background-upload;
+				PRODUCT_NAME = AlbumenBackgroundUpload;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C10000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
+				CODE_SIGN_ENTITLEMENTS = BackgroundUpload/BackgroundUpload.entitlements;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BackgroundUpload/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = photos.albumen.ios.background-upload;
+				PRODUCT_NAME = AlbumenBackgroundUpload;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		L10000000000000000000001 /* Build configuration list for PBXNativeTarget "Albumen" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000003 /* Debug */,
+				C10000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		L10000000000000000000002 /* Build configuration list for PBXNativeTarget "AlbumenBackgroundUpload" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000005 /* Debug */,
+				C10000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		L10000000000000000000003 /* Build configuration list for PBXProject "Albumen" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000001 /* Debug */,
+				C10000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		P10000000000000000000005 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		P10000000000000000000001 /* AlbumenBackup */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = P10000000000000000000005 /* XCLocalSwiftPackageReference "." */;
+			productName = AlbumenBackup;
+		};
+		P10000000000000000000002 /* AlbumenUpload */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = P10000000000000000000005 /* XCLocalSwiftPackageReference "." */;
+			productName = AlbumenUpload;
+		};
+		P10000000000000000000003 /* AlbumenBackup */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = P10000000000000000000005 /* XCLocalSwiftPackageReference "." */;
+			productName = AlbumenBackup;
+		};
+		P10000000000000000000004 /* AlbumenUpload */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = P10000000000000000000005 /* XCLocalSwiftPackageReference "." */;
+			productName = AlbumenUpload;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A1B100000000000000000003 /* Project object */;
+}

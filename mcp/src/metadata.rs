@@ -6,12 +6,10 @@
 //! while its SHA-256 and length still match, and a search that misses
 //! re-reads that file with ExifTool. Sidecar metadata is joined in memory.
 
+use albumen_ingest::{exiftool_command, sha256_hex};
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use albumen_ingest::sha256_hex;
-use serde_json::{Map, Value};
 
 /// Capture time as written in the file, without converting time zones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -389,7 +387,7 @@ fn read_exiftool(
 ) -> Result<HashMap<String, Record>, String> {
     let mut out = HashMap::new();
     for chunk in relative_paths.chunks(exiftool_batch()) {
-        let output = Command::new("exiftool")
+        let output = exiftool_command()
             .current_dir(root)
             .arg("-json")
             .arg("-n")

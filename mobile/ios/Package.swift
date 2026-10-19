@@ -10,6 +10,7 @@ let package = Package(
         .macOS(.v14),
     ],
     products: [
+        .library(name: "AlbumenUpload", targets: ["AlbumenUpload"]),
         .library(name: "AlbumenBackup", targets: ["AlbumenBackup"]),
     ],
     targets: [
@@ -20,7 +21,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AlbumenUploadTests",
-            dependencies: ["AlbumenUpload"]
+            dependencies: ["AlbumenUpload", "AlbumenBackup"]
         ),
     ]
 )
