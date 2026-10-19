@@ -47,8 +47,8 @@ pub use takeout_scale::{
     measure_icloud, measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
 };
 pub use throughput::{
-    measure_throughput, ratio_passes, throughput_problems, ThroughputReport,
-    DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES, THROUGHPUT_RATIO_FLOOR,
+    measure_throughput, optional_rate, phase_share_line, ratio_passes, throughput_problems,
+    ThroughputReport, DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES, THROUGHPUT_RATIO_FLOOR,
 };
 
 pub const DEFAULT_SEARCH_ITEMS: u64 = 128;
