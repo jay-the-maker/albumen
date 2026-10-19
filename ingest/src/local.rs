@@ -581,6 +581,8 @@ where
         path: dest.clone(),
         armed: true,
     };
+    // A cache hint for macOS only; a refusal changes nothing else.
+    let _ = albumen_win::uncached_writes(&output);
     crate::copy_profile::add_preflight(preflight_at);
     let sha256 = write(root, &output, &dest)?;
     // Streams land before the mtime is set. The write handle stays open so
