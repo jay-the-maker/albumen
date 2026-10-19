@@ -144,10 +144,11 @@ fn run() -> Result<(), String> {
             println!("{text}");
             io::stdout().flush().map_err(|err| err.to_string())?;
             eprintln!(
-                "import-throughput leg={} files={} bytes_each={} import_mb_s={:.3} raw_mb_s={:.3} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={}",
+                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={}",
                 report.leg,
                 report.files,
                 report.bytes_each,
+                report.workers,
                 report.import_mb_s,
                 report.raw_mb_s,
                 report.ratio,

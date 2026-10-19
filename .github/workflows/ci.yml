@@ -277,7 +277,22 @@ jobs:
       - name: Import 1000 synthetic files and compare with a raw write
         env:
           ALBUMEN_THROUGHPUT_LEG: ${{ matrix.label }}
+          ALBUMEN_THROUGHPUT_DIR: ${{ github.workspace }}/throughput-data
         run: |
+          df -h "${GITHUB_WORKSPACE}" /tmp || true
+          # The corpus is 5 GB of sources plus 5 GB of destination. ubuntu-26.04
+          # returned "Disk quota exceeded" for that pair under /tmp. The work
+          # directory is the runner volume. On Linux, drop preinstalled
+          # toolchains when that volume has less than 25 GB free.
+          if [ "$(uname -s)" = Linux ]; then
+            free_kb="$(df -k "${GITHUB_WORKSPACE}" | awk 'NR==2 {print $4}')"
+            if [ "${free_kb:-0}" -lt 25000000 ]; then
+              sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/powershell /usr/share/swift || true
+              docker system prune -af || true
+            fi
+            df -h "${GITHUB_WORKSPACE}" || true
+          fi
+          mkdir -p "${ALBUMEN_THROUGHPUT_DIR}"
           cargo run --release --locked -p albumen-bench -- --throughput | tee "${RUNNER_TEMP}/throughput.json"
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {

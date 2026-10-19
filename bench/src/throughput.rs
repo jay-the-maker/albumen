@@ -7,7 +7,11 @@
 //! length. The import clock is only `copy_verify`. Generation, the source
 //! re-read, and the raw write are outside that clock.
 //!
-//! The raw write uses the same durability calls as the import: `open_new`,
+//! Each file is hashed once, while its bytes are written, then the
+//! destination is read back and hashed again. Files run on a bounded worker
+//! pool so that hash work overlaps I/O. The pool is `available_parallelism`
+//! capped at [`MAX_IMPORT_WORKERS`]. The raw write stays sequential. It uses
+//! the same durability calls as one file of the import: `open_new`,
 //! `File::sync_all`, and `dest::sync_dir` after every file. It does not hash
 //! and it does not preserve a source mtime. The ratio is import MB/s divided
 //! by that raw MB/s. 1 MB is 1,000,000 bytes.
@@ -15,6 +19,9 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::thread;
 use std::time::{Instant, SystemTime};
 
 use albumen_ingest::dest::{self, open_new};
@@ -31,6 +38,9 @@ pub const DEFAULT_THROUGHPUT_BYTES: u64 = 5_000_000;
 /// Product target for import MB/s divided by raw MB/s. CI prints the ratio
 /// and does not fail below this. See `docs/performance-budgets.md`.
 pub const THROUGHPUT_RATIO_FLOOR: f64 = 0.80;
+/// Upper bound on import workers. The pool is also limited by the CPU count
+/// and by the number of files.
+pub const MAX_IMPORT_WORKERS: usize = 8;
 
 const JPEG_PREFIX: &[u8] = &[
     0xFF, 0xD8, // SOI
@@ -56,6 +66,7 @@ pub struct ThroughputReport {
     pub count_out: u64,
     pub mismatched: u64,
     pub source_changed: u64,
+    pub workers: u64,
 }
 
 impl ThroughputReport {
@@ -99,6 +110,7 @@ impl ThroughputReport {
             "count_out": self.count_out,
             "mismatched": self.mismatched,
             "source_changed": self.source_changed,
+            "workers": self.workers,
             "reconciled_percent": self.reconciled_percent(),
         })
     }
@@ -107,12 +119,12 @@ impl ThroughputReport {
 /// Fail when reconciliation is short of 100 percent.
 ///
 /// The 80 percent ratio is the product target in
-/// [`THROUGHPUT_RATIO_FLOOR`]. It is not a failure here. On one machine two
-/// back-to-back runs of the same 1,000 files stayed near 280 MB/s imported
-/// while the raw write moved from about 600 MB/s to about 740 MB/s, so the
-/// ratio moved from about 0.47 to about 0.38. `copy_verify` also hashes the
-/// bytes twice and fsyncs the preserved mtime, which the raw write does not,
-/// so the ratio sits well below 0.80 even when the import itself is steady.
+/// [`THROUGHPUT_RATIO_FLOOR`]. It is not a failure here. The import reads
+/// the destination back and fsyncs each directory entry. The raw write does
+/// neither hash. On one machine the raw write moved between runs while the
+/// import stayed put, so the ratio moved with the raw write. A later run
+/// under 80 percent of a recorded per-leg ratio can be a regression gate.
+/// That gate is not this 80 percent target.
 pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
     let mut problems = Vec::new();
     if !report.reconciled() {
@@ -148,32 +160,10 @@ pub fn measure_throughput(
     fs::create_dir_all(&sources).map_err(|err| format!("create sources: {err}"))?;
     let (snaps, _unlock) = generate(&sources, files, bytes_each)?;
 
+    fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
+    let workers = import_workers(files);
     let started = Instant::now();
-    let mut count_out = 0u64;
-    let mut mismatched = 0u64;
-    let mut imported_bytes = 0u64;
-    for snap in &snaps {
-        let asset = Asset::from_files(vec![AssetFile {
-            path: snap.path.clone(),
-            role: Role::Primary,
-        }])
-        .map_err(|err| err.to_string())?;
-        let report = copy_verify(&asset, &LocalStore::new(&dest)).map_err(|err| err.to_string())?;
-        if report.files.len() != 1 {
-            mismatched += 1;
-            continue;
-        }
-        let stored = &report.files[0];
-        if stored.sha256 != snap.sha256
-            || stored.byte_len != snap.len
-            || stored.filename != snap.name
-        {
-            mismatched += 1;
-            continue;
-        }
-        count_out += 1;
-        imported_bytes += stored.byte_len;
-    }
+    let (count_out, mismatched, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
     let import_seconds = started.elapsed().as_secs_f64().max(1e-9);
     let source_changed = sources_changed(&snaps)?;
     // The destination was created by this process for the measurement. It is
@@ -205,7 +195,98 @@ pub fn measure_throughput(
         count_out,
         mismatched,
         source_changed,
+        workers: u64::try_from(workers).unwrap_or(0),
     })
+}
+
+fn import_workers(files: u64) -> usize {
+    let cpus = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let files = usize::try_from(files).unwrap_or(usize::MAX);
+    cpus.min(MAX_IMPORT_WORKERS).min(files).max(1)
+}
+
+fn import_parallel(snaps: &[Snap], dest: &Path, workers: usize) -> Result<(u64, u64, u64), String> {
+    let next = AtomicU64::new(0);
+    let count_out = AtomicU64::new(0);
+    let mismatched = AtomicU64::new(0);
+    let imported_bytes = AtomicU64::new(0);
+    let error: Mutex<Option<String>> = Mutex::new(None);
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if error_is_set(&error) {
+                    break;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(snap) = snaps.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
+                    break;
+                };
+                match import_one(snap, dest) {
+                    Ok(ImportOne::Stored(bytes)) => {
+                        count_out.fetch_add(1, Ordering::Relaxed);
+                        imported_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    }
+                    Ok(ImportOne::Mismatch) => {
+                        mismatched.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(err) => {
+                        record_error(&error, err);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    if let Some(err) = error
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+    {
+        return Err(err);
+    }
+    Ok((
+        count_out.load(Ordering::Relaxed),
+        mismatched.load(Ordering::Relaxed),
+        imported_bytes.load(Ordering::Relaxed),
+    ))
+}
+
+enum ImportOne {
+    Stored(u64),
+    Mismatch,
+}
+
+fn import_one(snap: &Snap, dest: &Path) -> Result<ImportOne, String> {
+    let asset = Asset::from_files(vec![AssetFile {
+        path: snap.path.clone(),
+        role: Role::Primary,
+    }])
+    .map_err(|err| err.to_string())?;
+    let report = copy_verify(&asset, &LocalStore::new(dest)).map_err(|err| err.to_string())?;
+    if report.files.len() != 1 {
+        return Ok(ImportOne::Mismatch);
+    }
+    let stored = &report.files[0];
+    if stored.sha256 != snap.sha256 || stored.byte_len != snap.len || stored.filename != snap.name {
+        return Ok(ImportOne::Mismatch);
+    }
+    Ok(ImportOne::Stored(stored.byte_len))
+}
+
+fn error_is_set(error: &Mutex<Option<String>>) -> bool {
+    error
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .is_some()
+}
+
+fn record_error(error: &Mutex<Option<String>>, err: String) {
+    let mut slot = error.lock().unwrap_or_else(|poison| poison.into_inner());
+    if slot.is_none() {
+        *slot = Some(err);
+    }
 }
 
 struct Snap {
@@ -365,8 +446,10 @@ impl TempDir {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|err| err.to_string())?
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("albumen-throughput-{nanos}-{}", std::process::id()));
+        let parent = std::env::var_os("ALBUMEN_THROUGHPUT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = parent.join(format!("albumen-throughput-{nanos}-{}", std::process::id()));
         fs::create_dir_all(&path).map_err(|err| format!("create temp dir: {err}"))?;
         Ok(Self { path })
     }
@@ -432,6 +515,7 @@ mod tests {
             count_out: 1_000,
             mismatched: 0,
             source_changed: 0,
+            workers: 1,
         };
         assert!(report.reconciled());
         assert!(!ratio_passes(report.ratio));
@@ -449,5 +533,19 @@ mod tests {
         assert_eq!(report.reconciled_percent(), 100.0);
         assert!(report.ratio.is_finite() && report.ratio > 0.0);
         assert_eq!(report.bytes, 2 * 8192);
+        assert!(report.workers >= 1);
+        assert!(report.workers <= 2);
+    }
+
+    #[test]
+    fn worker_pool_follows_the_cpu_count_and_the_cap() {
+        assert_eq!(import_workers(1), 1);
+        let pool = import_workers(10_000);
+        let cpus = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        assert_eq!(pool, cpus.min(MAX_IMPORT_WORKERS));
+        assert!(pool <= MAX_IMPORT_WORKERS);
+        assert!(pool >= 1);
     }
 }
