@@ -1,0 +1,41 @@
+# License policy. New dependencies must be MIT, Apache-2.0, or Zlib (or offer
+# one of them under OR). The exceptions below are crates that were already in
+# the tree before this policy, each limited to the extra license it needs.
+# A new crate that needs anything else fails `cargo deny check licenses`.
+
+[graph]
+all-features = false
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Zlib"]
+confidence-threshold = 0.9
+exceptions = [
+    { crate = "aws-lc-rs", allow = ["ISC"] },
+    { crate = "aws-lc-sys", allow = ["BSD-3-Clause", "ISC", "MIT-0"] },
+    { crate = "curve25519-dalek", allow = ["BSD-3-Clause"] },
+    { crate = "ed25519-dalek", allow = ["BSD-3-Clause"] },
+    { crate = "icu_collections", allow = ["Unicode-3.0"] },
+    { crate = "icu_locale_core", allow = ["Unicode-3.0"] },
+    { crate = "icu_normalizer", allow = ["Unicode-3.0"] },
+    { crate = "icu_normalizer_data", allow = ["Unicode-3.0"] },
+    { crate = "icu_properties", allow = ["Unicode-3.0"] },
+    { crate = "icu_properties_data", allow = ["Unicode-3.0"] },
+    { crate = "icu_provider", allow = ["Unicode-3.0"] },
+    { crate = "litemap", allow = ["Unicode-3.0"] },
+    { crate = "option-ext", allow = ["MPL-2.0"] },
+    { crate = "potential_utf", allow = ["Unicode-3.0"] },
+    { crate = "ring", allow = ["ISC"] },
+    { crate = "rustls-webpki", allow = ["ISC"] },
+    { crate = "subtle", allow = ["BSD-3-Clause"] },
+    { crate = "tinystr", allow = ["Unicode-3.0"] },
+    { crate = "unicode-ident", allow = ["Unicode-3.0"] },
+    { crate = "untrusted", allow = ["ISC"] },
+    { crate = "writeable", allow = ["Unicode-3.0"] },
+    { crate = "yoke", allow = ["Unicode-3.0"] },
+    { crate = "yoke-derive", allow = ["Unicode-3.0"] },
+    { crate = "zerofrom", allow = ["Unicode-3.0"] },
+    { crate = "zerofrom-derive", allow = ["Unicode-3.0"] },
+    { crate = "zerotrie", allow = ["Unicode-3.0"] },
+    { crate = "zerovec", allow = ["Unicode-3.0"] },
+    { crate = "zerovec-derive", allow = ["Unicode-3.0"] },
+]

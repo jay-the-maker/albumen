@@ -9,7 +9,8 @@ Cold start, the first thumbnail, scroll, and backup CPU and battery are targets 
 | Metric | Budget |
 | --- | --- |
 | Cold start | ≤ 2.0 seconds from process start to the library shell |
-| Time to first thumbnail | ≤ 1.0 second on a 380,000-item library |
+| Time to first thumbnail (app first paint) | ≤ 1.0 second on a 380,000-item library: the ceiling for the app's first painted thumbnail, from launch. Team target. |
+| First thumbnail (library scale) | ≤ 300 ms at 380,000 items: `albumen-mcp` `thumbnail`, request to bytes and spawn to bytes, measured by the `library scale` job. Team target. |
 | Scroll | ≥ 60 FPS on a 380,000-item library, which is a p95 frame time ≤ 16.7 ms |
 | Backup CPU | Average ≤ 25% of one core across a background backup. A hash may use one core. It does not fan out across every core. |
 | Backup battery | Backup does not run on battery by default. Once a client can measure drain, screen-off backup stays ≤ 5% battery per hour. |
@@ -257,7 +258,9 @@ The 2,000-item smoke pass on `windows-2025` measured a search p95 of 192.2 ms wi
 
 `albumen-mcp` has a `thumbnail` tool. It reads one library JPEG through the read-only source root, decodes it in memory, scales it to fit 256 px (or `size`), and returns a new JPEG as base64. The original is not changed. Thumbnails are cached outside the library: `--thumbnail-dir`, else `ALBUMEN_THUMBNAIL_DIR`, else `thumbnails` in the platform data directory. A directory inside the library is refused. The cache key includes the original's size and modification time.
 
-The `library scale` workflow places 32 copies of the CC0 fixture `fixtures/jpeg-gps/IMG_0001.jpg` (640 × 480) at fixed positions among the 380,000 stub items. A fresh `albumen-mcp` with the saved index and an empty thumbnail cache asks for one of them. The job reports the time from that request to the decoded thumbnail bytes and the time from process spawn to those bytes, both against a 300 ms target, then the other 31 cold and all 32 from the cache. Report only.
+The `library scale` workflow places 32 copies of the CC0 fixture `fixtures/jpeg-gps/IMG_0001.jpg` (640 × 480) at fixed positions among the 380,000 stub items. A fresh `albumen-mcp` with the saved index and an empty thumbnail cache asks for one of them. The job reports the time from that request to the decoded thumbnail bytes and the time from process spawn to those bytes, both against the 300 ms library-scale budget, then the other 31 cold and all 32 from the cache. Report only.
+
+Two thumbnail numbers are budgets, and both are team targets. The 1.0 s ceiling is for the full app's first painted thumbnail, from launch, and is measured once an app exists. The 300 ms budget is for the library-scale first thumbnail at 380,000 items: the `thumbnail` tool's bytes, measured in CI now. The 300 ms budget sits inside the 1.0 s ceiling and leaves room for the app's own startup and paint.
 
 ## Import CPU
 
