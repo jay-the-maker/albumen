@@ -198,6 +198,40 @@ The per-leg ratios for this median and this hash path are filled from the pull-r
 | macos-14 | pending | pending | F_FULLFSYNC | pending | pending |
 | windows-2025 | pending | pending | FlushFileBuffers | pending | pending |
 
+## 380,000 items in CI
+
+[`.github/workflows/library-scale.yml`](../.github/workflows/library-scale.yml) times the stdio MCP server, `albumen-mcp --library`, on a generated 380,000-item library on `ubuntu-24.04`, `macos-14`, and `windows-2025`. It runs on a pull request that changes `mcp/`, `ingest/`, `Cargo.lock`, the workflow, or the script, and on `workflow_dispatch`.
+
+`scripts/library-scale.py` builds the library in the job. Each item is a 4-byte synthetic JPEG (`FF D8 FF D9`) at `YYYY/MM/<prefix><index>.jpg`, spread evenly over 2010-01 to 2026-12 with `IMG_`, `DSC_`, `PXL_`, and `DJI_` names. That is about 1,860 items per month directory. The same item count gives the same paths, and the script prints `paths_sha256`, the SHA-256 of the sorted path list. Nothing is committed and no real photo is read. Generation is not timed against a target.
+
+| Field | What is timed |
+| --- | --- |
+| `cold_start_ms` | Process spawn until `initialize` and `tools/list` have both answered. The first query can be sent at that moment. |
+| `first_query_ms` | The first `search` after that, reported beside cold start. |
+| `search_p50_ms`, `search_p95_ms` | Nearest-rank over 200 fixed `search` calls, seed 380000, page size 100: 100 file names, 50 month prefixes, and 50 strings that match nothing. Each call is checked: a name or month returns files, a miss returns none. |
+| `peak_memory_mib` | Peak RSS of `albumen-mcp` on Linux (`VmHWM`) and macOS (`ru_maxrss`), and peak working set on Windows (`GetProcessMemoryInfo`). |
+
+The scorecard targets for this run are a cold start of 1.5 s or less and a search p95 of 200 ms or less. The job writes a results table to its summary and uploads the JSON. It is report only: a number over its target is the measurement and does not fail the job. The job fails when the library is not exactly the requested item count, a query result is wrong, or the server exits non-zero.
+
+The library was just written, so the OS file cache is warm. Cold start here is the server's own start, not a disk spin-up.
+
+Search with only a path query walks the library and does not read file bytes. A metadata filter also runs ExifTool and SHA-256 on each candidate, which the local run below measures.
+
+<!-- library-scale-results -->
+380,000 items, 200 queries, seed 380000. Every CI leg that finished and a local Linux run built the same library: `paths_sha256` `ec8ac920ee080c9d23c40c8a0a3110b3f255ef133109314336635852eda1886e`.
+
+| Leg | Run | Cold start (ready) | Process start to first answer | Search p50 | Search p95 | Peak memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ubuntu-24.04` | [39244175785](https://github.com/jay-the-maker/albumen/actions/runs/39244175785) | 1.7 ms | 4,399.1 ms | 4,277.0 ms | 4,380.9 ms | 5.7 MiB |
+| `ubuntu-24.04` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623) | 2.1 ms | 5,313.7 ms | 5,268.2 ms | 5,459.8 ms | 5.6 MiB |
+| `macos-14` | [39244175785](https://github.com/jay-the-maker/albumen/actions/runs/39244175785) | 21.4 ms | 12,897.5 ms | 10,151.1 ms | 13,228.3 ms | 6.0 MiB |
+| `macos-14` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623) | 28.8 ms | 18,185.9 ms | 10,867.1 ms | 14,131.4 ms | 5.9 MiB |
+| `windows-2025` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623), running | | | | | |
+
+Cold start, as spawn to `initialize` and `tools/list`, is far inside 1.5 s because the server builds no index when it starts. Process start to first answer is the readiness a user sees, and it is one full walk of the library. Search p95 is over the 200 ms target on `ubuntu-24.04` and `macos-14`: every path search walks and stats all 380,000 files. The 2,000-item smoke pass on `windows-2025` measured a search p95 of 192.2 ms, so the full Windows walk takes the longest of the three. Peak memory stays near 6 MiB, because the walk streams.
+
+The next step for search p95 is an index that a search does not rebuild: a path index built once when the server starts, kept current by comparing directory mtimes, and later a persistent index stored beside the library, outside the library directory, like the ledger. A search then reads the index instead of walking the tree. That moves the walk into cold start, so both numbers are reported against their targets together.
+
 ## Local 380,000-item run
 
 This is how the full-library search and browse numbers are taken. It is not the CI job. It needs disk for 380,000 JPEGs and 380,000 XMP sidecars, and the cold search runs ExifTool across all of them.
