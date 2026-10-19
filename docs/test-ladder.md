@@ -50,22 +50,12 @@ Exit: the ignored test passes on the scheduled or manual `macos-14` job and the 
 
 **Planned:** the same generated tree on a Linux runner and on a Windows runner. Those jobs are not in the workflow. Until they are, rung 3 is enforced on macOS only.
 
-## Rung 4 — optional owner Mac
+## Rung 4 — last rung, owner Mac
 
-Entry: rungs 1–3 are green. **Planned:** this rung is not run in CI. It is an owner trial, not a job that can go red.
+The procedure is [trial-macos.md](trial-macos.md).
 
-Use a dedicated non-admin macOS user, or a VM. Work on a **copied** folder, not the live volume. Keep the copy read-only from the process's point of view. Take the network away with `scripts/macos-readonly-sandbox.sh` (a `sandbox-exec` profile) or with pf or LuLu. The profile allows reads and allows writes only in the manifest's parent directory. It refuses a manifest that resolves inside the source. `chmod a-w` does not replace that profile.
+Gated: run on an owner's machine only after rungs 1-3 are green and with the owner's explicit approval. CI macOS runners are the default place this runs.
 
-The commands are the same shape as a scan of a volume, aimed at the copy:
+Use a dedicated non-admin user. Scan a copied folder, not the original volume. Take the network away with `scripts/macos-readonly-sandbox.sh`. Mount the copy read-only (`mount -u -o rdonly,noatime`, a read-only APFS snapshot, or a read-only disk image) so a read cannot change access time. macOS has no `O_NOATIME`. Without that mount, a read may update atime. Bytes, mtime, and xattrs are still left unchanged. `chmod a-w` does not replace the mount or the sandbox profile.
 
-```bash
-ditto "/Volumes/RAID/Photos/2024" "$HOME/albumen-trial/copy"
-scripts/macos-readonly-sandbox.sh \
-  "$HOME/albumen-trial/copy" \
-  "$HOME/albumen-trial/scan.jsonl"
-albumen verify-manifest \
-  --manifest "$HOME/albumen-trial/scan.jsonl" \
-  --against "$HOME/albumen-trial/copy"
-```
-
-Exit: the copy's bytes, mtime, and xattrs match the snapshot taken before the scan. macOS may update atime. The live volume was not the path that was scanned.
+Exit: the mounted copy's bytes, mtime, xattrs, and access time match the snapshot taken before the scan. The original volume was not the path that was scanned.
