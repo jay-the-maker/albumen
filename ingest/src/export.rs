@@ -7,7 +7,7 @@
 //! is left alone. A different file at that relative path is an error.
 
 use std::collections::BTreeSet;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -315,27 +315,13 @@ pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), Inge
             .map_err(|err| IngestError::io(&tmp, err))?;
         file.sync_all().map_err(|err| IngestError::io(&tmp, err))?;
         crate::dest::rename(&tmp, path)?;
-        sync_parent(parent)?;
+        crate::dest::sync_dir(parent)?;
         Ok(())
     })();
     if write_result.is_err() {
         crate::dest::remove_file_best_effort(&tmp);
     }
     write_result
-}
-
-/// Persist the directory entry for the renamed manifest.
-///
-/// The manifest file is already fsynced. On Windows, opening some directories
-/// (including the process temp root) returns access denied. That is not a
-/// missing file. The rename has already landed.
-fn sync_parent(parent: &Path) -> Result<(), IngestError> {
-    match File::open(parent).and_then(|dir| dir.sync_all()) {
-        Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
-        Err(err) => Err(IngestError::io(parent, err)),
-    }
 }
 
 fn hash_through_source(path: &Path) -> Result<(String, u64), IngestError> {

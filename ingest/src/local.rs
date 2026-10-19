@@ -104,6 +104,7 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     copy_named_streams(source, &dest, &filename)?;
 
     let record = finalize_verified(&dest, &filename, &written_hash, mtime)?;
+    dest::sync_dir(dest_dir)?;
     guard.armed = false;
     Ok(record)
 }
@@ -172,6 +173,12 @@ pub(crate) fn copy_verify_reader<R: Read>(
     drop(output);
 
     let record = finalize_verified(dest, &filename, &written_hash, mtime)?;
+    if let Some(parent) = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        dest::sync_dir(parent)?;
+    }
     guard.armed = false;
     Ok(record)
 }
