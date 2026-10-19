@@ -44,4 +44,4 @@ There is no delete, move, or quarantine tool. Inbound messages are capped by `AL
 
 ## What this does not claim
 
-Apple notarization is not done. Gatekeeper will warn on the macOS binaries. The gap is recorded in [release-verify.md](release-verify.md). The ladder in [test-ladder.md](test-ladder.md) is how a real machine is approached. Rung 4 is a copied folder after rungs 1–3 are green.
+Release binaries are checked with the checksum and the keyless signature. Notarization needs a paid Apple Developer Program membership. Gatekeeper will warn when you open a macOS binary. That warning is expected. The notes are in [release-verify.md](release-verify.md). The ladder in [test-ladder.md](test-ladder.md) is how a real machine is approached. Rung 4 is a copied folder after rungs 1–3 are green.

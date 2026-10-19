@@ -4,7 +4,7 @@ This is the command sequence for trying Albumen against a **copy** of a photo fo
 
 The scan reads the copy. It does not open those files for write, and it does not change bytes, mtime, or xattrs. The manifest is a new file outside the copy. `chmod a-w` is not a substitute for `scripts/macos-readonly-sandbox.sh`, which denies network and confines writes to the manifest's parent.
 
-The `v0.1.0` tag is unchanged. The macOS workflow uploads these binaries onto that existing GitHub release. How to check the checksum and the keyless signature is [release-verify.md](release-verify.md). Notarization is deferred.
+The `v0.1.0` tag is unchanged. The release workflow uploads these binaries onto that existing GitHub release, along with Linux and Windows archives. How to check the checksum and the keyless signature is [release-verify.md](release-verify.md). Gatekeeper will warn when you open the binary. That warning is expected.
 
 ## Install the binaries
 
