@@ -274,6 +274,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.2
 
+      # vmtouch reports, before each sample, how much of the source corpus
+      # is in the page cache. With no flags it only calls mincore. The bench
+      # records "none" when it is missing, as on Windows.
+      - name: Install vmtouch for page-cache residency
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$(uname -s)" = Darwin ]; then
+            brew install vmtouch || true
+          else
+            sudo apt-get install -y vmtouch || { sudo apt-get update && sudo apt-get install -y vmtouch; } || true
+          fi
+          command -v vmtouch || echo "vmtouch unavailable; residency will be none"
+
       - name: Import 1000 synthetic files and compare with a raw write
         env:
           ALBUMEN_THROUGHPUT_LEG: ${{ matrix.label }}

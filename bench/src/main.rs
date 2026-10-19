@@ -145,7 +145,7 @@ fn run() -> Result<(), String> {
             println!("{text}");
             io::stdout().flush().map_err(|err| err.to_string())?;
             eprintln!(
-                "import-throughput leg={} files={} bytes_each={} workers={} verifiers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} ceiling_mb_s={:.3} ceiling_ratio={:.4} copy_ceiling_mb_s={:.3} copy_ceiling_ratio={:.4} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={}",
+                "import-throughput leg={} files={} bytes_each={} workers={} verifiers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} ceiling_mb_s={:.3} ceiling_ratio={:.4} copy_ceiling_mb_s={:.3} copy_ceiling_ratio={:.4} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={} comparison=abab rounds={} import_samples={} raw_samples={} resident_before_raw={} resident_before_import={} resident_before_copy_ceiling={}",
                 report.leg,
                 report.files,
                 report.bytes_each,
@@ -165,7 +165,13 @@ fn run() -> Result<(), String> {
                 report.reconciled_percent(),
                 report.mismatched,
                 report.source_changed,
-                phase_share_line(&report.phases)
+                phase_share_line(&report.phases),
+                report.rounds,
+                rate_list(&report.import_samples),
+                rate_list(&report.raw_samples),
+                share_list(&report.resident_before_raw),
+                share_list(&report.resident_before_import),
+                share_list(&report.resident_before_copy_ceiling),
             );
             let problems = throughput_problems(&report);
             if !problems.is_empty() {
@@ -260,4 +266,20 @@ fn pretty(report: &Report) -> Result<String, String> {
 fn print_report(report: &Report) -> Result<(), String> {
     println!("{}", pretty(report)?);
     io::stdout().flush().map_err(|err| err.to_string())
+}
+
+fn rate_list(rates: &[f64]) -> String {
+    rates
+        .iter()
+        .map(|rate| format!("{rate:.1}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn share_list(shares: &[Option<f64>]) -> String {
+    shares
+        .iter()
+        .map(|share| share.map_or_else(|| "none".to_string(), |share| format!("{share:.3}")))
+        .collect::<Vec<_>>()
+        .join(",")
 }
