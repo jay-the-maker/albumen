@@ -10,6 +10,28 @@
 #   XMP-dc:Identifier
 set -euo pipefail
 
+# Git Bash rewrites arguments that look like POSIX paths before it starts a
+# Windows program. ffmpeg's lavfi graph is not a path. Keep the arguments we
+# wrote, and hand Windows programs a cygpath -w path instead.
+win_native=0
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    win_native=1
+    export MSYS2_ARG_CONV_EXCL='*'
+    export MSYS_NO_PATHCONV=1
+    ;;
+esac
+
+native() {
+  if [[ "$win_native" -eq 1 ]]; then
+    cygpath -w "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+trap 'echo "synthetic-live-photo.sh failed: status $? line ${BASH_LINENO[0]:-?}" >&2' ERR
+
 out="${1:?usage: synthetic-live-photo.sh DIR}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
@@ -22,11 +44,17 @@ if ! command -v exiftool >/dev/null 2>&1; then
   echo "exiftool is required to write the Live Photo content identifier" >&2
   exit 1
 fi
-if command -v python3 >/dev/null 2>&1; then
-  PY=python3
-elif command -v python >/dev/null 2>&1; then
-  PY=python
-else
+PY=""
+# On Windows, python3 is often the Store alias. It is on PATH and exits
+# without running Python. Use the first interpreter that actually starts.
+for candidate in python3 python py; do
+  if command -v "$candidate" >/dev/null 2>&1 \
+    && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,) else 1)' >/dev/null 2>&1; then
+    PY=$candidate
+    break
+  fi
+done
+if [[ -z "$PY" ]]; then
   echo "python3 is required to wrap the HEVC still as HEIC" >&2
   exit 1
 fi
@@ -35,13 +63,22 @@ CONTENT_ID="A1B2C3D4-E5F6-4071-8A9B-C0D1E2F30405"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-ffmpeg -y -hide_banner -loglevel error \
+run_ffmpeg() {
+  local log="$work/ffmpeg.log"
+  if ! ffmpeg "$@" >"$log" 2>&1; then
+    echo "ffmpeg failed:" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+}
+
+run_ffmpeg -y -hide_banner -loglevel error \
   -f lavfi -i "color=c=0x336699:s=64x64:d=1,format=yuv420p" \
   -frames:v 1 -c:v libx265 -pix_fmt yuv420p -tag:v hvc1 \
   -x265-params still-picture=1 \
-  "$work/still.mp4" >/dev/null
+  "$(native "$work/still.mp4")"
 
-"$PY" - "$work/still.mp4" "$work/IMG_LIVE.heic" <<'PY'
+"$PY" - "$(native "$work/still.mp4")" "$(native "$work/IMG_LIVE.heic")" <<'PY'
 import struct, sys
 
 def box(typ, payload):
@@ -128,17 +165,17 @@ blob = assemble(len(blob) - len(sample))
 open(sys.argv[2], "wb").write(blob)
 PY
 
-ffmpeg -y -hide_banner -loglevel error \
+run_ffmpeg -y -hide_banner -loglevel error \
   -f lavfi -i "color=c=0x336699:s=64x64:d=1,format=yuv420p" \
   -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 32 -an \
   -metadata title="Albumen CC0 synthetic live photo" \
   -metadata artist="Albumen Project" \
   -metadata copyright="CC0-1.0" \
-  "$work/IMG_LIVE.mov" >/dev/null
+  "$(native "$work/IMG_LIVE.mov")"
 
 exiftool -overwrite_original \
   -Keys:ContentIdentifier="$CONTENT_ID" \
-  "$work/IMG_LIVE.mov" >/dev/null
+  "$(native "$work/IMG_LIVE.mov")" >/dev/null
 
 # Apple maker notes and a QuickTime Keys box cannot be created in a HEIC that
 # does not already have them. Try those writes first, on a copy, and keep the
@@ -147,8 +184,8 @@ clean="$work/IMG_LIVE.heic"
 heic_tag=""
 for tag in Apple:ContentIdentifier Keys:ContentIdentifier XMP-dc:Identifier; do
   cp "$clean" "$work/try.heic"
-  exiftool -overwrite_original "-${tag}=${CONTENT_ID}" "$work/try.heic" >/dev/null
-  if exiftool -s3 -"$tag" "$work/try.heic" | grep -Fxq "$CONTENT_ID"; then
+  exiftool -overwrite_original "-${tag}=${CONTENT_ID}" "$(native "$work/try.heic")" >/dev/null
+  if exiftool -s3 -"$tag" "$(native "$work/try.heic")" | grep -Fxq "$CONTENT_ID"; then
     heic_tag="$tag"
     mv "$work/try.heic" "$out/IMG_LIVE.heic"
     break

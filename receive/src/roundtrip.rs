@@ -23,14 +23,18 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
     let generated = tempfile::tempdir().unwrap();
     let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../scripts/synthetic-live-photo.sh");
-    let output = std::process::Command::new("bash")
+    let bash = bash_program();
+    let output = std::process::Command::new(&bash)
         .arg(&script)
         .arg(generated.path())
         .output()
-        .unwrap_or_else(|err| panic!("run {}: {err}", script.display()));
+        .unwrap_or_else(|err| panic!("run {} {}: {err}", bash.display(), script.display()));
     assert!(
         output.status.success(),
-        "synthetic live photo failed: {}",
+        "synthetic live photo failed via {} (status {:?})\nstdout:\n{}\nstderr:\n{}",
+        bash.display(),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let heic = generated.path().join("IMG_LIVE.heic");
@@ -89,6 +93,21 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
         sha256_hex(&exported.path().join("IMG_LIVE.mov")).unwrap(),
         mov_sha
     );
+}
+
+fn bash_program() -> std::path::PathBuf {
+    if cfg!(windows) {
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    std::path::PathBuf::from("bash")
 }
 
 fn identifier(path: &std::path::Path, key: &str) -> Option<String> {

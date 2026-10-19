@@ -148,14 +148,18 @@ fn copy_stamped(source: &Path, dest: &Path) {
 
 fn generate(dir: &Path) -> String {
     let script = repo_path("scripts/synthetic-live-photo.sh");
-    let output = Command::new("bash")
+    let bash = bash_program();
+    let output = Command::new(&bash)
         .arg(&script)
         .arg(dir)
         .output()
-        .unwrap_or_else(|err| panic!("run {}: {err}", script.display()));
+        .unwrap_or_else(|err| panic!("run {} {}: {err}", bash.display(), script.display()));
     assert!(
         output.status.success(),
-        "synthetic live photo failed: {}",
+        "synthetic live photo failed via {} (status {:?})\nstdout:\n{}\nstderr:\n{}",
+        bash.display(),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout)
@@ -164,6 +168,26 @@ fn generate(dir: &Path) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Git for Windows, not `C:\Windows\System32\bash.exe`.
+///
+/// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
+/// Bash when the test process is a Windows binary, and it exits before the
+/// generator runs.
+fn bash_program() -> PathBuf {
+    if cfg!(windows) {
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    PathBuf::from("bash")
 }
 
 fn repo_path(relative: &str) -> PathBuf {

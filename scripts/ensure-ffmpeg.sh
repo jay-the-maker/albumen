@@ -23,10 +23,30 @@ case "$os" in
     ;;
   MINGW*|MSYS*|CYGWIN*)
     choco install ffmpeg -y --no-progress
-    if [[ -n "${GITHUB_PATH:-}" ]]; then
-      printf '%s\n' "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+    # The Chocolatey shim is not a reliable PATH entry for the next step.
+    # Publish the directory that contains ffmpeg.exe as a Windows path.
+    bin=""
+    for candidate in \
+      /c/ProgramData/chocolatey/lib/ffmpeg/tools/ffmpeg/bin \
+      /c/ProgramData/chocolatey/bin
+    do
+      if [[ -x "$candidate/ffmpeg.exe" || -x "$candidate/ffmpeg" ]]; then
+        bin="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$bin" ]]; then
+      echo "ffmpeg install did not produce ffmpeg.exe" >&2
+      exit 1
     fi
-    export PATH="/c/ProgramData/chocolatey/bin:${PATH}"
+    export PATH="${bin}:${PATH}"
+    if [[ -n "${GITHUB_PATH:-}" ]]; then
+      if command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$bin" >>"$GITHUB_PATH"
+      else
+        printf '%s\n' "$bin" >>"$GITHUB_PATH"
+      fi
+    fi
     ;;
   *)
     echo "no ffmpeg, and no installer for $os" >&2
