@@ -20,7 +20,6 @@ if ! command -v xkbcomp >/dev/null 2>&1; then
 fi
 
 sdk=$("$root/scripts/install-android-sdk.sh" | tail -n 1)
-gradle=$("$root/scripts/install-gradle.sh" | tail -n 1)
 export ANDROID_HOME="$sdk"
 export ANDROID_SDK_ROOT="$sdk"
 export PATH="$sdk/platform-tools:$sdk/emulator:$PATH"
@@ -104,5 +103,4 @@ if [[ "$booted" != "1" ]]; then
 fi
 
 adb shell input keyevent 82 || true
-cd "$root/mobile/android"
-"$gradle" :backup:connectedDebugAndroidTest --no-daemon --stacktrace
+"$root/scripts/android-emulator-connected.sh"

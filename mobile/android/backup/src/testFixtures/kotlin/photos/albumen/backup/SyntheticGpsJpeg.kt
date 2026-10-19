@@ -27,6 +27,52 @@ object SyntheticGpsJpeg {
         return out
     }
 
+    /**
+     * The first Exif APP1 segment, marker included.
+     * For [bytes] that segment is the synthetic GPS block (1°2'3" N, 4°5'6" E).
+     */
+    fun exifApp1(jpeg: ByteArray): ByteArray {
+        require(jpeg.size >= 4 && jpeg[0] == 0xFF.toByte() && jpeg[1] == 0xD8.toByte()) {
+            "not a JPEG"
+        }
+        var index = 2
+        while (index + 4 <= jpeg.size) {
+            if (jpeg[index] != 0xFF.toByte()) {
+                throw IllegalArgumentException("JPEG marker expected at $index")
+            }
+            val marker = jpeg[index + 1].toInt() and 0xFF
+            if (marker == 0xD8 || marker == 0x01 || marker in 0xD0..0xD7) {
+                index += 2
+                continue
+            }
+            if (marker == 0xD9 || marker == 0xDA) {
+                break
+            }
+            val length = ((jpeg[index + 2].toInt() and 0xFF) shl 8) or (jpeg[index + 3].toInt() and 0xFF)
+            if (length < 2 || index + 2 + length > jpeg.size) {
+                throw IllegalArgumentException("JPEG segment length $length at $index")
+            }
+            if (marker == 0xE1 && length >= 8 && isExifHeader(jpeg, index + 4)) {
+                return jpeg.copyOfRange(index, index + 2 + length)
+            }
+            index += 2 + length
+        }
+        throw IllegalArgumentException("JPEG has no Exif APP1 segment")
+    }
+
+    private fun isExifHeader(jpeg: ByteArray, offset: Int): Boolean {
+        val header = byteArrayOf('E'.code.toByte(), 'x'.code.toByte(), 'i'.code.toByte(), 'f'.code.toByte(), 0, 0)
+        if (offset + header.size > jpeg.size) {
+            return false
+        }
+        for (i in header.indices) {
+            if (jpeg[offset + i] != header[i]) {
+                return false
+            }
+        }
+        return true
+    }
+
     private fun tiff(): ByteArray {
         val tiff = ByteBuffer.allocate(128).order(ByteOrder.LITTLE_ENDIAN)
         tiff.put("II".toByteArray(Charsets.US_ASCII))

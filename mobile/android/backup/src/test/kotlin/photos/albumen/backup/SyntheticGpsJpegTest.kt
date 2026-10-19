@@ -28,6 +28,13 @@ class SyntheticGpsJpegTest {
         val frame = sofSize(jpeg)
         assertEquals(1, frame.first)
         assertEquals(1, frame.second)
+        val exif = SyntheticGpsJpeg.exifApp1(jpeg)
+        assertEquals(0xFF.toByte(), exif[0])
+        assertEquals(0xE1.toByte(), exif[1])
+        assertTrue(contains(exif, rationals.array()))
+        assertTrue(contains(exif, byteArrayOf(SyntheticGpsJpeg.LAT_REF.code.toByte(), 0)))
+        assertTrue(contains(exif, byteArrayOf(SyntheticGpsJpeg.LON_REF.code.toByte(), 0)))
+        assertArrayEquals(exif, SyntheticGpsJpeg.exifApp1(jpeg.copyOf()))
 
         val dir = File("build/synthetic-gps").apply { mkdirs() }
         val spool = copyToCache(jpeg.inputStream(), SyntheticGpsJpeg.DISPLAY_NAME, dir)

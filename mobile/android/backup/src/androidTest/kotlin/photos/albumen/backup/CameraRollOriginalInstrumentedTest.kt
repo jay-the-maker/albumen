@@ -22,7 +22,8 @@ import java.util.UUID
 
 /**
  * Inserts a synthetic JPEG, reads it back with `setRequireOriginal`, and PUTs
- * those bytes to a loopback receiver. The MediaStore row is still there
+ * those bytes to a loopback receiver. The GPS EXIF segment the receiver
+ * stored is byte-identical to the source. The MediaStore row is still there
  * afterwards, with the same bytes.
  */
 @RunWith(AndroidJUnit4::class)
@@ -71,8 +72,14 @@ class CameraRollOriginalInstrumentedTest {
         }
 
         val sha = Sha256.hex(jpeg)
+        val sourceExif = SyntheticGpsJpeg.exifApp1(jpeg)
         LoopbackWebDav { headers, body ->
             assertArrayEquals(jpeg, body)
+            assertArrayEquals(
+                "GPS EXIF of the received file differs from the source",
+                sourceExif,
+                SyntheticGpsJpeg.exifApp1(body),
+            )
             assertTrue(headers.contains("X-Albumen-Mtime: ${found.mtimeSeconds}"))
             LoopbackWebDav.Reply(201, Sha256.hex(body), "Created")
         }.use { server ->
@@ -96,12 +103,20 @@ class CameraRollOriginalInstrumentedTest {
             assertTrue(reports.last().contains("Verified 1 this run."))
             assertTrue(reports.last().contains("Failures 0."))
             assertEquals(1, server.bodies.size)
-            assertEquals(sha, Sha256.hex(server.bodies.single()))
+            val received = server.bodies.single()
+            assertEquals(sha, Sha256.hex(received))
+            assertArrayEquals(
+                "GPS EXIF of the received file differs from the source",
+                sourceExif,
+                SyntheticGpsJpeg.exifApp1(received),
+            )
         }
 
         val again = CameraRoll.spool(resolver, found, cache)
         try {
-            assertArrayEquals(jpeg, again.file.readBytes())
+            val kept = again.file.readBytes()
+            assertArrayEquals(jpeg, kept)
+            assertArrayEquals(sourceExif, SyntheticGpsJpeg.exifApp1(kept))
         } finally {
             again.file.delete()
         }

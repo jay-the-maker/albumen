@@ -78,8 +78,9 @@ jobs:
 
   android-emulator:
     name: android camera-roll emulator
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # This job uses ubuntu-latest for KVM. The other jobs stay on ubuntu-24.04.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -91,8 +92,19 @@ jobs:
           fi
           java -version
 
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: MediaStore original on an API 30 emulator
-        run: scripts/android-emulator-ci.sh
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 30
+          target: aosp_atd
+          arch: x86_64
+          script: scripts/android-emulator-connected.sh
 
   ios:
     name: ios camera-roll skeleton
