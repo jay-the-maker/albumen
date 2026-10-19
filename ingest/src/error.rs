@@ -152,6 +152,10 @@ pub enum IngestError {
         sources_unchanged: bool,
         report: String,
     },
+
+    /// A family-library rule refused the operation. No other member's bytes were changed.
+    #[error("{message}")]
+    Family { message: String },
 }
 
 impl IngestError {
