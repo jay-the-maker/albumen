@@ -143,6 +143,47 @@ pub fn process_cpu_time() -> std::io::Result<std::time::Duration> {
     ))
 }
 
+/// User plus kernel CPU time the calling thread has used, from `GetThreadTimes`.
+#[cfg(windows)]
+pub fn thread_cpu_time() -> std::io::Result<std::time::Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    let ok = unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ticks =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    // FILETIME counts 100-nanosecond intervals.
+    Ok(std::time::Duration::from_nanos(
+        (ticks(kernel) + ticks(user)).saturating_mul(100),
+    ))
+}
+
+/// User plus system CPU time the calling thread has used,
+/// from `CLOCK_THREAD_CPUTIME_ID`.
+#[cfg(unix)]
+pub fn thread_cpu_time() -> std::io::Result<std::time::Duration> {
+    let time = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+    Ok(std::time::Duration::new(
+        u64::try_from(time.tv_sec).unwrap_or(0),
+        u32::try_from(time.tv_nsec).unwrap_or(0),
+    ))
+}
+
 #[cfg(not(windows))]
 pub fn raw_stream_names(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     let _ = path;

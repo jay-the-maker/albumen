@@ -157,6 +157,7 @@ dependencies = [
 name = "albumen-win"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "windows-sys 0.59.0",
 ]
 
