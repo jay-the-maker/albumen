@@ -114,16 +114,10 @@ fn longest_mount<'a>(path: &Path, mounts: &'a [Mount]) -> Option<&'a Mount> {
 
 fn read_mounts() -> Vec<Mount> {
     #[cfg(target_os = "linux")]
-    {
-        let Ok(text) = fs::read_to_string("/proc/self/mountinfo") else {
-            return Vec::new();
-        };
-        parse_mountinfo(&text)
-    }
+    let text = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
     #[cfg(not(target_os = "linux"))]
-    {
-        Vec::new()
-    }
+    let text = String::new();
+    parse_mountinfo(&text)
 }
 
 fn parse_mountinfo(text: &str) -> Vec<Mount> {
@@ -174,6 +168,10 @@ fn identity(path: &Path) -> (u64, u64) {
         if let Ok(meta) = fs::metadata(path) {
             return (meta.dev(), meta.ino());
         }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
     (0, 0)
 }
