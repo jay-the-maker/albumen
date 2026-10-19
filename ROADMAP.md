@@ -24,15 +24,15 @@ Shipped as `albumen export` and `albumen verify-manifest`. The command copy-veri
 
 ## Camera-roll background backup spike
 
-Skeletons are in `mobile/ios` and `mobile/android`. They are not apps. Each one exports the camera original, uploads it to `albumen-receive`, and accepts the copy only when the client's SHA-256 matches `X-Albumen-Sha256` from `copy_verify`. Nothing in the camera roll is deleted. No transcode on the way in.
+`mobile/ios` is the host app and the background upload extension. `mobile/android` is the camera-roll library and host. Each one exports the camera original, uploads it to `albumen-receive`, and accepts the copy only when the client's SHA-256 matches `X-Albumen-Sha256` from `copy_verify`. Nothing in the camera roll is deleted. No transcode on the way in.
 
 ### iOS
 
 - `mobile/ios` reads PhotoKit `PHAssetResource` originals. A Live Photo is the still plus the paired video. An edited asset prefers the full-size unadjusted resource when PhotoKit has one. An iCloud-optimized asset is downloaded with `isNetworkAccessAllowed`. If only a derivative is available, the export fails and logs that refusal. Adjustment data is kept as `{filename}.adjustment`. `PHImageManager.requestImage` is not used.
 - The package builds with `swift test` on a macOS runner. PhotoKit is present there.
-- The receiver password is stored in the Keychain.
-- Still open: an iOS 26.1 background upload extension, so new photos and videos leave the device without the app staying in the foreground. The scope is [docs/camera-roll-scope.md](docs/camera-roll-scope.md). That target needs an Xcode project and a signing identity, which this package does not have.
-- Still open: a host that requests PhotoKit access without a version that strips GPS.
+- The receiver password is stored in the Keychain. The host and the background upload extension share it through a keychain access group. The PUT request does not carry it.
+- The Xcode host and the `AlbumenBackgroundUpload` extension are in `mobile/ios/Albumen.xcodeproj`. The host requests PhotoKit access and copies `PHAssetResource` originals, so location stays in the file that is uploaded. A background `URLSession` and a background-processing task continue the PUT after the app leaves the foreground. SHA-256 is checked against `X-Albumen-Sha256`. Failures are written to the shared status file and posted as a local notification. Nothing in Photos is deleted. See [docs/mobile-ios-backup.md](docs/mobile-ios-backup.md).
+- CI builds that Xcode project on `macos-14` only, with code signing off. A signing identity is not in this repository, and the app is not published.
 
 ### Android
 

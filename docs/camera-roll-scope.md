@@ -1,6 +1,6 @@
 # Camera-roll scope
 
-The iOS and Android trees are libraries, not apps. This note is the work those libraries do not contain yet, and the failure already implemented when PhotoKit has only a derivative.
+The iOS tree has a host app and a background upload extension. This note is the work still open, and the failure already implemented when PhotoKit has only a derivative.
 
 ## iCloud originals
 
@@ -12,17 +12,11 @@ The iOS and Android trees are libraries, not apps. This note is the work those l
 
 ## iOS background upload
 
-New photos and videos should leave the device while Albumen is not in the foreground. That is not in `mobile/ios`.
+`mobile/ios/Albumen.xcodeproj` is the host app and the `AlbumenBackgroundUpload` extension. CI builds both on `macos-14` with `scripts/ios-xcode.sh`. The job does not sign the app and does not publish it. A signing identity is not in this repository. The path is [mobile-ios-backup.md](mobile-ios-backup.md).
 
-The package has no application target and no extension target. CI runs `swift test --package-path mobile/ios` on `macos-14`. An extension needs an Xcode project, a bundle identifier, a signing identity, and a provisioning profile. Those are not in this repository.
+The host and the extension share the app group `group.photos.albumen`. That group holds the queue of asset identifiers, the newest creation time already queued, and the status file. The receiver password is in the Keychain. When the build expands `AlbumenKeychainAccessGroup`, both targets use that access group. The password is not written into either `Info.plist`, the queue, or the PUT request. The session delegate answers the receiver's Basic challenge from the Keychain.
 
-The extension, once it exists, should:
-
-- Share an app group with the host for the queue of asset identifiers and the last library change it handled.
-- Read the receiver password from the Keychain in a keychain access group shared with the host. The password is not copied into the extension's `Info.plist` or into a file.
-- Export with `OriginalResources` and `OriginalPolicy`. `isNetworkAccessAllowed` stays true. A `derivativeOnly` failure is logged, left in the queue, and not replaced with a preview upload. The Photos asset is not deleted.
-- Use a background `URLSession`, or the iOS background-processing task that can run after the app is suspended, for the WebDAV PUT. The upload still counts only when `X-Albumen-Sha256` matches the file that was sent, and the client still sends `X-Albumen-Mtime`.
-- Observe the photo library for new assets. The Swift package cannot register that observer without an app target.
+Export uses `OriginalResources` and `OriginalPolicy`. `isNetworkAccessAllowed` stays true. A `derivativeOnly` failure is logged, left in the queue, shown on the status screen, and not replaced with a preview upload. The Photos asset is not deleted. The upload uses a background `URLSession` (`photos.albumen.backup.background-upload`) and a `BGProcessingTask` (`photos.albumen.backup.refresh`). It counts only when `X-Albumen-Sha256` matches the file that was sent. The client sends `X-Albumen-Mtime`. The host observes the photo library and runs another pass for new assets. Every failure is a line in `albumen-backup-status.txt` and a local notification.
 
 ## Android runtime permissions
 
