@@ -72,6 +72,18 @@ pub const MAX_IMPORT_WORKERS: usize = 8;
 /// disk and cache state over the run (ABAB). One sample on a warm or cold
 /// disk does not move either median.
 pub const RAW_SAMPLES_PER_SIDE: usize = 3;
+/// The CPU gate reads the median of at least this many import rounds.
+pub const MIN_CPU_ROUNDS: usize = 5;
+const _: () = assert!(RAW_SAMPLES_PER_SIDE * 2 >= MIN_CPU_ROUNDS);
+
+/// CPU of one import round, per GB imported.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CpuRound {
+    pub raw: f64,
+    pub normalized: f64,
+    /// Thread CPU of the write phase in this round, in ms.
+    pub write_ms: f64,
+}
 
 const JPEG_PREFIX: &[u8] = &[
     0xFF, 0xD8, // SOI
@@ -163,6 +175,13 @@ pub struct ThroughputReport {
     /// CPU times `sha256_mb_s / 1800`. Everything else stays as measured.
     /// The gate and the scored target use this number.
     pub cpu_seconds_per_gb_normalized: f64,
+    /// Every import round, in run order.
+    pub cpu_rounds: Vec<CpuRound>,
+    /// Median of the rounds' normalized CPU seconds per GB. The gate and
+    /// the scored target read this value.
+    pub cpu_seconds_per_gb_median: f64,
+    /// Order of the raw sample and the import inside each round.
+    pub round_order: String,
     /// The CPU has the SHA-256 instructions `sha2` checks for (SHA-NI on
     /// x86_64, SHA2 on aarch64).
     pub sha_hw: bool,
@@ -257,10 +276,17 @@ impl ThroughputReport {
         value["cpu_seconds_per_gb_gate"] = json!(CPU_SECONDS_PER_GB_GATE);
         value["cpu_seconds_per_gb_normalized"] = json!(self.cpu_seconds_per_gb_normalized);
         value["sha256_reference_mb_s"] = json!(SHA256_REFERENCE_MB_S);
+        value["cpu_seconds_per_gb_median"] = json!(self.cpu_seconds_per_gb_median);
+        value["cpu_rounds"] = json!(self
+            .cpu_rounds
+            .iter()
+            .map(|round| json!({"raw": round.raw, "normalized": round.normalized, "write_ms": round.write_ms}))
+            .collect::<Vec<_>>());
+        value["round_order"] = json!(self.round_order);
         value["cpu_seconds_per_gb_gate_passed"] =
-            json!(cpu_gate_passes(self.cpu_seconds_per_gb_normalized));
+            json!(cpu_gate_passes(self.cpu_seconds_per_gb_median));
         value["cpu_seconds_per_gb_met"] =
-            json!(self.cpu_seconds_per_gb_normalized <= CPU_SECONDS_PER_GB_TARGET);
+            json!(self.cpu_seconds_per_gb_median <= CPU_SECONDS_PER_GB_TARGET);
         value["phase_cpu_ms_per_round"] = phase_cpu_ms(self);
         value["sha_hw"] = json!(self.sha_hw);
         value["sha256_mb_s"] = json!(self.sha256_mb_s);
@@ -289,9 +315,17 @@ pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
             report.source_changed
         ));
     }
-    if !cpu_gate_passes(report.cpu_seconds_per_gb_normalized) {
+    if report.cpu_rounds.len() < MIN_CPU_ROUNDS {
         problems.push(format!(
-            "import CPU {:.3} normalized CPU seconds per GB (raw {:.3}, sha256_mb_s {:.0}) is above the {:.1} regression gate",
+            "import CPU has {} rounds; the gate needs at least {MIN_CPU_ROUNDS}",
+            report.cpu_rounds.len()
+        ));
+    }
+    if !cpu_gate_passes(report.cpu_seconds_per_gb_median) {
+        problems.push(format!(
+            "import CPU median {:.3} normalized CPU seconds per GB over {} rounds (total {:.3} normalized, {:.3} raw, sha256_mb_s {:.0}) is above the {:.1} regression gate",
+            report.cpu_seconds_per_gb_median,
+            report.cpu_rounds.len(),
             report.cpu_seconds_per_gb_normalized,
             report.cpu_seconds_per_gb,
             report.sha256_mb_s,
@@ -364,15 +398,28 @@ pub fn measure_throughput(
     reset_copy_profile();
     let mut cpu_seconds = 0.0;
     let mut import_seconds_total = 0.0;
+    let order = round_order();
+    let gb = (files.saturating_mul(bytes_each).max(1) as f64) / 1e9;
+    let sha_rate = sha256_mb_s();
+    let mut cpu_rounds = Vec::with_capacity(rounds);
+    let mut before_hash = 0u64;
+    let mut before_write = 0u64;
     for round in 0..rounds {
-        resident_before_raw.push(resident_share(&source_paths));
-        sample_raw_once(
-            &root.path.join("raw"),
-            files,
-            bytes_each,
-            &mut raw_samples,
-            &mut plain_samples,
-        )?;
+        let import_first = match order {
+            RoundOrder::RawFirst => false,
+            RoundOrder::ImportFirst => true,
+            RoundOrder::Alternate => round % 2 == 1,
+        };
+        if !import_first {
+            resident_before_raw.push(resident_share(&source_paths));
+            sample_raw_once(
+                &root.path.join("raw"),
+                files,
+                bytes_each,
+                &mut raw_samples,
+                &mut plain_samples,
+            )?;
+        }
 
         resident_before_import.push(resident_share(&source_paths));
         fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
@@ -380,7 +427,19 @@ pub fn measure_throughput(
         let started = Instant::now();
         let (out, bad, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
         let seconds = started.elapsed().as_secs_f64().max(1e-9);
-        cpu_seconds += process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+        let round_cpu = process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+        cpu_seconds += round_cpu;
+        let so_far = copy_phases();
+        let hash_now = hash_cpu_ns(&so_far);
+        let write_now = phase_cpu_ns(&so_far, "write");
+        let round_hash = hash_now.saturating_sub(before_hash) as f64 / 1e9 / gb;
+        cpu_rounds.push(CpuRound {
+            raw: round_cpu / gb,
+            normalized: normalized_cpu_seconds_per_gb(round_cpu / gb, round_hash, sha_rate),
+            write_ms: write_now.saturating_sub(before_write) as f64 / 1e6,
+        });
+        before_hash = hash_now;
+        before_write = write_now;
         import_seconds_total += seconds;
         import_samples.push((imported_bytes as f64) / 1_000_000.0 / seconds);
         // Every round must reconcile, so the report keeps the worst one.
@@ -391,6 +450,16 @@ pub fn measure_throughput(
         // sample. The source directory stays, read-only, until the temp
         // root drops.
         fs::remove_dir_all(&dest).map_err(|err| format!("remove measured destination: {err}"))?;
+        if import_first {
+            resident_before_raw.push(resident_share(&source_paths));
+            sample_raw_once(
+                &root.path.join("raw"),
+                files,
+                bytes_each,
+                &mut raw_samples,
+                &mut plain_samples,
+            )?;
+        }
 
         if round % 2 == 0 {
             ceiling_samples.push(ceiling_sample(
@@ -424,8 +493,12 @@ pub fn measure_throughput(
     if !(raw_mb_s.is_finite() && raw_mb_s > 0.0 && import_mb_s.is_finite() && import_mb_s > 0.0) {
         return Err("import or raw throughput was not a positive number".to_string());
     }
-    let gb = (expected_bytes.max(1) as f64) / 1e9;
-    let sha_rate = sha256_mb_s();
+    let cpu_seconds_per_gb_median = median(
+        &mut cpu_rounds
+            .iter()
+            .map(|round| round.normalized)
+            .collect::<Vec<_>>(),
+    );
     Ok(ThroughputReport {
         leg: leg.to_string(),
         disk_model: disk_model(),
@@ -472,7 +545,60 @@ pub fn measure_throughput(
             hash_cpu_ns(&phases) as f64 / 1e9 / rounds as f64 / gb,
             sha_rate,
         ),
+        cpu_rounds,
+        cpu_seconds_per_gb_median,
+        round_order: order.name().to_string(),
     })
+}
+
+/// Order of the raw sample and the import in each round, from
+/// `ALBUMEN_THROUGHPUT_ORDER`: `raw-first` (the default), `import-first`,
+/// or `alternate`. A measurement knob only; the gate is the same.
+#[derive(Clone, Copy)]
+enum RoundOrder {
+    RawFirst,
+    ImportFirst,
+    Alternate,
+}
+
+impl RoundOrder {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RawFirst => "raw-first",
+            Self::ImportFirst => "import-first",
+            Self::Alternate => "alternate",
+        }
+    }
+}
+
+fn round_order() -> RoundOrder {
+    match std::env::var("ALBUMEN_THROUGHPUT_ORDER").as_deref() {
+        Ok("import-first") => RoundOrder::ImportFirst,
+        Ok("alternate") => RoundOrder::Alternate,
+        _ => RoundOrder::RawFirst,
+    }
+}
+
+fn phase_cpu_ns(phases: &albumen_ingest::CopyPhases, phase: &str) -> u64 {
+    phases
+        .cpu_named()
+        .iter()
+        .filter(|(name, _)| *name == phase)
+        .fold(0u64, |sum, (_, ns)| sum.saturating_add(*ns))
+}
+
+/// `raw/normalized/write_ms` for each round, in run order, for the log line.
+pub fn cpu_rounds_line(rounds: &[CpuRound]) -> String {
+    rounds
+        .iter()
+        .map(|round| {
+            format!(
+                "{:.3}/{:.3}/{:.0}",
+                round.raw, round.normalized, round.write_ms
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Thread CPU of the two SHA-256 phases, hash and read-back hash, summed.
@@ -892,8 +1018,9 @@ pub fn cpu_scorecard(report: &ThroughputReport) -> String {
     let mark = |met: bool| if met { "met" } else { "not met" };
     format!(
         "| import CPU ({leg}) | value | team target | |\n|---|---|---|---|\n\
-         | CPU seconds per GB, normalized to {sha_ref:.0} MB/s SHA-256 | {norm:.2} | ≤ {gb_target:.1} scored, ≤ {gb_gate:.1} gate (fails the job) | scored {gb_met}, gate {gate_met} |\n\
-         | CPU seconds per GB, raw | {gb:.2} | | |\n\
+         | CPU seconds per GB, normalized to {sha_ref:.0} MB/s SHA-256, median of {n} rounds | {median:.2} | ≤ {gb_target:.1} scored, ≤ {gb_gate:.1} gate (fails the job) | scored {gb_met}, gate {gate_met} |\n\
+         | CPU seconds per GB, normalized, all rounds | {norm:.2} | | |\n\
+         | CPU seconds per GB, raw, all rounds | {gb:.2} | | |\n\
          | cpu_percent (CPU ÷ (wall × {cores} cores)), context | {pct:.1}% | | |\n\
          | CPU seconds per 1,000 photos | {per_1000:.2} | | |\n\
          | hardware SHA-256 | {sha_hw} ({sha_mb_s:.0} MB/s) | | |\n",
@@ -902,9 +1029,11 @@ pub fn cpu_scorecard(report: &ThroughputReport) -> String {
         gb_target = CPU_SECONDS_PER_GB_TARGET,
         norm = report.cpu_seconds_per_gb_normalized,
         sha_ref = SHA256_REFERENCE_MB_S,
-        gb_met = mark(report.cpu_seconds_per_gb_normalized <= CPU_SECONDS_PER_GB_TARGET),
+        n = report.cpu_rounds.len(),
+        median = report.cpu_seconds_per_gb_median,
+        gb_met = mark(report.cpu_seconds_per_gb_median <= CPU_SECONDS_PER_GB_TARGET),
         gb_gate = CPU_SECONDS_PER_GB_GATE,
-        gate_met = mark(cpu_gate_passes(report.cpu_seconds_per_gb_normalized)),
+        gate_met = mark(cpu_gate_passes(report.cpu_seconds_per_gb_median)),
         cores = report.cores,
         pct = report.cpu_percent,
         per_1000 = report.cpu_seconds_per_1000,
@@ -1279,6 +1408,16 @@ mod tests {
             cpu_seconds_per_1000: 4.0,
             cpu_seconds_per_gb: 0.8,
             cpu_seconds_per_gb_normalized: 0.8,
+            cpu_rounds: vec![
+                CpuRound {
+                    raw: 0.8,
+                    normalized: 0.8,
+                    write_ms: 1.0,
+                };
+                6
+            ],
+            cpu_seconds_per_gb_median: 0.8,
+            round_order: "raw-first".to_string(),
             sha_hw: true,
             sha256_mb_s: 2000.0,
             verifiers: 2,
@@ -1291,10 +1430,37 @@ mod tests {
         assert!(report.reconciled());
         assert!(!ratio_passes(report.ratio));
         assert!(throughput_problems(&report).is_empty());
+        let mut few = report.clone();
+        few.cpu_rounds.truncate(MIN_CPU_ROUNDS - 1);
+        assert!(!throughput_problems(&few).is_empty());
+        let mut slow = report.clone();
+        slow.cpu_seconds_per_gb_median = 3.001;
+        assert!(!throughput_problems(&slow).is_empty());
         let mut missed = report.clone();
         missed.source_changed = 1;
         assert!(!missed.reconciled());
         assert!(!throughput_problems(&missed).is_empty());
+    }
+
+    #[test]
+    fn the_cpu_gate_reads_the_median_round_and_needs_five_rounds() {
+        // Same report fixture as above, with the CPU rounds varied.
+        let round = |normalized: f64| CpuRound {
+            raw: normalized,
+            normalized,
+            write_ms: 0.0,
+        };
+        let mut rounds: Vec<CpuRound> = [2.6, 2.7, 4.1, 2.8, 2.9, 3.6].map(round).to_vec();
+        let mut values: Vec<f64> = rounds.iter().map(|r| r.normalized).collect();
+        // Even count: the mean of the middle two, 2.85. Two slow rounds do not fail it.
+        assert!((median(&mut values) - 2.85).abs() < 1e-9);
+        assert!(cpu_gate_passes(2.85));
+        rounds[0] = round(3.2);
+        rounds[1] = round(3.1);
+        let mut values: Vec<f64> = rounds.iter().map(|r| r.normalized).collect();
+        assert!(!cpu_gate_passes(median(&mut values)));
+        assert_eq!(MIN_CPU_ROUNDS, 5);
+        assert_eq!(cpu_rounds_line(&[round(2.5)]), "2.500/2.500/0");
     }
 
     #[test]
