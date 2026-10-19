@@ -104,7 +104,7 @@ jobs:
 
       - name: ffmpeg for the synthetic Live Photo
         shell: bash
-        run: scripts/ensure-ffmpeg.sh
+        run: bash scripts/ensure-ffmpeg.sh
 
       - name: Round-trip originals through the local filesystem and MinIO
         shell: bash
