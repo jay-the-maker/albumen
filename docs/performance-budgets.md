@@ -238,3 +238,17 @@ A local run of the default command, on this machine's ext4 filesystem, imported 
 The index is saved outside the library: `--index-dir`, else `ALBUMEN_INDEX_DIR`, else `index` in the platform data directory. A directory inside the library is refused, and nothing is written inside the library. If the index directory cannot be written, search answers from the in-memory index. `albumen-mcp --build-index` builds or refreshes it and prints the time.
 
 The `library scale` workflow (`scripts/library-scale.py`) reports the first index build as its own number, then times cold start, time to first answer, search p50 and p95 over 200 fixed queries, and peak memory against the saved index. Targets: time to first answer ≤ 1.5 s, search p95 ≤ 200 ms. `mcp/tests/search_index.rs` checks that index results equal a full walk, including files added, renamed, and removed between runs and while the server runs.
+
+### Before the index
+
+These are the walk-based numbers from before the index, when every search walked and statted the whole library. Same generator, 380,000 items, 200 fixed queries, seed 380000. Every leg that finished, and a local Linux run, built the same library: `paths_sha256` `ec8ac920ee080c9d23c40c8a0a3110b3f255ef133109314336635852eda1886e`. Cold start here is spawn to `initialize` and `tools/list`, which needed no work before the index existed. Process start to first answer was one full walk.
+
+| Leg | Run | Cold start | Process start to first answer | Search p50 | Search p95 | Peak memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ubuntu-24.04` | [39244175785](https://github.com/jay-the-maker/albumen/actions/runs/39244175785) | 1.7 ms | 4,399.1 ms | 4,277.0 ms | 4,380.9 ms | 5.7 MiB |
+| `ubuntu-24.04` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623) | 2.1 ms | 5,313.7 ms | 5,268.2 ms | 5,459.8 ms | 5.6 MiB |
+| `macos-14` | [39244175785](https://github.com/jay-the-maker/albumen/actions/runs/39244175785) | 21.4 ms | 12,897.5 ms | 10,151.1 ms | 13,228.3 ms | 6.0 MiB |
+| `macos-14` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623) | 28.8 ms | 18,185.9 ms | 10,867.1 ms | 14,131.4 ms | 5.9 MiB |
+| `windows-2025` | [job 118035984598](https://github.com/jay-the-maker/albumen/actions/runs/39245400623/job/118035984598) | still running at 2026-10-19T05:50 PT | | | | |
+
+The 2,000-item smoke pass on `windows-2025` measured a search p95 of 192.2 ms with the walk. With the index, search p95 is 25 ms on `ubuntu-24.04`, 17 ms on `macos-14`, and 40 ms on `windows-2025`.
