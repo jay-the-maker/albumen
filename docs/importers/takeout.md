@@ -13,6 +13,8 @@ albumen import-takeout \
   --report ~/takeout-report.jsonl
 ```
 
+`--derive-xmp` is off unless you pass it. With the flag, each Takeout JSON also produces a new `.xmp` file. That file is not a rewrite of the JSON or the original.
+
 `--from` is either one archive or a directory of parts. A directory must contain only `.zip`, `.tgz`, and `.tar.gz` files. A nested folder, a symlink, or any other file is an error, so a part is never skipped. Parts are read in file-name order (`-001`, then `-002`). One archive path imports that file and does not look at its neighbors.
 
 `--to` is the library. It must not be the archive directory, a folder inside it, or a folder that contains the archives. That refusal is the "do not extract in place" rule.
@@ -50,19 +52,30 @@ Running the command again, with a new report path, is the same rule. Identical b
 
 ## Sidecars
 
-The archive-relative path is the destination path, so a JSON file Google placed next to a photo stays next to that photo even when the two members arrived in different parts.
+The archive-relative path is the destination path, so a JSON file Google placed next to a photo stays next to that photo even when the two members arrived in different parts. Pairing looks at every part before the copy, so a JSON in one part still names the media file from another part in the same album directory.
 
-These names are paired sidecars. The partner is the media file name, not a rewritten original:
+Takeout writes `{name}.supplemental-metadata.json`, or the older `{name}.json`. The longest JSON name is 51 UTF-16 code units. `.json` is never cut, so the stem before it is at most 46 units. The cut takes characters from the end of `.supplemental-metadata` first, and then from the media name. A `(N)` duplicate marker sits before the media extension on the file (`IMG_1234(1).jpg`) and after the cut on the JSON (`IMG_1234.jpg.supplemental-metadata(1).json`, or `….supple(1).json` when the stem was cut). The marker is not cut, so a numbered JSON can be longer than 51 units. The plain file does not take the numbered JSON, and the numbered file does not take the plain JSON.
+
+An edited file keeps `-edited` in its own name (`IMG_0001-edited.jpg`). Its JSON is named from that edited name, with the same cut. It does not take the original's JSON.
 
 | Takeout name | Partner |
 | --- | --- |
 | `IMG_0001.jpg.json` | `IMG_0001.jpg` |
 | `CLIP.mp4.supplemental-metadata.json` | `CLIP.mp4` |
-| `CLIP.mp4.supplemental-metadata(1).json` | `CLIP.mp4` |
+| `IMG_1234.jpg.supplemental-metadata(1).json` | `IMG_1234(1).jpg` |
+| `Screenshot_20231027_123303_Facebook.jpg.supple.json` | `Screenshot_20231027_123303_Facebook.jpg` |
+| `PXL_20240101_120000_EXTRA.jpg.supplemental-met.json` | `PXL_20240101_120000_EXTRA.jpg` |
+| `IMG_0001-edited.jpg.supplemental-metadata.json` | `IMG_0001-edited.jpg` |
 
-The JSON bytes are copied as they appear in the archive. They are not parsed and written back out. A JSON file that is not a paired name, such as `metadata.json`, is still copied byte-for-byte. Other Takeout files, such as an HTML index, are copied the same way. An extension allow-list would drop a file, so there is not one.
+The JSON bytes are copied as they appear in the archive. They are not parsed and written back out. A JSON file that is not a paired name, such as `metadata.json` or `user-generated-memory-titles.json`, is still copied byte-for-byte and listed in the report with `partner` null. Other Takeout files, such as an HTML index, are copied the same way. An extension allow-list would drop a file, so there is not one.
 
-`photoTakenTime` is sidecar metadata. While the report is written, the importer scans the stored JSON for the `photoTakenTime` object's `timestamp` string. `creationTime` is not that field. The timestamp is a column on the sidecar's report line. It is not written into EXIF, XMP, IPTC, the file's mtime, or any other byte of the original. A missing `photoTakenTime` stays missing. Albumen does not invent one and does not open the original for write.
+### Derived XMP
+
+`--derive-xmp` is off by default. When it is on, Albumen reads the stored JSON and writes a new XMP file beside the partner (`IMG_0001.jpg.xmp`). An unpaired JSON gets `{filename}.xmp`. The XMP carries `title`, `description`, `photoTakenTime` as `exif:DateTimeOriginal` in UTC, and `geoData` when latitude and longitude are not both zero. `creationTime` is not copied into the XMP.
+
+The original is not opened for this write. Its bytes and mtime stay the archive member's. The JSON is not rewritten. A derived XMP is an extra report line of kind `derived-xmp`. It is not an archive member, so it is not added to `count_in` or `count_out`. An existing XMP with different bytes is left in place and the import exits non-zero.
+
+`photoTakenTime` is sidecar metadata. While the report is written, the importer scans the stored JSON for the `photoTakenTime` object's `timestamp` string. `creationTime` is not that field. The timestamp is a column on the sidecar's report line. It is not written into the original's EXIF, XMP, IPTC, mtime, or any other byte. A missing `photoTakenTime` stays missing. Albumen does not invent one and does not open the original for write. The optional derived XMP is a separate new file.
 
 ## Reconciliation
 
@@ -76,7 +89,7 @@ The last line is the summary:
 {"summary":true,"count_in":5,"count_out":5,"mismatched":0,"archives_unchanged":true}
 ```
 
-`count_in` is the number of file members. `count_out` is the number of those members whose destination SHA-256 matched the bytes that were read. A repeated member with the same path and the same bytes counts in both, and the file on disk remains one file. `mismatched` counts members that were not verified, plus an archive whose bytes changed.
+`count_in` is the number of file members. `count_out` is the number of those members whose destination SHA-256 matched the bytes that were read. A repeated member with the same path and the same bytes counts in both, and the file on disk remains one file. `mismatched` counts members that were not verified, plus an archive whose bytes changed, plus a derived XMP that could not be written. Derived XMP lines are not file members and are not added to `count_in` or `count_out`.
 
 The process exits 0 only when `count_in` equals `count_out`, `mismatched` is 0, the archives are unchanged, and at least one file member was present. Any other result exits non-zero after the report is written. A checksum failure names both hashes in the file line.
 
