@@ -16,6 +16,29 @@ Cold start, the first thumbnail, scroll, and backup CPU and battery are targets 
 
 The periodic Android backup does not run unless the device is idle, charging, and on a network. That is the battery default, not a measured battery percent. The first job after setup is the backup the user just started: a one-time network-constrained job aimed at a verified copy within 5 minutes. The percent and the CPU average stay targets. The worker hashes one file at a time.
 
+## Backup verified percent
+
+The reliability target is 99.9 percent of items verified within 24 hours. That window includes passes that meet a receiver that is down, a connection that drops, a kill during an upload, and a SHA-256 mismatch. A miss still has to be visible: every item that is still unverified is named in the status file or in notification 1001.
+
+`backup soak` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the measured stand-in. It runs `scripts/android-soak.sh` on `ubuntu-24.04`. The harness is `BackupSoakTest`, which drives `executeBackup` and the real `WebDavUploader` against a loopback receiver. The library is 24 synthetic items, 256 KiB each. They are not photographs. Two sequences each run five cycles: receiver down (a closed port), network drop (the socket closes after the first 64 bytes of the PUT body), kill mid-upload (that same close, and the pass stops so later items resume on the next cycle), SHA-256 mismatch (HTTP 201 with a digest that is not the bytes just sent), then a healthy recovery cycle. That is 10 cycles. A silent failure is an item the cycle tried to upload that is still unverified at the end of the cycle and whose filename is absent from that cycle's status file and from notification 1001. The status file is replaced on each publish, so the test keeps each cycle's text.
+
+This run of the harness printed:
+
+```text
+backup-soak verified_percent=100.0 verified=24 items=24 cycles=10 silent_failures=0 fault_window_verified_percent=0.0
+```
+
+100.0 percent is 24 of 24 items verified after the recovery cycles. `silent_failures=0`. The fault cycles themselves verified 0.0 percent (0 of 24). Each of those 24 filenames was in the status file or notification 1001 before recovery started. The source bytes for each item were unchanged. The job fails when a silent failure appears or when recovery leaves an item unverified.
+
+CI does not measure these parts of the 24-hour target:
+
+- A real 24-hour wall clock. The harness finishes in one unit-test run.
+- iOS background `URLSession`. The simulator job uploads with a foreground session. This soak is the Android receiver harness.
+- OEM battery killers that freeze or stop the process and never open a later retry window.
+- Battery percent drain, thermal throttling, and a physical camera roll.
+- A true `SIGKILL`. The kill cycle closes the socket and sets the in-process stop flag. A process that is already gone cannot publish; the following cycle is what verifies the item or names it.
+- A radio drop beyond a closed TCP socket. Receiver down is connection refused on a closed port. Network drop is that socket closing during the body.
+
 ## Budgets for the library
 
 These are the product bars on a 380,000-item library. CI does not fail a job for missing the absolute number. CI fails a regression of the scaled run, described below.

@@ -112,6 +112,24 @@ jobs:
       - name: Compile and test the backup library
         run: scripts/android-ci.sh
 
+  backup-soak:
+    name: backup soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Java for the Android SDK
+        run: |
+          if ! command -v java >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y openjdk-17-jdk-headless unzip
+          fi
+          java -version
+
+      - name: Soak backup cycles with injected faults
+        run: scripts/android-soak.sh
+
   android-emulator:
     name: android camera-roll emulator
     # This job uses ubuntu-latest for KVM. The other jobs stay on ubuntu-24.04.
