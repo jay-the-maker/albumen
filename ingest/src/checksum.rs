@@ -33,6 +33,12 @@ pub fn sha256_hex(path: &Path) -> Result<String, IngestError> {
     Ok(to_hex(&sha256_file(path)?))
 }
 
+pub(crate) fn sha256_slice(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
