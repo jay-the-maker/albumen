@@ -17,10 +17,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use albumen_bench::{
-    load_baseline, measure, measure_icloud, measure_takeout, measure_throughput,
-    regression_problems, scale_problems, throughput_problems, to_json, Report, DEFAULT_COPY_BYTES,
-    DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS, DEFAULT_TAKEOUT_ITEMS, DEFAULT_THROUGHPUT_BYTES,
-    DEFAULT_THROUGHPUT_FILES, TAKEOUT_BUDGET_SECONDS, THROUGHPUT_RATIO_FLOOR,
+    load_baseline, measure, measure_icloud, measure_takeout, measure_throughput, optional_rate,
+    phase_share_line, regression_problems, scale_problems, throughput_problems, to_json, Report,
+    DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS, DEFAULT_TAKEOUT_ITEMS,
+    DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES, TAKEOUT_BUDGET_SECONDS,
+    THROUGHPUT_RATIO_FLOOR,
 };
 
 fn main() -> ExitCode {
@@ -144,18 +145,22 @@ fn run() -> Result<(), String> {
             println!("{text}");
             io::stdout().flush().map_err(|err| err.to_string())?;
             eprintln!(
-                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={}",
+                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={}",
                 report.leg,
                 report.files,
                 report.bytes_each,
                 report.workers,
                 report.import_mb_s,
                 report.raw_mb_s,
+                report.raw_sync,
+                optional_rate(report.raw_fsync_mb_s),
+                optional_rate(report.raw_fullfsync_mb_s),
                 report.ratio,
                 THROUGHPUT_RATIO_FLOOR,
                 report.reconciled_percent(),
                 report.mismatched,
-                report.source_changed
+                report.source_changed,
+                phase_share_line(&report.phases)
             );
             let problems = throughput_problems(&report);
             if !problems.is_empty() {
