@@ -438,7 +438,8 @@ function Get-TraceEvents([string]$XmlPath) {
             Body = $body
         })
     }
-    return @($found)
+    # @() over a List[object] throws "Argument types do not match" in PowerShell.
+    return $found.ToArray()
 }
 
 function Merge-ProcessImages($Events) {
@@ -448,7 +449,7 @@ function Merge-ProcessImages($Events) {
         foreach ($event in $Events) {
             $procId = [int]$event.ProcessId
             if ($procId -lt 0) { continue }
-            $leaf = [IO.Path]::GetFileName([string]$event.Image)
+            $leaf = @(([string]$event.Image) -split '[\\/]')[-1]
             $parentKnown = $event.ParentId -ge 0 -and $script:ObservedPids.Contains([int]$event.ParentId)
             $selfKnown = $script:ObservedPids.Contains($procId)
             $ownImage = $leaf -match '^albumen(\.exe|-mcp\.exe)$'
