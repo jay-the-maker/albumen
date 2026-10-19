@@ -169,6 +169,35 @@ Both are at or above the 0.80 target on this disk. The runner table is the per-l
 
 Regression gate, separate from the 0.80 target: fail a leg when a later run is under 80% of the ratio recorded above. That would be 0.530, 0.594, 0.213, and 0.645 for the four legs. It is not a CI failure. The raw write on `ubuntu-24.04` moved by more than that between the before job and this one, so a gate on one sample would fail a later job when the raw write is faster and the import is not. Meeting that gate would not mean the leg met 0.80.
 
+### Same durability primitive, and a median raw rate
+
+`File::sync_all` is the import's file durability call, and the honest raw sample uses that same call plus `dest::sync_dir`. On Linux that is `fsync`. On macOS it is `F_FULLFSYNC`, not plain `fsync`. On Windows it is `FlushFileBuffers`. The macOS job also writes a plain `fsync` sample and prints `raw_fsync_mb_s` beside `raw_fullfsync_mb_s`. The ratio uses `F_FULLFSYNC` on that leg, because that is what the import uses. A plain `fsync` raw rate would make the ratio look worse without matching the import. On Linux `raw_fsync_mb_s` is the honest rate and `raw_fullfsync_mb_s` is absent, because the OS has no `F_FULLFSYNC`. On Windows both of those fields are absent and `raw_sync` is `FlushFileBuffers`.
+
+The honest raw rate is the median of three samples before the import and three after it. The samples are deleted between passes. One cold or hot sample does not set the ratio by itself. The 0.80 target is unchanged.
+
+The import records where its worker time went. The shares are sums across the worker pool, so they can add to more than the wall clock. A local ext4 run, 4 workers, 1,000 files of 5,000,000 bytes, reconciled 100 percent. The six honest raw samples were 664.424, 864.267, 775.770, 779.675, 832.661, and 776.422 MB/s. The median raw rate was 778.049 MB/s. Import was 861.589 MB/s. The ratio was 1.1074, with `raw_sync=fsync`.
+
+| Phase | Share of worker time |
+| --- | --- |
+| file sync | 0.481 |
+| read-back hash | 0.131 |
+| hash while copying | 0.127 |
+| write | 0.119 |
+| source read | 0.081 |
+| read-back read | 0.034 |
+| directory sync | 0.027 |
+
+The largest share is the file `fsync`. It stays. It is the same durability call the raw sample makes, and the file is not reported stored before it returns. The destination read-back stays too. The largest cost the raw sample does not pay is the two SHA-256 passes, 0.258 together. On x86 those already use the SHA extensions. On macOS the portable SHA-256 was what `sha2` used. `albumen-ingest` now enables the `sha2` `asm` feature, which selects the CPU SHA-256 on aarch64 when the processor has it, and leaves the x86 SHA-extension path in place. That is the attack on the hash share. The portable implementation remains the fallback when the CPU has no SHA-256 extension.
+
+The per-leg ratios for this median and this hash path are filled from the pull-request job:
+
+| Leg | Import MB/s | Raw MB/s | Raw sync | Ratio | Reconciliation |
+| --- | --- | --- | --- | --- | --- |
+| ubuntu-24.04 | pending | pending | fsync | pending | pending |
+| ubuntu-26.04 | pending | pending | fsync | pending | pending |
+| macos-14 | pending | pending | F_FULLFSYNC | pending | pending |
+| windows-2025 | pending | pending | FlushFileBuffers | pending | pending |
+
 ## Local 380,000-item run
 
 This is how the full-library search and browse numbers are taken. It is not the CI job. It needs disk for 380,000 JPEGs and 380,000 XMP sidecars, and the cold search runs ExifTool across all of them.
