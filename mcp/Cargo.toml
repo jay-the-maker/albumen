@@ -15,9 +15,14 @@ path = "src/main.rs"
 [dependencies]
 albumen-ingest = { path = "../ingest" }
 clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
+sha2 = "0.10"
 serde_json = "1"
 
 [dev-dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 albumen-ingest = { path = "../ingest" }
 tempfile = "3"
 
