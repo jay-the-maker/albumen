@@ -255,21 +255,34 @@ jobs:
         run: cargo run --release --locked -p albumen-bench -- --check
 
   throughput:
-    name: import throughput (${{ matrix.label }})
+    name: import throughput (${{ matrix.label }} ${{ matrix.variant }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            label: ubuntu-24.04
-          - os: ubuntu-26.04
-            label: ubuntu-26.04
           - os: macos-14
             label: macos-14
-          - os: windows-2025
-            label: windows-2025
+            variant: base
+          - os: macos-14
+            label: macos-14
+            variant: prealloc
+          - os: macos-14
+            label: macos-14
+            variant: chunk1
+          - os: macos-14
+            label: macos-14
+            variant: chunk4
+          - os: macos-14
+            label: macos-14
+            variant: chunk8
+          - os: macos-14
+            label: macos-14
+            variant: prealloc+chunk4
+    continue-on-error: true
+    env:
+      ALBUMEN_WRITE_VARIANT: ${{ matrix.variant }}
     defaults:
       run:
         shell: bash
@@ -342,6 +355,8 @@ jobs:
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             export ALBUMEN_THROUGHPUT_SCORECARD="${GITHUB_STEP_SUMMARY}"
           fi
+          cargo build --release --locked -p albumen-bench
+          ( for i in 1 2 3; do sleep 90; sample albumen-bench 5 -mayDie -file "${RUNNER_TEMP}/sample-$i.txt" >/dev/null 2>&1 || echo "sample $i unavailable"; done ) &
           cargo run --release --locked -p albumen-bench -- --throughput | tee "${RUNNER_TEMP}/throughput.json"
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
@@ -352,6 +367,7 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+          for f in "${RUNNER_TEMP}"/sample-*.txt; do [ -f "$f" ] && { echo "== $f"; sed -n '1,80p' "$f"; }; done || true
 
   sandbox:
     name: no unexpected egress

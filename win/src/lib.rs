@@ -226,3 +226,54 @@ pub fn uncached_writes(file: &std::fs::File) -> std::io::Result<()> {
     let _ = file;
     Ok(())
 }
+
+/// User and system CPU time of the whole process, from `getrusage`.
+#[cfg(unix)]
+pub fn process_user_sys() -> std::io::Result<(std::time::Duration, std::time::Duration)> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Timeval {
+        sec: std::ffi::c_long,
+        usec: std::ffi::c_long,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Rusage {
+        utime: Timeval,
+        stime: Timeval,
+        rest: [std::ffi::c_long; 14],
+    }
+    extern "C" {
+        fn getrusage(who: std::ffi::c_int, usage: *mut Rusage) -> std::ffi::c_int;
+    }
+    let mut usage = Rusage::default();
+    // SAFETY: `usage` is a valid, writable rusage; RUSAGE_SELF is 0.
+    let rc = unsafe { getrusage(0, &mut usage) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let time = |tv: &Timeval| {
+        std::time::Duration::new(
+            u64::try_from(tv.sec).unwrap_or(0),
+            u32::try_from(tv.usec).unwrap_or(0).saturating_mul(1000),
+        )
+    };
+    Ok((time(&usage.utime), time(&usage.stime)))
+}
+
+#[cfg(not(unix))]
+pub fn process_user_sys() -> std::io::Result<(std::time::Duration, std::time::Duration)> {
+    Err(std::io::Error::other("getrusage is Unix only"))
+}
+
+/// Reserve `len` bytes for a new file before it is written (macOS
+/// `F_PREALLOCATE`, then the file is sized to `len`). Elsewhere it does
+/// nothing.
+pub fn preallocate(file: &std::fs::File, len: u64) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        rustix::fs::fallocate(file, rustix::fs::FallocateFlags::empty(), 0, len)?;
+    }
+    let _ = (file, len);
+    Ok(())
+}
