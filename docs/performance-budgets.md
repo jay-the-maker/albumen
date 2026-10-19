@@ -189,7 +189,18 @@ The library was just written, so the OS file cache is warm. Cold start here is t
 Search with only a path query walks the library and does not read file bytes. A metadata filter also runs ExifTool and SHA-256 on each candidate, which the local run below measures.
 
 <!-- library-scale-results -->
-Results are recorded here once the CI run on each leg finishes.
+Pull request #97, 380,000 items, 200 queries, seed 380000. Both `ubuntu-24.04` runs and a local Linux run built the same library: `paths_sha256` `ec8ac920ee080c9d23c40c8a0a3110b3f255ef133109314336635852eda1886e`.
+
+| Leg | Run | Cold start (ready) | Process start to first answer | Search p50 | Search p95 | Peak memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ubuntu-24.04` | [39244175785](https://github.com/jay-the-maker/albumen/actions/runs/39244175785) | 1.7 ms | 4,399.1 ms | 4,277.0 ms | 4,380.9 ms | 5.7 MiB |
+| `ubuntu-24.04` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623) | 2.1 ms | 5,313.7 ms | 5,268.2 ms | 5,459.8 ms | 5.6 MiB |
+| `macos-14` | running | | | | | |
+| `windows-2025` | running | | | | | |
+
+Cold start, as spawn to `initialize` and `tools/list`, is far inside 1.5 s because the server builds no index when it starts. Process start to first answer is the readiness a user sees, and it is one full walk of the library. Search p95 is over the 200 ms target on `ubuntu-24.04`: every path search walks and stats all 380,000 files. Peak memory stays near 6 MiB, because the walk streams.
+
+The next step for search p95 is an index that a search does not rebuild: a path index built once when the server starts, kept current by comparing directory mtimes, and later a persistent index stored beside the library, outside the library directory, like the ledger. A search then reads the index instead of walking the tree. That moves the walk into cold start, so both numbers are reported against their targets together.
 
 ## Local 380,000-item run
 
