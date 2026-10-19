@@ -4,13 +4,13 @@
 //!
 //! `scan_tree` walks a directory, hashes each file, and appends one JSON
 //! object per file to a manifest that must live outside the source. It does
-//! not open a source path for write. On Linux it opens files with `O_RDONLY`
-//! and `O_NOATIME` when the kernel allows it, and it puts an access time back
-//! only when a later read changed it.
+//! not open a source path for write and it does not change a source timestamp.
+//! On Linux it opens files with `O_RDONLY` and `O_NOATIME` when the kernel
+//! allows that flag, and otherwise opens them with `O_RDONLY`. If the size or
+//! mtime changes while a file is read, the manifest line records `drift` with
+//! the before and after values. The source file is left as it is.
 
 use std::collections::BTreeMap;
-#[cfg(target_os = "linux")]
-use std::fs::FileTimes;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -56,6 +56,26 @@ struct ScanLine {
     sidecars: Vec<String>,
     pairs: Vec<String>,
     metadata: KeyMetadata,
+    /// Size and mtime at the start and end of the read, when those changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drift: Option<EntryDrift>,
+}
+
+/// Size and mtime observed while a file was read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ObservedStat {
+    bytes: u64,
+    mtime_ns: String,
+}
+
+/// A source file changed while scan was reading it.
+///
+/// `before` is the size and mtime at open. `after` is the size and mtime
+/// after the read. Scan records both and leaves the file alone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EntryDrift {
+    before: ObservedStat,
+    after: ObservedStat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -89,6 +109,7 @@ struct Hashed {
     sha256: String,
     sidecars: Vec<String>,
     pairs: Vec<String>,
+    drift: Option<EntryDrift>,
 }
 
 /// Walk `source` and append a JSONL manifest at `manifest`.
@@ -258,23 +279,22 @@ fn worker_loop(
 
 fn hash_one(root: &Path, job: &Job) -> Result<Hashed, IngestError> {
     let path = root.join(relative_path(&job.relative));
-    let stamped = stamp(&path)?;
     let file = open_readonly(&path)?;
-    let meta = file.metadata().map_err(|err| IngestError::io(&path, err))?;
-    let bytes = meta.len();
-    let mtime = meta.modified().map_err(|err| IngestError::io(&path, err))?;
+    let before = observe_file(&path, &file)?;
+    mid_scan_touch(&path);
     let sha = to_hex(&sha256_reader(file, &path)?);
-    restore_if_changed(&path, &stamped)?;
+    let after = observe_path(&path)?;
     let (sidecar_names, pair_names) = companion_names(&path)?;
     let parent = parent_relative(&job.relative);
     Ok(Hashed {
         index: job.index,
         relative: job.relative.clone(),
-        bytes,
-        mtime_ns: to_unix_nanos_string(mtime),
+        bytes: before.bytes,
+        mtime_ns: before.mtime_ns.clone(),
         sha256: sha,
         sidecars: names_to_relative(&parent, &sidecar_names),
         pairs: names_to_relative(&parent, &pair_names),
+        drift: drift_if_changed(&before, &after),
     })
 }
 
@@ -346,16 +366,11 @@ fn flush_batch(
     batch: &mut Vec<Hashed>,
 ) -> Result<u64, IngestError> {
     let paths: Vec<String> = batch.iter().map(|item| item.relative.clone()).collect();
-    let stamps: Vec<(PathBuf, Stamp)> = paths
-        .iter()
-        .map(|relative| {
-            let path = source.join(relative_path(relative));
-            stamp(&path).map(|saved| (path, saved))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let metadata = read_metadata(source, &paths)?;
-    for (path, saved) in &stamps {
-        restore_if_changed(path, saved)?;
+    for item in batch.iter_mut() {
+        let path = source.join(relative_path(&item.relative));
+        let after = observe_path(&path)?;
+        extend_drift(item, after);
     }
     if metadata.len() != batch.len() {
         return Err(IngestError::store(
@@ -378,6 +393,7 @@ fn flush_batch(
             sidecars: item.sidecars,
             pairs: item.pairs,
             metadata: meta,
+            drift: item.drift,
         };
         writeln!(
             file,
@@ -486,15 +502,25 @@ fn compare_file(
     on_drift: &mut dyn FnMut(&ScanDrift),
 ) -> Result<u64, IngestError> {
     let path = source.join(relative_path(&line.path));
-    let stamped = stamp(&path)?;
     let file = open_readonly(&path)?;
-    let meta = file.metadata().map_err(|err| IngestError::io(&path, err))?;
-    let bytes = meta.len();
-    let mtime = meta.modified().map_err(|err| IngestError::io(&path, err))?;
+    let before = observe_file(&path, &file)?;
     let sha = to_hex(&sha256_reader(file, &path)?);
-    restore_if_changed(&path, &stamped)?;
-    let mtime_ns = to_unix_nanos_string(mtime);
+    let after = observe_path(&path)?;
     let mut drifts = 0u64;
+    if let Some(drift) = drift_if_changed(&before, &after) {
+        emit(
+            on_drift,
+            &mut drifts,
+            &line.path,
+            "drift",
+            &format!(
+                "bytes {} -> {}, mtime {} -> {}",
+                drift.before.bytes, drift.after.bytes, drift.before.mtime_ns, drift.after.mtime_ns
+            ),
+        );
+    }
+    let bytes = before.bytes;
+    let mtime_ns = before.mtime_ns;
     if sha != line.sha256 {
         emit(
             on_drift,
@@ -909,14 +935,12 @@ fn open_readonly(path: &Path) -> Result<File, IngestError> {
     #[cfg(target_os = "linux")]
     {
         const O_NOATIME: i32 = 0o1000000;
-        match OpenOptions::new()
+        if let Ok(file) = OpenOptions::new()
             .read(true)
             .custom_flags(O_NOATIME)
             .open(path)
         {
-            Ok(file) => return Ok(file),
-            Err(err) if err.raw_os_error() == Some(1) => {}
-            Err(err) => return Err(IngestError::io(path, err)),
+            return Ok(file);
         }
     }
     OpenOptions::new()
@@ -925,48 +949,70 @@ fn open_readonly(path: &Path) -> Result<File, IngestError> {
         .map_err(|err| IngestError::io(path, err))
 }
 
-struct Stamp {
-    mtime: SystemTime,
-    atime: Option<SystemTime>,
+fn observe_file(path: &Path, file: &File) -> Result<ObservedStat, IngestError> {
+    let meta = file.metadata().map_err(|err| IngestError::io(path, err))?;
+    observed(path, &meta)
 }
 
-fn stamp(path: &Path) -> Result<Stamp, IngestError> {
+fn observe_path(path: &Path) -> Result<ObservedStat, IngestError> {
     let meta = fs::symlink_metadata(path).map_err(|err| IngestError::io(path, err))?;
-    Ok(Stamp {
-        mtime: meta.modified().map_err(|err| IngestError::io(path, err))?,
-        atime: meta.accessed().ok(),
+    observed(path, &meta)
+}
+
+fn observed(path: &Path, meta: &std::fs::Metadata) -> Result<ObservedStat, IngestError> {
+    let mtime = meta.modified().map_err(|err| IngestError::io(path, err))?;
+    Ok(ObservedStat {
+        bytes: meta.len(),
+        mtime_ns: to_unix_nanos_string(mtime),
     })
 }
 
-fn restore_if_changed(path: &Path, saved: &Stamp) -> Result<(), IngestError> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (path, saved.mtime, saved.atime);
-        Ok(())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let Some(atime) = saved.atime else {
-            return Ok(());
-        };
-        let meta = fs::symlink_metadata(path).map_err(|err| IngestError::io(path, err))?;
-        let mtime_now = meta.modified().map_err(|err| IngestError::io(path, err))?;
-        let atime_now = meta.accessed().ok();
-        if mtime_now == saved.mtime && atime_now == Some(atime) {
-            return Ok(());
-        }
-        let file = open_readonly(path)?;
-        match file.set_times(
-            FileTimes::new()
-                .set_modified(saved.mtime)
-                .set_accessed(atime),
-        ) {
-            Ok(()) => Ok(()),
-            Err(err) if matches!(err.raw_os_error(), Some(1) | Some(13) | Some(30)) => Ok(()),
-            Err(err) => Err(IngestError::io(path, err)),
-        }
+fn drift_if_changed(before: &ObservedStat, after: &ObservedStat) -> Option<EntryDrift> {
+    if before.bytes == after.bytes && before.mtime_ns == after.mtime_ns {
+        None
+    } else {
+        Some(EntryDrift {
+            before: before.clone(),
+            after: after.clone(),
+        })
     }
 }
+
+fn extend_drift(item: &mut Hashed, after: ObservedStat) {
+    let started = ObservedStat {
+        bytes: item.bytes,
+        mtime_ns: item.mtime_ns.clone(),
+    };
+    if started.bytes == after.bytes && started.mtime_ns == after.mtime_ns {
+        return;
+    }
+    let before = item
+        .drift
+        .as_ref()
+        .map(|drift| drift.before.clone())
+        .unwrap_or(started);
+    item.drift = Some(EntryDrift { before, after });
+}
+
+/// Test seam. Production scans do not use it. A unit test sets it so a file
+/// can change after the open stat and before the hash, without scan writing
+/// the source back.
+#[cfg(test)]
+type MidScanHook = Box<dyn FnMut(&Path) + Send>;
+
+#[cfg(test)]
+static MID_SCAN: Mutex<Option<MidScanHook>> = Mutex::new(None);
+
+#[cfg(test)]
+fn mid_scan_touch(path: &Path) {
+    let mut guard = MID_SCAN.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some(hook) = guard.as_mut() {
+        hook(path);
+    }
+}
+
+#[cfg(not(test))]
+fn mid_scan_touch(_path: &Path) {}
 
 fn parent_relative(relative: &str) -> String {
     match relative.rsplit_once('/') {
@@ -1017,7 +1063,6 @@ fn walk_dir(
     after: Option<&str>,
     visit: &mut dyn FnMut(&str) -> WalkStop,
 ) -> Result<WalkStop, IngestError> {
-    let saved = stamp(dir)?;
     let mut entries = Vec::new();
     let read = fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))?;
     for entry in read {
@@ -1038,7 +1083,6 @@ fn walk_dir(
             entries.push((name.to_string(), false));
         }
     }
-    restore_if_changed(dir, &saved)?;
     entries.sort_by(|left, right| cmp_walk(&left.0, left.1, &right.0, right.1));
     for (name, is_dir) in entries {
         let child = dir.join(&name);
@@ -1102,7 +1146,7 @@ mod tests {
     use super::*;
     use crate::test_support::{write_file, Tmp};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     struct ModeGuard {
         saved: Vec<(PathBuf, u32)>,
@@ -1141,6 +1185,8 @@ mod tests {
         ModeGuard { saved }
     }
 
+    /// What scan must leave untouched. A read may update access time, and
+    /// scan does not write that time back, so access time is not compared.
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Snap {
         rel: String,
@@ -1149,7 +1195,6 @@ mod tests {
         sha: String,
         mtime: SystemTime,
         mode: u32,
-        atime: Option<(i64, i64)>,
     }
 
     fn list_rels(root: &Path) -> Vec<String> {
@@ -1196,10 +1241,6 @@ mod tests {
                 } else {
                     String::new()
                 };
-                #[cfg(target_os = "linux")]
-                let atime = Some((meta.atime(), meta.atime_nsec()));
-                #[cfg(not(target_os = "linux"))]
-                let atime = None;
                 Snap {
                     rel,
                     is_dir: meta.is_dir(),
@@ -1207,10 +1248,24 @@ mod tests {
                     sha,
                     mtime: meta.modified().unwrap(),
                     mode: meta.mode(),
-                    atime,
                 }
             })
             .collect()
+    }
+
+    struct HookGuard;
+
+    impl HookGuard {
+        fn install(hook: impl FnMut(&Path) + Send + 'static) -> Self {
+            *MID_SCAN.lock().unwrap_or_else(|err| err.into_inner()) = Some(Box::new(hook));
+            Self
+        }
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            *MID_SCAN.lock().unwrap_or_else(|err| err.into_inner()) = None;
+        }
     }
 
     fn fixture(dir: &Path) {
@@ -1275,7 +1330,56 @@ mod tests {
         assert_eq!(jpeg.pairs, vec!["trip/IMG.dng".to_string()]);
         assert_eq!(jpeg.sidecars, vec!["trip/IMG.xmp".to_string()]);
         assert_eq!(jpeg.bytes, b"jpeg-bytes".len() as u64);
+        assert!(jpeg.drift.is_none(), "{jpeg:?}");
         verify_scan_manifest(&manifest, &source, &mut |_| ()).unwrap();
+    }
+
+    #[test]
+    fn file_modified_mid_scan_keeps_its_new_mtime_and_records_drift() {
+        let tmp = Tmp::new();
+        let source = tmp.path().join("library");
+        fs::create_dir_all(&source).unwrap();
+        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789);
+        let path = write_file(&source, "a.txt", b"alpha", mtime)
+            .canonicalize()
+            .unwrap();
+        let manifest = tmp.path().join("scan.jsonl");
+        let new_mtime = UNIX_EPOCH + Duration::new(1_700_000_000, 50);
+        let _hook = HookGuard::install({
+            let path = path.clone();
+            move |opened: &Path| {
+                let Ok(opened) = opened.canonicalize() else {
+                    return;
+                };
+                if opened == path {
+                    fs::write(&path, b"alphabet").unwrap();
+                    crate::mtime::set_mtime(&path, new_mtime).unwrap();
+                }
+            }
+        });
+
+        let stats = scan_tree(&source, &manifest).unwrap();
+        drop(_hook);
+
+        assert_eq!(stats.files, 1);
+        assert_eq!(fs::read(&path).unwrap(), b"alphabet");
+        let left = fs::symlink_metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(left, new_mtime);
+        let line: ScanLine = serde_json::from_str(
+            fs::read_to_string(&manifest)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let drift = line.drift.expect("manifest records drift");
+        assert_eq!(drift.before.bytes, b"alpha".len() as u64);
+        assert_eq!(drift.before.mtime_ns, to_unix_nanos_string(mtime));
+        assert_eq!(drift.after.bytes, b"alphabet".len() as u64);
+        assert_eq!(drift.after.mtime_ns, to_unix_nanos_string(new_mtime));
+        assert_eq!(line.bytes, drift.before.bytes);
+        assert_eq!(line.mtime_ns, drift.before.mtime_ns);
     }
 
     #[test]

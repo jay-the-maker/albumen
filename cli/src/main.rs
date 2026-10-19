@@ -44,9 +44,11 @@ enum Command {
     },
     /// Read a library and write a JSONL manifest outside it.
     ///
-    /// The source is opened read-only. The manifest is refused when it
-    /// resolves inside the library. Running the command again continues
-    /// after the last complete line.
+    /// The source is opened read-only. Scan does not write the source.
+    /// A size or mtime change during the read is recorded on that line as
+    /// `drift`, with the before and after values. The manifest is refused
+    /// when it resolves inside the library. Running the command again
+    /// continues after the last complete line.
     Scan {
         /// Library root.
         dir: PathBuf,

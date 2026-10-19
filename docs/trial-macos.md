@@ -38,7 +38,7 @@ Progress is printed on stderr about once a second:
 albumen scan: 12000 files, 48318382080 bytes hashed
 ```
 
-`albumen scan` refuses the run when `--manifest` resolves inside the source directory. Nothing in the source is opened for write. Files are opened with `O_RDONLY`. macOS has no `O_NOATIME`, so a read may update the access time. mtime, xattrs, and file bytes are not written.
+`albumen scan` refuses the run when `--manifest` resolves inside the source directory. Nothing in the source is opened for write, and scan does not write a timestamp back onto a source. On Linux, files are opened with `O_RDONLY` and `O_NOATIME` when the kernel allows that flag. If the kernel refuses the flag, the open falls back to `O_RDONLY` and the scan continues. macOS has no `O_NOATIME`, so a read may update the access time. ExifTool's own read can update the access time on any platform, and scan leaves that time alone. mtime, xattrs, and file bytes are not written. If the size or mtime changes while a file is being read, that JSONL line records `drift` with the before and after values (`bytes` and `mtime_ns`), and the source file is left as it is.
 
 Running the same command again continues after the last complete JSONL line. A partial last line is dropped and that file is scanned again. `ALBUMEN_SCAN_WORKERS` sets the hash threads. When it is unset, the process uses one worker per CPU. `ALBUMEN_EXIFTOOL_BATCH` sets how many files one ExifTool process reads (default 64).
 
