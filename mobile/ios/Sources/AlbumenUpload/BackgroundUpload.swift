@@ -273,12 +273,66 @@ public enum BackupReportStore {
     }
 }
 
+public enum MemberNamespace {
+    /// `members/<ed25519-pubkey>/<filename>` under the family library root.
+    /// An endpoint that is not that root is refused before a request is built.
+    public static func uploadURL(endpoint: URL, memberId: String, filename: String) throws -> URL {
+        let path = endpoint.path
+        if path != "/" && !path.isEmpty {
+            throw MemberNamespaceError(
+                "backup endpoint is not the family library root"
+            )
+        }
+        let id = try canonicalMemberId(memberId)
+        let name = try StoredName.require(filename)
+        return endpoint
+            .appendingPathComponent("members")
+            .appendingPathComponent(id)
+            .appendingPathComponent(name)
+    }
+
+    public static func canonicalMemberId(_ raw: String) throws -> String {
+        let id = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let hex = CharacterSet(charactersIn: "0123456789abcdef")
+        guard id.count == 64, id.unicodeScalars.allSatisfy({ hex.contains($0) }) else {
+            throw MemberNamespaceError("member id is not a 32-byte Ed25519 public key")
+        }
+        return id
+    }
+
+    public static func refusal(filename: String, memberId: String, detail: String) -> String {
+        "Refusing a write of \(filename) outside members/\(memberId)/: \(detail). The camera roll was not changed."
+    }
+}
+
+public struct MemberNamespaceError: Error, Equatable, CustomStringConvertible {
+    public let message: String
+
+    public init(_ message: String) {
+        self.message = message
+    }
+
+    public var description: String { message }
+}
+
 public enum BackgroundPut {
     /// PUT an original. The Authorization header is absent so the password is
-    /// not stored in the background session's request file.
-    public static func request(endpoint: URL, filename: String, mtimeSeconds: Int) throws -> URLRequest {
-        let name = try StoredName.require(filename)
-        var request = URLRequest(url: endpoint.appendingPathComponent(name))
+    /// not stored in the background session's request file. A family backup
+    /// puts the original under `members/<memberId>/`.
+    public static func request(
+        endpoint: URL,
+        filename: String,
+        mtimeSeconds: Int,
+        memberId: String? = nil
+    ) throws -> URLRequest {
+        let url: URL
+        if let memberId, !memberId.isEmpty {
+            url = try MemberNamespace.uploadURL(endpoint: endpoint, memberId: memberId, filename: filename)
+        } else {
+            let name = try StoredName.require(filename)
+            url = endpoint.appendingPathComponent(name)
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.setValue(String(mtimeSeconds), forHTTPHeaderField: "X-Albumen-Mtime")

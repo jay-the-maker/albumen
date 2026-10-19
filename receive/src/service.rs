@@ -45,6 +45,7 @@ pub struct ServiceSpec<'a> {
     pub webdav: Option<SocketAddr>,
     pub sftp: Option<SocketAddr>,
     pub ftp: Option<SocketAddr>,
+    pub member: Option<&'a str>,
 }
 
 pub fn render(host: ServiceHost, spec: &ServiceSpec<'_>) -> Result<String, String> {
@@ -82,6 +83,10 @@ fn arguments(spec: &ServiceSpec<'_>) -> Vec<String> {
     if let Some(addr) = spec.ftp {
         args.push("--ftp".to_string());
         args.push(addr.to_string());
+    }
+    if let Some(member) = spec.member {
+        args.push("--member".to_string());
+        args.push(member.to_string());
     }
     args.push("--apply".to_string());
     args
@@ -207,6 +212,7 @@ mod tests {
             webdav: Some("127.0.0.1:8080".parse().unwrap()),
             sftp: None,
             ftp: None,
+            member: None,
         }
     }
 

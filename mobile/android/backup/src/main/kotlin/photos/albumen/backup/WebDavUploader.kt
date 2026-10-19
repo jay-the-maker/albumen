@@ -12,10 +12,16 @@ class WebDavUploader(
     private val endpoint: String,
     private val user: String,
     private val password: String,
+    private val memberId: String = "",
 ) : OriginalUploader {
     override fun put(file: File, filename: String, clientSha256: String, mtimeSeconds: Long): UploadVerdict {
         val name = StoredName.require(filename)
-        val connection = (endpointUrl(endpoint, name).openConnection() as HttpURLConnection)
+        val relative = if (memberId.isEmpty()) {
+            encodePathSegment(name)
+        } else {
+            MemberNamespace.relativePath(endpoint, memberId, name)
+        }
+        val connection = (joinEndpoint(endpoint, relative).openConnection() as HttpURLConnection)
         try {
             connection.requestMethod = "PUT"
             connection.instanceFollowRedirects = false
@@ -54,9 +60,37 @@ fun interface OriginalUploader {
 internal fun sourceMtimeSeconds(lastModifiedMillis: Long): String =
     (lastModifiedMillis / 1_000L).toString()
 
-internal fun endpointUrl(endpoint: String, filename: String): URL {
+internal fun endpointUrl(endpoint: String, filename: String): URL =
+    joinEndpoint(endpoint, encodePathSegment(filename))
+
+internal fun joinEndpoint(endpoint: String, relativePath: String): URL {
     val base = if (endpoint.endsWith("/")) endpoint else "$endpoint/"
-    return URL(base + encodePathSegment(filename))
+    return URL(base + relativePath)
+}
+
+/**
+ * A phone backup in a family library writes `members/<ed25519-pubkey>/<filename>`
+ * and nothing else. The endpoint is the library root. A path that is not that
+ * prefix is refused before the request is sent.
+ */
+object MemberNamespace {
+    fun canonicalMemberId(raw: String): String {
+        val id = raw.trim().lowercase()
+        if (id.length != 64 || id.any { it !in '0'..'9' && it !in 'a'..'f' }) {
+            throw IllegalArgumentException("member id is not a 32-byte Ed25519 public key")
+        }
+        return id
+    }
+
+    fun relativePath(endpoint: String, memberId: String, filename: String): String {
+        val path = URL(endpoint).path.trim('/')
+        if (path.isNotEmpty()) {
+            throw IllegalArgumentException("backup endpoint is not the family library root")
+        }
+        val id = canonicalMemberId(memberId)
+        val name = StoredName.require(filename)
+        return "members/$id/${encodePathSegment(name)}"
+    }
 }
 
 /** Percent-encode one camera filename. Spaces are `%20`. `/` is not left in the segment. */

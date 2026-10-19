@@ -40,6 +40,10 @@ struct Cli {
     /// FTP listen address, for example 0.0.0.0:2121. FTP is unencrypted.
     #[arg(long)]
     ftp: Option<SocketAddr>,
+    /// Ed25519 public key of the joined member. The library must be a family
+    /// library, and uploads are stored only under `members/<member>/`.
+    #[arg(long)]
+    member: Option<String>,
     /// Listen and store uploads. Without this or `--execute`, print the plan and write nothing.
     #[arg(long)]
     apply: bool,
@@ -116,6 +120,7 @@ fn run() -> Result<(), String> {
         library: cli.to,
         user: cli.user,
         password,
+        member: cli.member.clone(),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -161,6 +166,14 @@ fn print_plan(cli: &Cli) {
             _ => println!("  password: unset"),
         }
     }
+    match &cli.member {
+        Some(member) if !member.is_empty() => {
+            println!("  member: {member}");
+            println!("  namespace: members/{member}/");
+        }
+        Some(_) => println!("  member: empty"),
+        None => println!("  member: unset"),
+    }
     println!("  webdav: {}", addr_text(cli.webdav));
     println!("  sftp: {}", addr_text(cli.sftp));
     println!("  ftp: {}", addr_text(cli.ftp));
@@ -197,6 +210,7 @@ fn service_action(cli: &Cli) -> Result<(), String> {
         webdav: cli.webdav,
         sftp: cli.sftp,
         ftp: cli.ftp,
+        member: cli.member.as_deref(),
     };
     let host = ServiceHost::current();
     let text = service::render(host, &spec)?;

@@ -17,6 +17,7 @@ internal fun backupInput(
     pageSize: Long = BackupSchedule.DEFAULT_PAGE_SIZE,
     budgetMillis: Long = BackupSchedule.DEFAULT_BUDGET_MILLIS,
     periodic: Boolean = false,
+    memberId: String = "",
 ): Data {
     check(password.isNotEmpty()) { "receiver password is empty" }
     return workDataOf(
@@ -25,6 +26,7 @@ internal fun backupInput(
         CameraRollBackupWorker.KEY_PAGE_SIZE to pageSize,
         CameraRollBackupWorker.KEY_BUDGET_MILLIS to budgetMillis,
         CameraRollBackupWorker.KEY_PERIODIC to periodic,
+        CameraRollBackupWorker.KEY_MEMBER to memberId,
     )
 }
 

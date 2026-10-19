@@ -48,6 +48,7 @@ class CameraRollBackupWorker(
                 pageSize = inputData.getLong(KEY_PAGE_SIZE, BackupSchedule.DEFAULT_PAGE_SIZE),
                 budgetMillis = inputData.getLong(KEY_BUDGET_MILLIS, BackupSchedule.DEFAULT_BUDGET_MILLIS),
                 isStopped = { isStopped },
+                memberId = inputData.getString(KEY_MEMBER).orEmpty(),
                 publish = publish,
                 report = report,
             )
@@ -82,6 +83,7 @@ class CameraRollBackupWorker(
         const val KEY_PAGE_SIZE = "pageSize"
         const val KEY_BUDGET_MILLIS = "budgetMillis"
         const val KEY_PERIODIC = "periodic"
+        const val KEY_MEMBER = "member"
         const val KEY_STATUS = "status"
 
         /**
@@ -97,18 +99,19 @@ class CameraRollBackupWorker(
             password: String,
             pageSize: Long = BackupSchedule.DEFAULT_PAGE_SIZE,
             budgetMillis: Long = BackupSchedule.DEFAULT_BUDGET_MILLIS,
+            memberId: String = "",
         ) {
             ReceiverPasswordStore.save(context, password)
             val manager = WorkManager.getInstance(context)
             manager.enqueueUniqueWork(
                 BackupSchedule.FIRST_NAME,
                 ExistingWorkPolicy.REPLACE,
-                BackupSchedule.firstRequest(endpoint, user, password, pageSize, budgetMillis),
+                BackupSchedule.firstRequest(endpoint, user, password, pageSize, budgetMillis, memberId),
             )
             manager.enqueueUniquePeriodicWork(
                 UNIQUE_NAME,
                 ExistingPeriodicWorkPolicy.UPDATE,
-                BackupSchedule.periodicRequest(endpoint, user, password, pageSize, budgetMillis),
+                BackupSchedule.periodicRequest(endpoint, user, password, pageSize, budgetMillis, memberId),
             )
         }
     }

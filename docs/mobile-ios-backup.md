@@ -14,6 +14,8 @@ The receiver password is saved in the Keychain and then cleared from the field. 
 
 `X-Albumen-Mtime` is the asset's modification date, or its creation date when PhotoKit has no modification date, in Unix seconds.
 
+A family backup passes the member's Ed25519 public key. The PUT URL is `members/<that-key>/<filename>` and the endpoint is the family library root. An endpoint that is not that root is refused before the request. The status file and the local notification name the file. The simulator job checks that a second member's original and sidecar stay byte-identical.
+
 ## After you leave the app
 
 The host creates a background `URLSession` with identifier `photos.albumen.backup.background-upload` and `sessionSendsLaunchEvents` set. iOS can finish that PUT after the app is suspended and then relaunch the host through `handleEventsForBackgroundURLSession`. The extension reconnects the same identifier when it is launched.

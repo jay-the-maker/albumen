@@ -26,7 +26,8 @@ public enum ForegroundUpload {
         endpoint: URL,
         user: String,
         accessGroup: String?,
-        directory: URL
+        directory: URL,
+        memberId: String? = nil
     ) async -> String {
         let sha: String
         do {
@@ -47,7 +48,8 @@ public enum ForegroundUpload {
             mtimeSeconds: mtimeSeconds,
             endpoint: endpoint,
             user: user,
-            accessGroup: accessGroup
+            accessGroup: accessGroup,
+            memberId: memberId
         )
         return record(directory: directory, outcome: outcome)
     }
@@ -93,6 +95,7 @@ private final class ForegroundTransfer: NSObject, URLSessionDelegate, URLSession
     private let endpoint: URL
     private let user: String
     private let accessGroup: String?
+    private let memberId: String?
     private let lock = NSLock()
     private var continuation: CheckedContinuation<BackgroundOutcome, Never>?
     private var session: URLSession?
@@ -105,7 +108,8 @@ private final class ForegroundTransfer: NSObject, URLSessionDelegate, URLSession
         mtimeSeconds: Int,
         endpoint: URL,
         user: String,
-        accessGroup: String?
+        accessGroup: String?,
+        memberId: String? = nil
     ) async -> BackgroundOutcome {
         let transfer = ForegroundTransfer(
             file: file,
@@ -115,7 +119,8 @@ private final class ForegroundTransfer: NSObject, URLSessionDelegate, URLSession
             mtimeSeconds: mtimeSeconds,
             endpoint: endpoint,
             user: user,
-            accessGroup: accessGroup
+            accessGroup: accessGroup,
+            memberId: memberId
         )
         return await transfer.run()
     }
@@ -128,7 +133,8 @@ private final class ForegroundTransfer: NSObject, URLSessionDelegate, URLSession
         mtimeSeconds: Int,
         endpoint: URL,
         user: String,
-        accessGroup: String?
+        accessGroup: String?,
+        memberId: String?
     ) {
         self.file = file
         self.filename = filename
@@ -138,12 +144,21 @@ private final class ForegroundTransfer: NSObject, URLSessionDelegate, URLSession
         self.endpoint = endpoint
         self.user = user
         self.accessGroup = accessGroup
+        self.memberId = memberId
     }
 
     private func run() async -> BackgroundOutcome {
         let request: URLRequest
         do {
-            request = try BackgroundPut.request(endpoint: endpoint, filename: filename, mtimeSeconds: mtimeSeconds)
+            request = try BackgroundPut.request(
+                endpoint: endpoint,
+                filename: filename,
+                mtimeSeconds: mtimeSeconds,
+                memberId: memberId
+            )
+        } catch let error as MemberNamespaceError {
+            let member = memberId ?? ""
+            return .failure(MemberNamespace.refusal(filename: filename, memberId: member, detail: error.message))
         } catch {
             return .failure(UploadFailure.transport(String(describing: error)).surfaced(identifier: localIdentifier))
         }

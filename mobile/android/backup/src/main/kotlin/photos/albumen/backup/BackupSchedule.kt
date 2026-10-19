@@ -47,9 +47,10 @@ object BackupSchedule {
         password: String,
         pageSize: Long = DEFAULT_PAGE_SIZE,
         budgetMillis: Long = DEFAULT_BUDGET_MILLIS,
+        memberId: String = "",
     ): OneTimeWorkRequest = OneTimeWorkRequestBuilder<CameraRollBackupWorker>()
         .setConstraints(firstConstraints())
-        .setInputData(backupInput(endpoint, user, password, pageSize, budgetMillis))
+        .setInputData(backupInput(endpoint, user, password, pageSize, budgetMillis, memberId = memberId))
         .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
         .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
         .build()
@@ -60,11 +61,12 @@ object BackupSchedule {
         password: String,
         pageSize: Long = DEFAULT_PAGE_SIZE,
         budgetMillis: Long = DEFAULT_BUDGET_MILLIS,
+        memberId: String = "",
     ): PeriodicWorkRequest = PeriodicWorkRequestBuilder<CameraRollBackupWorker>(
         PERIODIC_MINUTES,
         TimeUnit.MINUTES,
     )
         .setConstraints(periodicConstraints())
-        .setInputData(backupInput(endpoint, user, password, pageSize, budgetMillis, periodic = true))
+        .setInputData(backupInput(endpoint, user, password, pageSize, budgetMillis, periodic = true, memberId = memberId))
         .build()
 }

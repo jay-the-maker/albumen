@@ -41,6 +41,10 @@ class UploadCheckTest {
             UploadVerdict.Rejected(500),
             UploadCheck.verdict("aa", 500, "aa"),
         )
+        assertEquals(
+            UploadVerdict.Rejected(403),
+            UploadCheck.verdict("aa", 403, null),
+        )
     }
 
     @Test

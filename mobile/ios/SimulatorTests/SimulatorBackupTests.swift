@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import CryptoKit
 import Darwin
 import Foundation
 import UserNotifications
@@ -87,6 +88,74 @@ final class SimulatorBackupTests: XCTestCase {
         )
         let marker = "SHA-256 mismatch for \(name). Sent \(client). Receiver reported \(serverHash)."
         try await assertSurfaced(directory: directory, status: status, marker: marker)
+    }
+
+    func testMemberBackupLeavesTheOtherMemberByteIdentical() async throws {
+        let directory = try makeDirectory()
+        let memberA = String(repeating: "ab", count: 32)
+        let memberB = String(repeating: "cd", count: 32)
+        let original = Data("member-b-original".utf8)
+        let sidecar = Data("<x:xmpmeta member-b/>".utf8)
+        let bDir = directory.appendingPathComponent("members/\(memberB)/objects", isDirectory: true)
+        try FileManager.default.createDirectory(at: bDir, withIntermediateDirectories: true)
+        let originalURL = bDir.appendingPathComponent("original.jpg")
+        let sidecarURL = bDir.appendingPathComponent("original.jpg.sidecar")
+        try original.write(to: originalURL)
+        try sidecar.write(to: sidecarURL)
+        let originalSha = try Sha256File.hex(originalURL)
+        let sidecarSha = try Sha256File.hex(sidecarURL)
+        let originalMtime = try FileManager.default.attributesOfItem(atPath: originalURL.path)[.modificationDate] as? Date
+        let sidecarMtime = try FileManager.default.attributesOfItem(atPath: sidecarURL.path)[.modificationDate] as? Date
+
+        let name = "phone.jpg"
+        let phone = Data("member-a-phone-backup".utf8)
+        let file = directory.appendingPathComponent(name)
+        try phone.write(to: file)
+        let server = try FamilyMemberReceiver(memberId: memberA, library: directory)
+        defer { server.stop() }
+        let status = await ForegroundUpload.uploadOriginal(
+            file: file,
+            filename: name,
+            localIdentifier: name,
+            mtimeSeconds: 1_700_000_000,
+            endpoint: URL(string: server.endpoint)!,
+            user: user,
+            accessGroup: nil,
+            directory: directory,
+            memberId: memberA
+        )
+        XCTAssertTrue(status.contains("Verified 1 this run."), status)
+        XCTAssertTrue(status.contains("Failures 0."), status)
+        XCTAssertEqual(server.paths, ["/members/\(memberA)/\(name)"])
+        let stored = directory.appendingPathComponent("members/\(memberA)/\(name)")
+        XCTAssertEqual(try Data(contentsOf: stored), phone)
+        XCTAssertEqual(try Sha256File.hex(originalURL), originalSha)
+        XCTAssertEqual(try Sha256File.hex(sidecarURL), sidecarSha)
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: originalURL.path)[.modificationDate] as? Date,
+            originalMtime
+        )
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: sidecarURL.path)[.modificationDate] as? Date,
+            sidecarMtime
+        )
+
+        let outside = await ForegroundUpload.uploadOriginal(
+            file: file,
+            filename: "outside.jpg",
+            localIdentifier: "outside.jpg",
+            mtimeSeconds: 1_700_000_000,
+            endpoint: URL(string: "http://127.0.0.1:9/members/\(memberB)/")!,
+            user: user,
+            accessGroup: nil,
+            directory: directory,
+            memberId: memberA
+        )
+        let marker = "Refusing a write of outside.jpg outside members/\(memberA)/"
+        try await assertSurfaced(directory: directory, status: outside, marker: marker)
+        XCTAssertEqual(server.paths, ["/members/\(memberA)/\(name)"])
+        XCTAssertEqual(try Sha256File.hex(originalURL), originalSha)
+        XCTAssertEqual(try Sha256File.hex(sidecarURL), sidecarSha)
     }
 
     func testReceiverDownSurfacesOnTheStatusAndTheNotification() async throws {
@@ -253,6 +322,147 @@ private final class NoticeCatcher: NSObject, UNUserNotificationCenterDelegate {
         bodies.append(notification.request.content.body)
         lock.unlock()
         completionHandler([])
+    }
+}
+
+/// Loopback family receiver. A PUT under `members/<member>/` is stored there.
+/// Any other path is HTTP 403 and is not written.
+private final class FamilyMemberReceiver {
+    let endpoint: String
+    private let listenFD: Int32
+    private let queue = DispatchQueue(label: "albumen-family-member-receiver")
+    private let memberId: String
+    private let library: URL
+    private let lock = NSLock()
+    private var seen: [String] = []
+
+    var paths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return seen
+    }
+
+    init(memberId: String, library: URL) throws {
+        self.memberId = memberId
+        self.library = library
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        if fd < 0 {
+            throw POSIXError(.ECONNREFUSED)
+        }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if bound != 0 || listen(fd, 4) != 0 {
+            close(fd)
+            throw POSIXError(.EADDRINUSE)
+        }
+        var got = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &got) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &len)
+            }
+        }
+        if named != 0 {
+            close(fd)
+            throw POSIXError(.EADDRINUSE)
+        }
+        listenFD = fd
+        endpoint = "http://127.0.0.1:\(UInt16(bigEndian: got.sin_port))/"
+        queue.async { [weak self] in
+            self?.serve()
+        }
+    }
+
+    func stop() {
+        close(listenFD)
+    }
+
+    private func serve() {
+        while true {
+            let client = accept(listenFD, nil, nil)
+            if client < 0 {
+                break
+            }
+            respond(client)
+            close(client)
+        }
+    }
+
+    private func respond(_ client: Int32) {
+        var header = Data()
+        var byte = [UInt8](repeating: 0, count: 1)
+        while header.count < 64 * 1024 {
+            let n = read(client, &byte, 1)
+            if n <= 0 {
+                break
+            }
+            header.append(byte[0])
+            if header.suffix(4).elementsEqual([13, 10, 13, 10] as [UInt8]) {
+                break
+            }
+        }
+        let text = String(data: header, encoding: .isoLatin1) ?? ""
+        let length = contentLength(text)
+        if text.lowercased().contains("100-continue") {
+            _ = "HTTP/1.1 100 Continue\r\n\r\n".withCString { reply in
+                write(client, reply, strlen(reply))
+            }
+        }
+        var body = Data()
+        while body.count < length {
+            var buf = [UInt8](repeating: 0, count: max(length - body.count, 1))
+            let n = read(client, &buf, buf.count)
+            if n <= 0 {
+                break
+            }
+            body.append(buf, count: n)
+        }
+        let request = text.split(separator: "\r\n").first.map(String.init) ?? ""
+        let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+        let prefix = "/members/\(memberId)/"
+        let allowed = path.hasPrefix(prefix) && !path.contains("..")
+        if allowed {
+            let relative = String(path.dropFirst())
+            let dest = library.appendingPathComponent(relative)
+            try? FileManager.default.createDirectory(
+                at: dest.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? body.write(to: dest)
+            lock.lock()
+            seen.append(path)
+            lock.unlock()
+            let digest = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+            let response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\nX-Albumen-Sha256: \(digest)\r\n\r\n"
+            _ = response.withCString { reply in
+                write(client, reply, strlen(reply))
+            }
+            return
+        }
+        let refused = "HTTP/1.1 403 refusing a write outside members/\(memberId)/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        _ = refused.withCString { reply in
+            write(client, reply, strlen(reply))
+        }
+    }
+
+    private func contentLength(_ header: String) -> Int {
+        for line in header.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            if parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length" {
+                return Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            }
+        }
+        return 0
     }
 }
 

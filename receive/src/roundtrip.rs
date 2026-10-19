@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fs::{self, OpenOptions};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use albumen_ingest::sha256_hex;
 use russh::client::{self, Handler};
@@ -10,7 +12,7 @@ use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::{listen, Settings};
+use crate::{listen, Library, Settings};
 
 fn fixtures() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures")
@@ -29,6 +31,7 @@ async fn webdav_sftp_and_ftp_store_raw_and_video_without_overwrite() {
             library: root.path().to_path_buf(),
             user: "camera".into(),
             password: "roll".into(),
+            member: None,
         },
         Some("127.0.0.1:0".parse().unwrap()),
         Some("127.0.0.1:0".parse().unwrap()),
@@ -131,6 +134,7 @@ async fn same_camera_filename_keeps_both_files_and_an_identical_retry_dedupes() 
             library: root.path().to_path_buf(),
             user: "camera".into(),
             password: "roll".into(),
+            member: None,
         },
         Some("127.0.0.1:0".parse().unwrap()),
         Some("127.0.0.1:0".parse().unwrap()),
@@ -257,6 +261,7 @@ async fn mtime_round_trips_on_webdav_ftp_and_sftp() {
             library: root.path().to_path_buf(),
             user: "camera".into(),
             password: "roll".into(),
+            member: None,
         },
         Some("127.0.0.1:0".parse().unwrap()),
         Some("127.0.0.1:0".parse().unwrap()),
@@ -336,6 +341,7 @@ async fn a_later_mtime_is_appended_and_does_not_replace_the_first() {
             library: root.path().to_path_buf(),
             user: "camera".into(),
             password: "roll".into(),
+            member: None,
         },
         Some("127.0.0.1:0".parse().unwrap()),
         Some("127.0.0.1:0".parse().unwrap()),
@@ -536,6 +542,7 @@ async fn webdav_answers_100_continue_before_the_body() {
             library: root.path().to_path_buf(),
             user: "camera".into(),
             password: "roll".into(),
+            member: None,
         },
         Some("127.0.0.1:0".parse().unwrap()),
         None,
@@ -804,6 +811,148 @@ async fn ftp_read_line(control: &mut TcpStream) -> String {
         }
     }
     String::from_utf8_lossy(&buf).trim().to_string()
+}
+
+#[tokio::test]
+async fn phone_backup_writes_only_the_joined_member_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    let founder = albumen_ingest::family::create_key(&tmp.path().join("founder.key")).unwrap();
+    let library = albumen_ingest::family::init_library(&parent, &founder, "ada").unwrap();
+    let mtime = UNIX_EPOCH + Duration::new(1_400_000_111, 123_456_789);
+    let photo = tmp.path().join("note.txt");
+    let sidecar = tmp.path().join("note.xmp");
+    stamp_file(&photo, b"synthetic-family-original", mtime);
+    stamp_file(&sidecar, b"<x:xmpmeta synthetic/>", mtime);
+    let added =
+        albumen_ingest::family::add_object(&library, &founder, &photo, Some(&sidecar)).unwrap();
+
+    let phone = albumen_ingest::family::create_key(&tmp.path().join("phone.key")).unwrap();
+    let token = albumen_ingest::family::invite(&library, &founder, phone.member_id()).unwrap();
+    albumen_ingest::family::join(&library, &phone, &token, "phone").unwrap();
+    albumen_ingest::family::admit(&library, &founder, phone.member_id(), &token).unwrap();
+
+    let stranger = albumen_ingest::family::create_key(&tmp.path().join("stranger.key")).unwrap();
+    let stranger_err = Library::open_member_namespace(&library, stranger.member_id()).unwrap_err();
+    assert!(
+        stranger_err.to_string().contains("has not joined"),
+        "{stranger_err}"
+    );
+    let open_err = Library::open(&library).unwrap_err();
+    assert!(
+        open_err.to_string().contains("family library"),
+        "{open_err}"
+    );
+
+    let before = snapshot_tree(&library.join("members").join(founder.member_id()));
+    assert!(!before.is_empty());
+
+    let listening = listen(
+        Settings {
+            library: library.clone(),
+            user: "camera".into(),
+            password: "roll".into(),
+            member: Some(phone.member_id().to_string()),
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let webdav = listening.webdav.unwrap();
+    let body = b"phone-backup-original";
+    let phone_file = tmp.path().join("phone.jpg");
+    fs::write(&phone_file, body).unwrap();
+    let phone_sha = albumen_ingest::sha256_hex(&phone_file).unwrap();
+    let member = phone.member_id();
+    http_put(
+        webdav,
+        &format!("/members/{member}/phone.jpg"),
+        body,
+        "201",
+        &phone_sha,
+    )
+    .await;
+    let stored = library.join("members").join(member).join("phone.jpg");
+    assert_eq!(fs::read(&stored).unwrap(), body);
+    assert_eq!(albumen_ingest::sha256_hex(&stored).unwrap(), phone_sha);
+
+    http_request(
+        webdav,
+        "PUT",
+        &format!("/members/{}/evil.jpg", founder.member_id()),
+        b"not-b",
+        "403",
+    )
+    .await;
+    http_request(webdav, "PUT", "/evil.jpg", b"not-root", "403").await;
+    http_request(
+        webdav,
+        "PUT",
+        &format!(
+            "/members/{member}/../../members/{}/evil.jpg",
+            founder.member_id()
+        ),
+        b"climb",
+        "400",
+    )
+    .await;
+
+    let after = snapshot_tree(&library.join("members").join(founder.member_id()));
+    assert_eq!(
+        before, after,
+        "member B originals, mtime, or sidecars changed"
+    );
+    assert!(added.object_path.is_file());
+    assert!(added.sidecar_path.unwrap().is_file());
+    assert!(!library
+        .join("members")
+        .join(founder.member_id())
+        .join("evil.jpg")
+        .exists());
+    assert!(!library.join("evil.jpg").exists());
+}
+
+fn stamp_file(path: &Path, bytes: &[u8], mtime: SystemTime) {
+    fs::write(path, bytes).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(mtime))
+        .unwrap();
+}
+
+fn snapshot_tree(root: &Path) -> Vec<(String, String, SystemTime, u64)> {
+    let mut out = Vec::new();
+    snapshot_into(root, root, &mut out);
+    out.sort();
+    out
+}
+
+fn snapshot_into(root: &Path, dir: &Path, out: &mut Vec<(String, String, SystemTime, u64)>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            snapshot_into(root, &path, out);
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let meta = fs::metadata(&path).unwrap();
+        out.push((
+            rel,
+            albumen_ingest::sha256_hex(&path).unwrap(),
+            meta.modified().unwrap(),
+            meta.len(),
+        ));
+    }
 }
 
 fn parse_pasv(line: &str) -> SocketAddr {

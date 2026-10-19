@@ -71,16 +71,16 @@ public enum UploadCheck {
         let server = serverSha256?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
+        if status != 201 && status != 409 {
+            return .rejected(status: status)
+        }
         if server.isEmpty {
             return .missingServerHash
         }
-        if status == 201 || status == 409 {
-            if client == server {
-                return .verified(sha256: client)
-            }
-            return .conflict(client: client, server: server)
+        if client == server {
+            return .verified(sha256: client)
         }
-        return .rejected(status: status)
+        return .conflict(client: client, server: server)
     }
 
     public static func requireVerified(_ verdict: UploadVerdict) throws -> String {

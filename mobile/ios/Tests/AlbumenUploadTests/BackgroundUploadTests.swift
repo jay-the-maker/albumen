@@ -21,6 +21,51 @@ final class BackgroundUploadTests: XCTestCase {
         XCTAssertThrowsError(try BackgroundPut.request(endpoint: URL(string: "http://127.0.0.1/")!, filename: "..", mtimeSeconds: 0))
     }
 
+    func testFamilyPutStaysUnderTheMemberPrefix() throws {
+        let member = String(repeating: "ab", count: 32)
+        let other = String(repeating: "cd", count: 32)
+        let request = try BackgroundPut.request(
+            endpoint: URL(string: "http://127.0.0.1:9/")!,
+            filename: "album/IMG_0001.JPG",
+            mtimeSeconds: 1_700_000_000,
+            memberId: member
+        )
+        XCTAssertEqual(request.url?.path, "/members/\(member)/IMG_0001.JPG")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertThrowsError(
+            try BackgroundPut.request(
+                endpoint: URL(string: "http://127.0.0.1:9/members/\(other)/")!,
+                filename: "IMG_0001.JPG",
+                mtimeSeconds: 1,
+                memberId: member
+            )
+        )
+    }
+
+    func testOutsideFamilyEndpointIsNamedInTheStatus() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let member = String(repeating: "ab", count: 32)
+        let other = String(repeating: "cd", count: 32)
+        let file = directory.appendingPathComponent("note.jpg")
+        try Data("synthetic-phone-bytes".utf8).write(to: file)
+        let status = await ForegroundUpload.uploadOriginal(
+            file: file,
+            filename: "note.jpg",
+            localIdentifier: "note.jpg",
+            mtimeSeconds: 1_700_000_000,
+            endpoint: URL(string: "http://127.0.0.1:9/members/\(other)/")!,
+            user: "camera",
+            accessGroup: nil,
+            directory: directory,
+            memberId: member
+        )
+        XCTAssertTrue(status.contains("note.jpg"))
+        XCTAssertTrue(status.contains("outside members/\(member)/"))
+        XCTAssertEqual(BackupReportStore.readStatus(directory: directory), status)
+    }
+
     func testForegroundSessionIsNotTheBackgroundSession() {
         let configuration = ForegroundUpload.foregroundConfiguration()
         XCTAssertNil(configuration.identifier)
