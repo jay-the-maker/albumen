@@ -9,6 +9,26 @@ artifact="${2:?artifact name}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin_dir="${ALBUMEN_RELEASE_BIN_DIR:-$root/target/$target/release}"
 out_dir="${ALBUMEN_RELEASE_OUT_DIR:-${GITHUB_WORKSPACE:-$root}}"
+
+# Git Bash leaves GITHUB_WORKSPACE as D:\... . GNU tar reads the colon as a
+# remote host and never writes the archive. A POSIX path stays on this machine.
+posix_path() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if ! command -v cygpath >/dev/null 2>&1; then
+        echo "cygpath is required to package on Windows" >&2
+        exit 1
+      fi
+      cygpath -u "$1"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
+bin_dir="$(posix_path "$bin_dir")"
+out_dir="$(posix_path "$out_dir")"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
