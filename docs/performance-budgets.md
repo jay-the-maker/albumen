@@ -169,6 +169,28 @@ Both are at or above the 0.80 target on this disk. The runner table is the per-l
 
 Regression gate, separate from the 0.80 target: fail a leg when a later run is under 80% of the ratio recorded above. That would be 0.530, 0.594, 0.213, and 0.645 for the four legs. It is not a CI failure. The raw write on `ubuntu-24.04` moved by more than that between the before job and this one, so a gate on one sample would fail a later job when the raw write is faster and the import is not. Meeting that gate would not mean the leg met 0.80.
 
+## 380,000 items in CI
+
+[`.github/workflows/library-scale.yml`](../.github/workflows/library-scale.yml) times the stdio MCP server, `albumen-mcp --library`, on a generated 380,000-item library on `ubuntu-24.04`, `macos-14`, and `windows-2025`. It runs on a pull request that changes `mcp/`, `ingest/`, `Cargo.lock`, the workflow, or the script, and on `workflow_dispatch`.
+
+`scripts/library-scale.py` builds the library in the job. Each item is a 4-byte synthetic JPEG (`FF D8 FF D9`) at `YYYY/MM/<prefix><index>.jpg`, spread evenly over 2010-01 to 2026-12 with `IMG_`, `DSC_`, `PXL_`, and `DJI_` names. That is about 1,860 items per month directory. The same item count gives the same paths, and the script prints `paths_sha256`, the SHA-256 of the sorted path list. Nothing is committed and no real photo is read. Generation is not timed against a target.
+
+| Field | What is timed |
+| --- | --- |
+| `cold_start_ms` | Process spawn until `initialize` and `tools/list` have both answered. The first query can be sent at that moment. |
+| `first_query_ms` | The first `search` after that, reported beside cold start. |
+| `search_p50_ms`, `search_p95_ms` | Nearest-rank over 200 fixed `search` calls, seed 380000, page size 100: 100 file names, 50 month prefixes, and 50 strings that match nothing. Each call is checked: a name or month returns files, a miss returns none. |
+| `peak_memory_mib` | Peak RSS of `albumen-mcp` on Linux (`VmHWM`) and macOS (`ru_maxrss`), and peak working set on Windows (`GetProcessMemoryInfo`). |
+
+The scorecard targets for this run are a cold start of 1.5 s or less and a search p95 of 200 ms or less. The job writes a results table to its summary and uploads the JSON. It is report only: a number over its target is the measurement and does not fail the job. The job fails when the library is not exactly the requested item count, a query result is wrong, or the server exits non-zero.
+
+The library was just written, so the OS file cache is warm. Cold start here is the server's own start, not a disk spin-up.
+
+Search with only a path query walks the library and does not read file bytes. A metadata filter also runs ExifTool and SHA-256 on each candidate, which the local run below measures.
+
+<!-- library-scale-results -->
+Results are recorded here once the CI run on each leg finishes.
+
 ## Local 380,000-item run
 
 This is how the full-library search and browse numbers are taken. It is not the CI job. It needs disk for 380,000 JPEGs and 380,000 XMP sidecars, and the cold search runs ExifTool across all of them.
