@@ -221,17 +221,28 @@ fn normalize_path(path: &Path) -> String {
 
 #[cfg(windows)]
 fn same_directory(left: &Path, right: &Path) -> bool {
-    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+    if let (Ok(left_canon), Ok(right_canon)) = (left.canonicalize(), right.canonicalize()) {
+        if normalize_path(&left_canon) == normalize_path(&right_canon) {
+            return true;
+        }
+    }
+    // 8.3 and long names can canonicalize to different strings. The leaf
+    // name of one directory does not change between those forms, and two
+    // different directories created in one tick must not compare equal.
+    if left.file_name() != right.file_name() {
+        return false;
+    }
+    let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(left), fs::metadata(right)) else {
         return false;
     };
-    if !left.is_dir() || !right.is_dir() {
+    if !left_meta.is_dir() || !right_meta.is_dir() {
         return false;
     }
     use std::os::windows::fs::MetadataExt;
-    left.creation_time() == right.creation_time()
-        && left.last_write_time() == right.last_write_time()
-        && left.file_size() == right.file_size()
-        && left.file_attributes() == right.file_attributes()
+    left_meta.creation_time() == right_meta.creation_time()
+        && left_meta.last_write_time() == right_meta.last_write_time()
+        && left_meta.file_size() == right_meta.file_size()
+        && left_meta.file_attributes() == right_meta.file_attributes()
 }
 
 fn resolve_dest(dest: &Path) -> Result<PathBuf, IngestError> {
