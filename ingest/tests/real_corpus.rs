@@ -10,11 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use albumen_ingest::{
-    copy_verify, discover, sha256_hex, BlobStore, LocalStore, Role, S3Config, S3Store,
+    copy_verify, discover, exiftool_command, sha256_hex, BlobStore, LocalStore, Role, S3Config,
+    S3Store,
 };
 use serde_json::{Map, Value};
 
@@ -410,7 +410,7 @@ fn assert_exif_eq(source: &Path, dest: &Path) {
 }
 
 fn exif_dump(path: &Path) -> Value {
-    let output = Command::new("exiftool")
+    let output = exiftool_command()
         .args([
             "-j",
             "-G1",

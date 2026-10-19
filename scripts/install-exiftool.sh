@@ -67,7 +67,8 @@ if [[ "$windows_perl" -eq 1 ]]; then
     rm -rf "$ROOT"
     tar -xzf "$TARBALL" -C "$CACHE"
   fi
-  # Rust on Windows finds exiftool.cmd, not an extensionless Perl script.
+  # Rust resolves a bare name only as name.exe. exiftool.cmd is the
+  # file that lookup can see, and it runs the pinned script with perl.
   cat > "${ROOT}/exiftool.cmd" <<'EOF'
 @echo off
 perl "%~dp0exiftool" %*

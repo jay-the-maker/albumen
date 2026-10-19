@@ -7,8 +7,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use albumen_ingest::{
-    copy_verify, discover, sha256_hex, BlobStore, IngestError, LocalStore, RcloneStore, S3Config,
-    S3Store,
+    copy_verify, discover, exiftool_command, sha256_hex, BlobStore, IngestError, LocalStore,
+    RcloneStore, S3Config, S3Store,
 };
 use serde_json::{Map, Value};
 
@@ -396,7 +396,7 @@ fn assert_exif_eq(source: &Path, dest: &Path) {
 }
 
 fn exif_dump(path: &Path) -> Value {
-    let output = Command::new("exiftool")
+    let output = exiftool_command()
         .args([
             "-j",
             "-G1",

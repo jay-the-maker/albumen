@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -27,6 +26,7 @@ use serde_json::{Map, Value};
 use crate::checksum::{sha256_reader, to_hex};
 use crate::discover::companion_names;
 use crate::error::IngestError;
+use crate::exiftool::exiftool_command;
 use crate::mtime::to_unix_nanos_string;
 
 #[cfg(target_os = "linux")]
@@ -727,7 +727,7 @@ fn count_newlines(file: &mut File, manifest: &Path, len: u64) -> Result<u64, Ing
 }
 
 fn require_exiftool() -> Result<(), IngestError> {
-    match Command::new("exiftool").arg("-ver").output() {
+    match exiftool_command().arg("-ver").output() {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => Err(IngestError::store(
             "exiftool",
@@ -746,7 +746,7 @@ fn require_exiftool() -> Result<(), IngestError> {
 }
 
 fn read_metadata(root: &Path, relative_paths: &[String]) -> Result<Vec<KeyMetadata>, IngestError> {
-    let output = Command::new("exiftool")
+    let output = exiftool_command()
         .current_dir(root)
         .arg("-json")
         .arg("-n")
