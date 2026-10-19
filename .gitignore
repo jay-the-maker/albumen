@@ -5,3 +5,4 @@
 real-corpus/
 fixtures/real-device/
 *.real-corpus
+*.ledger/

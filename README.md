@@ -10,7 +10,7 @@ Originals are stored bit-exact: Albumen does not recompress, transcode, or strip
 
 Albumen is an open-source photo library with the feel of classic iPhoto, built to keep working when the library is hundreds of thousands of items and multiple terabytes. You bring the storage. Agents can read the library; they do not get tools that delete or rewrite originals.
 
-**Status: early-stage.** `albumen-mcp` is in this repository. It speaks MCP over stdio. Search and browse are on, including metadata search (capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions). Export and upload are off until that process is started with `--enable-export` or `--enable-upload`. There is no delete tool. The native apps and the on-disk catalog are not built yet. Ingest copies an original plus its sidecars, preserves filename and mtime, and verifies SHA-256. It does not delete sources.
+**Status: early-stage.** `albumen-mcp` is in this repository. It speaks MCP over stdio. Search, browse, and ledger are on, including metadata search (capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions). The ledger reads the library locally and lists every stored file, every on-device analysis, and every recorded destination. Export and upload are off until that process is started with `--enable-export` or `--enable-upload`. There is no delete tool. The native apps and the on-disk catalog are not built yet. Ingest copies an original plus its sidecars, preserves filename and mtime, and verifies SHA-256. It does not delete sources.
 
 ## Vision
 
@@ -195,7 +195,7 @@ The SFTP host key is generated for that process. FTP passive mode advertises the
 
 ## Agents
 
-The agent guide is [AGENTS.md](AGENTS.md). `albumen-mcp` speaks MCP over stdio. Search and browse are available immediately. Search can filter on capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions. It reads those from the files and sidecars and does not write a catalog. Export and upload are not available until that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. There is no delete tool.
+The agent guide is [AGENTS.md](AGENTS.md). `albumen-mcp` speaks MCP over stdio. Search, browse, and ledger are available immediately. Search can filter on capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions. It reads those from the files and sidecars and does not write a catalog. `albumen ledger` and the `ledger` tool print the same local account: path, SHA-256, size, member, the analyses that ran, and the destinations in the connection log. Export and upload are not available until that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. There is no delete tool.
 
 ```bash
 albumen-mcp --library ./library

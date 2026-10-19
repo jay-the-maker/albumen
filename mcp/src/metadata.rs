@@ -385,6 +385,8 @@ fn read_exiftool(
     root: &Path,
     relative_paths: &[String],
 ) -> Result<HashMap<String, Record>, String> {
+    albumen_ingest::ledger::record_analysis(Some(root), "exiftool", "on-device")
+        .map_err(|err| err.to_string())?;
     let mut out = HashMap::new();
     for chunk in relative_paths.chunks(exiftool_batch()) {
         let output = exiftool_command()

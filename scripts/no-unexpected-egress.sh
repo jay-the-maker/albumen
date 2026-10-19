@@ -29,6 +29,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 python3 "$root/scripts/check-egress.py" --self-test
+python3 "$root/scripts/check-ledger-egress.py" --self-test
 
 if ! unshare --user --map-root-user --net true; then
   echo "no-unexpected-egress: unshare --net failed. On Ubuntu, set kernel.apparmor_restrict_unprivileged_userns=0 and retry." >&2
@@ -150,7 +151,7 @@ run_case() {
   fi
 }
 
-base_env=(env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 TMPDIR="$work")
+base_env=(env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 TMPDIR="$work" ALBUMEN_CONNECTION_LOG="$work/connections.jsonl")
 albumen="$root/target/debug/albumen"
 mcp="$root/target/debug/albumen-mcp"
 receive="$root/target/debug/albumen-receive"
@@ -191,6 +192,9 @@ run_case receive-listen "" "18080" 124 \\
   "\${base_env[@]}" ALBUMEN_RECEIVE_PASSWORD=receiver-secret \\
   timeout --signal=TERM --kill-after=2 3 \\
   "\$receive" --to "$work/out/listen" --user camera --webdav 127.0.0.1:18080 --apply
+run_case ledger "" "" 0 \\
+  "\${base_env[@]}" "\$albumen" ledger --library "$work/library" --connection-log "$work/connections.jsonl" --json
+python3 "$root/scripts/check-ledger-egress.py" "$work/trace" "$work/logs/ledger"
 
 echo "no-unexpected-egress: each binary stayed on the destinations it was given"
 EOF
