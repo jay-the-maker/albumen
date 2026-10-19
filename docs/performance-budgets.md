@@ -12,6 +12,7 @@ Cold start, the first thumbnail, scroll, and backup CPU and battery are targets 
 | Time to first thumbnail (app first paint) | ≤ 1.0 second on a 380,000-item library: the ceiling for the app's first painted thumbnail, from launch. Team target. |
 | First thumbnail (library scale) | ≤ 300 ms at 380,000 items: `albumen-mcp` `thumbnail`, request to bytes and spawn to bytes, measured by the `library scale` job. Team target. |
 | Scroll | ≥ 60 FPS on a 380,000-item library, which is a p95 frame time ≤ 16.7 ms |
+| Import CPU | ≤ 2.0 CPU seconds per GB imported on every leg, scored; the `import throughput` job fails above 3.0 CPU seconds per GB on any leg. `cpu_percent` is reported next to it as context. Team targets. Status: Partial (ubuntu-24.04 and macos-14 meet 2.0 today). See [Import CPU](#import-cpu). |
 | Backup CPU | Average ≤ 25% of one core across a background backup. A hash may use one core. It does not fan out across every core. |
 | Backup battery | Backup does not run on battery by default. Once a client can measure drain, screen-off backup stays ≤ 5% battery per hour. |
 
@@ -50,9 +51,29 @@ These are the product bars on a 380,000-item library. CI does not fail a job for
 | --- | --- |
 | Search, warm | p50 ≤ 500 ms and p95 ≤ 1.5 s |
 | Import | ≥ 100 MB/s on a local SSD, and ≥ 20 items/s for originals of about 5 MB |
-| Import vs raw write | Target ≥ 80% of a same-disk durable write for 1,000 files of about 5 MB |
+| Import vs raw write | Target ≥ 80% of a same-disk durable write for 1,000 files of about 5 MB, on `ubuntu-24.04`, `ubuntu-26.04`, and `windows-2025` |
+| Import vs copy ceiling (`macos-14`) | Team target: import ≥ 90% of the copy ceiling measured in the same job, under per-file plus directory `F_FULLFSYNC`. The ratio to the raw write is still reported. |
 
 1 MB is 1,000,000 bytes. 100 MB/s of 5 MB files is 20 items/s. The 80% bar is import MB/s divided by a raw write that uses the same per-file `fsync` and directory `fsync`. It is measured below. The absolute 100 MB/s bar stays a product target. CI does not fail a ratio below 0.80. A per-leg regression gate, when one is recorded, is a separate check and is not this 80% bar.
+
+### macOS target: 90% of the same-job copy ceiling
+
+This is a team target, adopted by the XO on 2026-10-19. It is not a product requirement from Jay.
+
+On `macos-14`, the import target is **import MB/s at 90% or more of the copy ceiling measured in the same job**, under the current durability: `F_FULLFSYNC` on every file and on its directory. The copy ceiling uses the import's workers and syncs and reads each source once, with no hash and no read-back. The import throughput job prints it as `copy_ceiling_mb_s` and `copy_ceiling_ratio`, added in [#110](https://github.com/jay-the-maker/albumen/pull/110), which is on main. The other legs keep the 0.80-of-raw target. The macOS ratio to the raw write is still printed and is kept in the table below.
+
+Why the target changed: on `macos-14` the copy ceiling swung between 0.72 and 1.07 of the raw write across runners, and the sources were often not in the page cache, so 0.80 of raw could sit above what one read plus the required syncs can reach.
+
+| run | commit | sampling | raw MB/s (`F_FULLFSYNC`) | import MB/s | import / raw | copy ceiling MB/s | copy ceiling / raw | **import / copy ceiling** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [39259267570](https://github.com/jay-the-maker/albumen/actions/runs/39259267570) | c401adb | single import | 557.637 | 302.937 | 0.5433 | 595.083 | 1.0672 | 0.509 |
+| [39262347854](https://github.com/jay-the-maker/albumen/actions/runs/39262347854) | cf42e75 | single import | 706.932 | 381.610 | 0.5398 | 509.054 | 0.7201 | 0.750 |
+| [39265120601](https://github.com/jay-the-maker/albumen/actions/runs/39265120601) | 60d6745 | 6 interleaved rounds | 552.450 | 328.938 | 0.5954 | 435.168 | 0.7877 | 0.756 |
+| [#110 checks](https://github.com/jay-the-maker/albumen/pull/110/checks) | d37b6f2 | 6 interleaved rounds | 575.409 | 350.927 | 0.6099 | 488.676 | 0.8493 | 0.718 |
+
+Every run reconciled 100 percent. In the interleaved runs, `vmtouch` found 0 to 67 percent of the source pages in the page cache before each macOS import, while both Ubuntu legs were at 100 percent. `macos-14` is at about 72 to 76 percent of its copy ceiling, so this target is still open there.
+
+The durability calls, both SHA-256 passes, the destination read-back, the raw sample, and the 100 percent reconciliation gate are unchanged.
 
 ## Camera RAW verify
 
@@ -264,31 +285,35 @@ Two thumbnail numbers are budgets, and both are team targets. The 1.0 s ceiling 
 
 ## Import CPU
 
-The `import throughput` job reports `cpu_percent` for the 1,000-photo import against a 10 percent target. Definition: process CPU time (user plus system, all threads, measured around the timed `copy_verify` import only) divided by (import wall time × logical cores), times 100. 100 means every core was busy for the whole import. CPU time is `CLOCK_PROCESS_CPUTIME_ID` on Linux and macOS and `GetProcessTimes` on Windows; cores are `std::thread::available_parallelism`. The job also prints `cpu_seconds_per_1000`, the CPU seconds spent per 1,000 imported photos. Report only.
+The `import throughput` job reports the CPU of the 1,000-photo, 5 GB import, and its step summary shows a scorecard.
 
-### Proposal: CPU seconds per GB in place of `cpu_percent`
+**CPU seconds per GB imported** is the metric. It is process CPU time (user plus system, all threads, measured around the timed import only, per round) divided by the gigabytes imported (10^9 bytes). It counts the copy, both SHA-256 passes, the fsyncs, and the read-back. A faster or slower runner disk does not change it. CPU seconds per 1,000 photos is the same number scaled by photo size: the job uses 5 MB photos, so 1 CPU second per GB is 5 CPU seconds per 1,000 photos.
 
-Status: a proposal for a team target, not adopted. The team decides it. Until then the 10 percent `cpu_percent` target above stands.
+Both numbers below are team targets, not requirements from Jay:
 
-**Why change.** `cpu_percent` divides CPU time by wall time, so it rises when the disk gets faster: the same work finished in half the time scores twice the percent. A run on a slow disk can meet 10 percent without doing less work, and a faster disk can miss it while doing less. The import is mostly fsync-bound, so this effect is large on CI runners.
+- **Scored target: ≤ 2.0 CPU seconds per GB on every leg** (10 CPU seconds per 1,000 five-megabyte photos). Status: **Partial**. ubuntu-24.04 and macos-14 meet it today; ubuntu-26.04 and windows-2025 do not.
+- **Regression gate: ≤ 3.0 CPU seconds per GB on every leg.** The job fails above it. The gate reads `cpu_seconds_per_gb` from the same job and the same rounds it reports.
 
-**Proposed metric.** Process CPU seconds per GB imported (10^9 bytes), per round of the `import throughput` job. It counts the same work as `cpu_percent`: the copy, both SHA-256 passes, the fsyncs, and the read-back. Because it divides by bytes instead of wall time, a faster or slower disk does not move it. CPU seconds per 1,000 photos is the same number scaled by photo size: the job uses 5 MB photos, so 1 s/GB is 5 s per 1,000 photos.
+**`cpu_percent`** stays in the report as context: the same CPU time divided by (import wall time × logical cores), times 100. It is no longer the target because it moves with disk speed: the same work on a disk twice as fast scores twice the percent. The earlier 10 percent target is printed beside it for comparison.
 
-**Proposed target.** ≤ 3.0 CPU seconds per GB on every leg, or ≤ 15 CPU seconds per 1,000 five-megabyte photos. `cpu_percent` would still be printed, as context, without a target.
+CPU time is `CLOCK_PROCESS_CPUTIME_ID` on Linux and macOS and `GetProcessTimes` on Windows; cores are `std::thread::available_parallelism`. The job also prints `phase_cpu_ms`, the thread CPU per copy phase.
 
-**Evidence.** CI runs on 2026-10-19. #109 is the per-phase CPU work and #112 carries it onto the pipelined import from #110:
+### How the targets were set
 
-| leg | main ae1cb87 (run 39272133628) s/GB, cpu_percent, MB/s | #112 b453a10 (run 39274872606) s/GB, cpu_percent, MB/s | #109 39bab3a s/GB (before #110) |
+CI runs on 2026-10-19, CPU seconds per GB per 5 GB round:
+
+| leg | main ae1cb87 (run 39272133628) | #112 b453a10 (run 39274872606) | #112 cpu_percent, import MB/s |
 |---|---|---|---|
-| ubuntu-24.04 | 3.44, 36.0%, 418 | 1.86, 9.5%, 206 | 2.17 |
-| ubuntu-26.04 | 3.28, 34.3%, 418 | 2.79, 14.3%, 201 | 2.13 |
-| windows-2025 | 3.24, 17.0%, 217 | 2.93, 16.4%, 224 | 3.68 |
-| macos-14 | 4.47, 56.9%, 376 | 1.93, 34.4%, 547 | 3.38 |
+| ubuntu-24.04 | 3.44 | 1.86 | 9.5%, 206 |
+| ubuntu-26.04 | 3.28 | 2.79 | 14.3%, 201 |
+| windows-2025 | 3.24 | 2.93 | 16.4%, 224 |
+| macos-14 | 4.47 | 1.93 | 34.4%, 547 |
 
-- **The disk drives cpu_percent.**
-  - On ubuntu-24.04 the runner's disk was half as fast in the #112 run, and `cpu_percent` fell from 36% to 9.5%, well past the 46% drop in work per GB.
-  - On macos-14 the import ran 45% faster. Work per GB fell 57%, yet `cpu_percent` stayed at 34%.
-- **How the 3.0 s/GB value was set.**
-  - It is the slowest leg on #112, windows-2025 at 2.93, rounded up to the next half second. Every leg meets it today, and a regression of a few tenths shows.
-  - The floor is the SHA-256 work alone: two passes per GB at each runner's one-thread in-memory rate, 1,498 to 2,155 MB/s with the CPU SHA-256 instructions. That is about 0.9 to 1.3 s/GB, and it stays.
-  - Windows preflight is the largest cost above that floor (4.2 s per 5 GB round) and has a cut in progress.
+- **Gate.** The 3.0 gate is the slowest #112 leg (windows-2025, 2.93) rounded up to the next half second, so every leg passes once #112 is on main and a regression of a few tenths fails. Windows has the least headroom: a windows-2025 run of #116 on a slower runner CPU (in-memory SHA-256 1,581 MB/s against 2,061) measured 3.05. The gate stays at 3.0 on Windows too, and the Windows preflight work in #116 and after it is how that leg gains room.
+- **Scored target.** The 2.0 target is what two legs already reach.
+- **Floor.** The floor is the SHA-256 work alone: two passes per GB at each runner's one-thread in-memory rate (1,498 to 2,155 MB/s with the CPU SHA-256 instructions), about 0.9 to 1.3 CPU seconds per GB. That work stays.
+- **What's left.** Windows preflight (4.2 CPU seconds per round) is the largest cost above the floor and the next cut.
+
+**Why cpu_percent stopped being the target.**
+- On ubuntu-24.04 the runner's disk was half as fast in the #112 run: the plain fsync copy in the same job fell from 417 to 163 MB/s. `cpu_percent` fell from 36% to 9.5%, well past the 46% drop in work per GB.
+- On macos-14 the import ran 45% faster. Work per GB fell 57%, yet `cpu_percent` stayed at 34%.
