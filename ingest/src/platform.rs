@@ -149,11 +149,23 @@ pub fn case_collision(dir: &Path, name: &str) -> Result<Option<String>, IngestEr
         let Some(existing) = existing_name.to_str() else {
             continue;
         };
-        if existing != name && existing.to_lowercase() == folded {
+        if existing != name && same_folded(existing, name, &folded) {
             return Ok(Some(existing.to_string()));
         }
     }
     Ok(None)
+}
+
+/// `existing.to_lowercase() == folded`, where `folded` is `name` lowercased.
+/// Two ASCII names compare without allocating. Anything else takes the full
+/// Unicode path, because a non-ASCII letter such as the Kelvin sign can
+/// lowercase to an ASCII one.
+fn same_folded(existing: &str, name: &str, folded: &str) -> bool {
+    if existing.is_ascii() && name.is_ascii() {
+        existing.eq_ignore_ascii_case(name)
+    } else {
+        existing.to_lowercase() == folded
+    }
 }
 
 /// Config and data directories for this operating system.
