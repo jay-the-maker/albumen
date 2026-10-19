@@ -154,7 +154,7 @@ jobs:
         run: cargo run --release --locked -p albumen-bench -- --check
 
   sandbox:
-    name: scan opens no sockets
+    name: no unexpected egress
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -177,3 +177,10 @@ jobs:
 
       - name: Sandbox trial against a copy of the fixtures
         run: scripts/sandbox-trial.sh
+
+      - name: Fail on network connections the command did not name
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          scripts/no-unexpected-egress.sh

@@ -10,13 +10,21 @@ Shipped. A source is opened read-only. Scan, import, and export read through tha
 
 ## Google Takeout and iCloud export
 
-This is the gap after the safety work and before the storage backends. Both importers are in the tree.
+`albumen import-takeout` and `albumen import-icloud` bring a Google Takeout download and an iCloud Photos download, export, or Photos library copy into the library you choose. The source stays read-only. Originals stay bit-exact.
 
 `albumen import-takeout` reads split zip and tgz parts, or an extracted Takeout folder, read-only. Each file is `copy_verify`'d. Takeout JSON, including truncated names, `(1)` suffixes, and `.supplemental-metadata.json`, stays byte-for-byte beside the photo it describes. Capture time and GPS are restored into a new `.albumen.json` sidecar. The original bytes are not modified. A still and a video that share a stem are reported as a Motion Photo pair. The JSONL report lists every unmatched file. Nothing is dropped because of its extension. The default is a dry-run. See [docs/importers/takeout.md](docs/importers/takeout.md).
 
 `albumen import-icloud` reads a multi-part download (zip parts plus Photo Details CSVs), a Photos export, or a copied Photos library, read-only. Originals, edited versions, Live Photo pairs, and AAE/XMP sidecars are `copy_verify`'d. CSVs stay byte-for-byte. Album, favorite, caption, capture time, and GPS metadata is a sidecar export. `Photos.sqlite` is opened `mode=ro&immutable=1`. The report lists every unmatched sidecar. The default is a dry-run. See [docs/importers/icloud.md](docs/importers/icloud.md).
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
+
+## Shared libraries
+
+A library can belong to several people. Each person owns their originals. Photos you add stay yours, bit-exact, in the library you choose. Someone else's originals stay theirs. Albumen can read a library that was shared with you, and a copy into your own library is a new original you own, checked with SHA-256.
+
+## Live Photo playback
+
+A Live Photo plays as the still and its paired video. Both files stay the originals Albumen stored. Playback does not transcode them and does not write a new master.
 
 ## Windows and Linux, with macOS
 

@@ -20,7 +20,7 @@ There is no `albumen ingest` subcommand. The write that stores bytes from a libr
 | Write | Nothing. `export` prints the plan. `scan` is refused when the manifest resolves inside the source, so a refused scan creates nothing. | `--apply` or `--execute` on `export` writes the destination and the manifest, both outside the source. `scan` writes the manifest outside the source. `verify-manifest` writes nothing. |
 | Network | None. A dry-run that names `s3://` says that a later apply would connect. It does not connect. | `export --apply` to `s3://` connects to `ALBUMEN_S3_ENDPOINT`. `verify-manifest` of an export manifest against `s3://` reads objects there. A scan manifest is verified against a local directory only. |
 
-CI straces `scan` and fails if it opens a socket or writes under the source. The same scan is repeated with a seccomp profile that denies socket calls.
+CI straces `scan` and fails if it opens a socket or writes under the source. The same scan is repeated with a seccomp profile that denies socket calls. `scripts/no-unexpected-egress.sh` runs every `albumen` command that reads a library, including export and both importers, inside a network namespace and fails if a connection is not the destination that command was given.
 
 ## albumen-mcp
 
@@ -30,7 +30,7 @@ CI straces `scan` and fails if it opens a socket or writes under the source. The
 | Write | Nothing. `export` and `upload` are not offered unless `--enable-export` or `--enable-upload` is set. Even then, without `--apply` or `--execute`, they return a JSON plan and do not create directories or connect to S3. | With the enable flag and `--apply` or `--execute`, `export` writes a destination outside the library. `upload` writes into the library from a file whose parent is not that library. A destination inside the source is refused. |
 | Network | None. stdio only. | `export --apply` to `s3://` connects to `ALBUMEN_S3_ENDPOINT`. Nothing else dials out. |
 
-There is no delete, move, or quarantine tool. Inbound messages are capped by `ALBUMEN_MCP_MAX_MESSAGE` (default 8 MiB) before the body is allocated.
+There is no delete, move, or quarantine tool. Inbound messages are capped by `ALBUMEN_MCP_MAX_MESSAGE` (default 8 MiB) before the body is allocated. The same egress script drives a search, a dry-run export, and an export that was given `ALBUMEN_S3_ENDPOINT`. Only that endpoint may appear in the trace.
 
 ## albumen-receive
 
@@ -41,6 +41,12 @@ There is no delete, move, or quarantine tool. Inbound messages are capped by `AL
 | Network | None. No socket is opened. | Listens on the `--webdav`, `--sftp`, and `--ftp` addresses that were passed. At least one is required. FTP is cleartext. SFTP host key is in memory. There is no outbound connection. |
 
 `--to` is a destination library. It is not a `SourceRoot`. Do not point it at an archive that is the only copy. The dry-run identity test points `--to` at a fixture and requires that fixture to stay unchanged. `--apply` in that test listens on a different directory.
+
+## Network egress
+
+`scripts/no-unexpected-egress.sh` runs `albumen`, `albumen-mcp`, and `albumen-receive` in a user network namespace. The namespace has loopback and no route beyond it. `strace` logs every `connect`, `sendto`, `sendmsg`, and `bind`. `scripts/check-egress.py` fails the run when a logged address is not a destination that invocation named.
+
+A scan, a local export, a Takeout or iCloud dry-run, `platform-dirs`, an MCP search, and a receive dry-run name no network destination. Any Internet address fails that run. `export --apply` to `s3://` may connect to `ALBUMEN_S3_ENDPOINT` and nowhere else. `albumen-receive --apply` may bind the listen address it was given. It does not connect out. The CI job is the `sandbox` job on `ubuntu-24.04`.
 
 ## What this does not claim
 
