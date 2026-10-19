@@ -138,7 +138,8 @@ function Start-Pktmon([string[]]$ProcessNames) {
     $startHelp = & pktmon start --help 2>&1 | Out-String
     $startArgs = @('start', '--capture', '--pkt-size', '128', '--file-name', $etl, '--file-size', '32')
     if ($startHelp -match 'loopback') {
-        & pktmon @startArgs --flags 0x10
+        # 0x10 is a string: Windows PowerShell 5.1 refuses a native exe when any argument is an int.
+        & pktmon @startArgs --flags '0x10'
         if ($LASTEXITCODE -eq 0) { return }
         # A failed start may have left the monitor running. Stopping it writes
         # "not running" to stderr when it did not, and Windows PowerShell turns
@@ -311,15 +312,17 @@ function Start-KernelTrace([string]$Etl, [string]$Keywords) {
     if (Test-Path -LiteralPath $Etl) { Remove-Item -LiteralPath $Etl -Force }
     [void](Invoke-Quiet { logman stop $script:TraceSession -ets })
     Enable-KernelAnalytic
+    # Windows PowerShell 5.1 throws "Argument types do not match" and never
+    # starts the process when a native argument is an int. Every logman number is a string.
     $text = Invoke-Quiet {
-        logman start $script:TraceSession -ets -o $Etl -max 128 -nb 32 32 -bs 128 `
-            -p Microsoft-Windows-Kernel-Network $Keywords 0xff `
-            -p Microsoft-Windows-Kernel-Process 0x10 0xff
+        logman start $script:TraceSession -ets -o $Etl -max '128' -nb '32' '32' -bs '128' `
+            -p Microsoft-Windows-Kernel-Network $Keywords '0xff' `
+            -p Microsoft-Windows-Kernel-Process '0x10' '0xff'
     }
     if ($LASTEXITCODE -eq 0) { return }
     $text = Invoke-Quiet {
-        logman start $script:TraceSession -ets -o $Etl -max 128 -nb 32 32 -bs 128 `
-            -p Microsoft-Windows-Kernel-Network $Keywords 0xff
+        logman start $script:TraceSession -ets -o $Etl -max '128' -nb '32' '32' -bs '128' `
+            -p Microsoft-Windows-Kernel-Network $Keywords '0xff'
     }
     if ($LASTEXITCODE -ne 0) {
         throw "logman could not start Microsoft-Windows-Kernel-Network (keywords $Keywords)`n$text"
@@ -342,7 +345,7 @@ $existing
     }
     # 0x10000 is EVENT_TRACE_FLAG_NETWORK_TCPIP.
     $text = Invoke-Quiet {
-        logman start 'NT Kernel Logger' -ets -o $Etl -max 128 -p 'Windows Kernel Trace' 0x10000
+        logman start 'NT Kernel Logger' -ets -o $Etl -max '128' -p 'Windows Kernel Trace' '0x10000'
     }
     if ($LASTEXITCODE -ne 0) {
         throw "logman could not start the NT Kernel Logger network provider`n$text"
