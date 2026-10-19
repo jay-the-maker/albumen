@@ -197,6 +197,10 @@ impl BlobStore for S3Store {
                 std::io::Write::write_all(&mut output, &chunk)
                     .map_err(|err| IngestError::io(&dest, err))?;
             }
+            // One fsync covers the downloaded bytes and the preserved mtime.
+            // finalize_verified reads the destination back and checks both.
+            let expected_mtime = crate::mtime::representable_mtime(mtime);
+            dest::set_mtime_on(&output, &dest, expected_mtime)?;
             output
                 .sync_all()
                 .map_err(|err| IngestError::io(&dest, err))?;

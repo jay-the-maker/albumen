@@ -156,16 +156,18 @@ Two back-to-back runs on the same ext4 disk, 4 workers, 1,000 files of 5,000,000
 | 1 | 842.915 | 874.803 | 0.9635 |
 | 2 | 865.906 | 848.398 | 1.0206 |
 
-Both are at or above the 0.80 target on this disk. The runner table is the per-leg measurement. It is filled from the job that runs this import. Until that job finishes, those cells stay pending.
+Both are at or above the 0.80 target on this disk. The runner table is the per-leg measurement, from run `39237870279`. Every leg reconciled 100 percent. Workers were 4 on the Ubuntu and Windows runners and 3 on `macos-14`.
 
 | Leg | Import MB/s | Raw MB/s | Ratio | Reconciliation |
 | --- | --- | --- | --- | --- |
-| ubuntu-24.04 | pending | pending | pending | pending |
-| ubuntu-26.04 | pending | pending | pending | pending |
-| macos-14 | pending | pending | pending | pending |
-| windows-2025 | pending | pending | pending | pending |
+| ubuntu-24.04 | 276.535 | 417.350 | 0.6626 | 100% |
+| ubuntu-26.04 | 288.874 | 388.815 | 0.7430 | 100% |
+| macos-14 | 200.794 | 754.418 | 0.2662 | 100% |
+| windows-2025 | 194.479 | 241.252 | 0.8061 | 100% |
 
-Regression gate, separate from the 0.80 target: once an after ratio is recorded for a leg, a later run of that leg fails when its ratio is under 80% of the recorded ratio. The raw-write swing in the local before table is why the gate is 80% of the recorded ratio and not a fixed 0.80. The gate is applied only after the after ratios above are filled in and a second look shows it would not flake. Until then it is not a CI failure. Meeting the gate is not meeting 0.80.
+`windows-2025` is at the 0.80 target (0.8061). The other three legs are below it. Import MB/s about doubled on each leg against the before table. On `ubuntu-24.04` the raw write also moved, from 187.968 MB/s to 417.350 MB/s, so the ratio moved from 0.6344 to 0.6626. On `macos-14` the raw write stayed near 700 MB/s and the ratio moved from 0.1305 to 0.2662. The 0.80 target is still the target. These ratios do not replace it.
+
+Regression gate, separate from the 0.80 target: fail a leg when a later run is under 80% of the ratio recorded above. That would be 0.530, 0.594, 0.213, and 0.645 for the four legs. It is not a CI failure. The raw write on `ubuntu-24.04` moved by more than that between the before job and this one, so a gate on one sample would fail a later job when the raw write is faster and the import is not. Meeting that gate would not mean the leg met 0.80.
 
 ## Local 380,000-item run
 
