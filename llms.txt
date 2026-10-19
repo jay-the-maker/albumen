@@ -12,7 +12,7 @@ Reliability, fidelity, respect, control, scale, and the measured performance and
 - [Scale](https://github.com/jay-the-maker/albumen/blob/main/docs/scale.md): No artificial ceilings. Soft defaults, streaming pages, and the safety bounds that stay.
 - [Test ladder](https://github.com/jay-the-maker/albumen/blob/main/docs/test-ladder.md): Four rungs before a real machine. Sources stay read-only.
 - [Threat model](https://github.com/jay-the-maker/albumen/blob/main/docs/threat-model.md): What each binary can read, write, and reach on the network.
-- [Release verify](https://github.com/jay-the-maker/albumen/blob/main/docs/release-verify.md): Checksums, keyless signatures, and the notarization gap.
+- [Release verify](https://github.com/jay-the-maker/albumen/blob/main/docs/release-verify.md): Checksums, keyless signatures, and Gatekeeper.
 - [Agent guide](https://github.com/jay-the-maker/albumen/blob/main/AGENTS.md): Build and test commands, the round-trip gate, never-delete rules, and where to start.
 - [Contributing](https://github.com/jay-the-maker/albumen/blob/main/CONTRIBUTING.md): Philosophy acknowledgment, Developer Certificate of Origin, and how agents contribute.
 - [README](https://github.com/jay-the-maker/albumen/blob/main/README.md): What the repository does today.

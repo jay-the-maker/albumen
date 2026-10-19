@@ -35,8 +35,8 @@ Leaving is one command. `albumen export` prints the plan and writes nothing unle
 Albumen is not a hosting service. You bring the storage, and the bytes stay where you put them.
 
 - Local disk, NAS, SMB, SFTP, WebDAV, S3, and Backblaze B2, reached directly or through rclone.
-- Google Drive and Dropbox through the synced folder you already have. That folder is a filesystem. Albumen does not call a vendor API that rewrites the file on the way through.
-- iCloud is import-only. Apple does not offer a stable API that can write originals back without rewriting them.
+- Google Drive and Dropbox through the synced folder you already have. Albumen reads and copies that folder as a filesystem, so the stored file is the file in the folder.
+- An iCloud Photos download, export, or Photos library copy imports into the library you choose. Those originals stay bit-exact.
 
 SFTP, WebDAV, and B2 go through `RcloneStore`. rclone is the transport and is not vendored. The exact mtime is kept in a sibling verify object because those backends do not store nanoseconds. S3 keeps mtime in `albumen-mtime-ns`. `Last-Modified` is the upload time and is not the photo's timestamp.
 
@@ -84,6 +84,6 @@ A larger library is not a reason to drop a byte, a tag, or a checksum. The bound
 
 ## North star
 
-Be good enough that iCloud Photos and Google Photos have to fix the pain their users already live with: libraries that rewrite files, metadata that disappears, exports that are incomplete, and products that keep the only copy.
+Keep every original bit-exact, keep every tag, export the whole library in one command, and leave that copy in the user's hands.
 
 The metrics are reliability, fidelity, respect, control, scale, and the measured performance and friction budgets. Cost is outside those metrics. A cheaper copy that is missing GPS, a caption, or a byte is a failure. A faster copy that drops them is a failure too. A larger library that drops them is a failure too.
