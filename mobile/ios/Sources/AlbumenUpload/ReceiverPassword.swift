@@ -16,11 +16,11 @@ public enum ReceiverPassword {
     public static let service = "photos.albumen.receiver"
     public static let account = "password"
 
-    public static func save(_ password: String) throws {
+    public static func save(_ password: String, accessGroup: String? = nil) throws {
         guard !password.isEmpty else {
             throw UploadFailure.missingPassword
         }
-        let query = lookupQuery()
+        let query = lookupQuery(accessGroup: accessGroup)
         SecItemDelete(query as CFDictionary)
         var insert = query
         insert[kSecValueData as String] = Data(password.utf8)
@@ -31,8 +31,8 @@ public enum ReceiverPassword {
         }
     }
 
-    public static func read() throws -> String? {
-        var query = lookupQuery()
+    public static func read(accessGroup: String? = nil) throws -> String? {
+        var query = lookupQuery(accessGroup: accessGroup)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
@@ -50,11 +50,16 @@ public enum ReceiverPassword {
     }
 
     /// Attributes used to find the item. The password bytes are not in this dictionary.
-    public static func lookupQuery() -> [String: Any] {
-        [
+    /// `accessGroup` is the shared keychain group when the host and the extension both have it.
+    public static func lookupQuery(accessGroup: String? = nil) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        if let accessGroup, !accessGroup.isEmpty {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return query
     }
 }

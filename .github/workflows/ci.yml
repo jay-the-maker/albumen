@@ -121,6 +121,16 @@ jobs:
       - name: Build and test the PhotoKit package
         run: swift test --package-path mobile/ios
 
+  ios-xcode:
+    name: ios background upload
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the host and the background upload extension
+        run: scripts/ios-xcode.sh
+
   mcp-image:
     name: albumen-mcp image
     runs-on: ubuntu-24.04
