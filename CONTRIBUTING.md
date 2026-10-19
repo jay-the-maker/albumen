@@ -68,6 +68,12 @@ Agent-authored pull requests are welcome. An agent is a contributor. Start at [A
 
 An agent does not get a special path around the philosophy. It does not add a delete tool, weaken the round-trip comparison, copy AGPL photo-library source, commit a real photograph, or submit [docs/mcp-registry.md](docs/mcp-registry.md) to a registry. Short pointers for Claude, Cursor, and Copilot all lead back to `AGENTS.md`. `llms.txt` at the repository root is the llmstxt.org index.
 
+## Sources, consent, and tone
+
+Sources are read-only. Albumen never writes to, moves, or deletes a source, and a change that needs write access to one does not land. Never commit real photos; a local corpus goes through `ALBUMEN_REAL_CORPUS` only (see below). Nothing runs on a contributor's or user's own Mac, RAID, or personal storage without their explicit consent; tests and trials run on CI runners. Keep docs, issues, and reviews positive: say what Albumen does, and do not criticize other projects.
+
+New here? Look for issues labeled `good first issue` or `help wanted`, and ask questions in GitHub Discussions.
+
 ## Small pull requests
 
 Keep a pull request to one concern. A reviewer should be able to hold the diff in their head. Do not mix a behavior change with an unrelated refactor. Do not add drive-by files.

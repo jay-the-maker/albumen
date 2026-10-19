@@ -78,6 +78,13 @@ A 380,000-item run is local only: `ALBUMEN_BENCH_ITEMS=380000 cargo run --releas
 - The first `source_mtime` is write-once at commit. A later conflicting time is appended. It does not replace the first.
 - Camera-roll backup leaves the item on the device. A copy that would strip GPS does not start.
 
+## Sources, consent, and tone
+
+- Sources are read-only, forever. Albumen never needs write access to a source: not in code, defaults, docs, or tests. A source may be someone's only copy. Writes go to the library or an export destination only.
+- Never commit real photos. A local real-device corpus is used only through the `ALBUMEN_REAL_CORPUS` environment variable and stays on that machine. The CC0 files under `fixtures/` are the only media in the tree.
+- Nothing runs on a user's Mac, RAID, or other personal storage without that person's explicit consent. Tests and trials, including [docs/trial-macos.md](docs/trial-macos.md), run on CI runners. A trial on a person's own machine happens only after they approve it.
+- Keep the tone positive. Describe what Albumen does and how it does it. Do not criticize other products or projects in the repository, issues, or pull requests.
+
 ## How to contribute
 
 You are a contributor. Read [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs `Signed-off-by`. Keep a pull request to one concern. The pull request body checks the philosophy box, checks `Sane defaults`, `No account required`, and `No nags`, and explains how the change upholds [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). The `philosophy-ack` workflow fails unless those boxes are checked, the explanation is at least 20 characters and is not the template placeholder, and every commit in the pull request has `Signed-off-by`.
