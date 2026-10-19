@@ -22,7 +22,7 @@
 //! ratio is import MB/s divided by that raw MB/s. 1 MB is 1,000,000 bytes.
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -99,6 +99,12 @@ pub struct ThroughputReport {
     /// [`Self::ceiling_mb_s`] divided by [`Self::raw_mb_s`]. The import
     /// ratio cannot reach this with the same syncs.
     pub ceiling_ratio: f64,
+    /// Like [`Self::ceiling_mb_s`], but each file's bytes are first read
+    /// from its generated source file. Still no hash and no read-back.
+    pub copy_ceiling_mb_s: f64,
+    pub copy_ceiling_samples: Vec<f64>,
+    /// [`Self::copy_ceiling_mb_s`] divided by [`Self::raw_mb_s`].
+    pub copy_ceiling_ratio: f64,
     pub count_in: u64,
     pub count_out: u64,
     pub mismatched: u64,
@@ -152,6 +158,9 @@ impl ThroughputReport {
             "ceiling_mb_s": self.ceiling_mb_s,
             "ceiling_samples": self.ceiling_samples,
             "ceiling_ratio": self.ceiling_ratio,
+            "copy_ceiling_mb_s": self.copy_ceiling_mb_s,
+            "copy_ceiling_samples": self.copy_ceiling_samples,
+            "copy_ceiling_ratio": self.copy_ceiling_ratio,
             "count_in": self.count_in,
             "count_out": self.count_out,
             "mismatched": self.mismatched,
@@ -246,6 +255,18 @@ pub fn measure_throughput(
         )?);
     }
     let ceiling_mb_s = median(&mut ceiling_samples.clone());
+    let sources: Vec<PathBuf> = snaps.iter().map(|snap| snap.path.clone()).collect();
+    let mut copy_ceiling_samples = Vec::with_capacity(RAW_SAMPLES_PER_SIDE);
+    for _ in 0..RAW_SAMPLES_PER_SIDE {
+        copy_ceiling_samples.push(ceiling_sample_from(
+            &root.path.join("copy-ceiling"),
+            files,
+            bytes_each,
+            workers,
+            Some(&sources),
+        )?);
+    }
+    let copy_ceiling_mb_s = median(&mut copy_ceiling_samples.clone());
     let expected_bytes = files.saturating_mul(bytes_each);
     let import_mb_s = (imported_bytes as f64) / 1_000_000.0 / import_seconds;
     let raw_mb_s = median(&mut raw_samples.clone());
@@ -272,6 +293,9 @@ pub fn measure_throughput(
         ceiling_mb_s,
         ceiling_samples,
         ceiling_ratio: ceiling_mb_s / raw_mb_s,
+        copy_ceiling_mb_s,
+        copy_ceiling_samples,
+        copy_ceiling_ratio: copy_ceiling_mb_s / raw_mb_s,
         count_in: files,
         count_out,
         mismatched,
@@ -611,6 +635,18 @@ fn raw_write(dir: &Path, files: u64, bytes_each: u64, kind: RawSync) -> Result<(
 /// import's durability calls, `File::sync_all` then `dest::sync_dir`, and
 /// nothing else.
 fn ceiling_sample(dir: &Path, files: u64, bytes_each: u64, workers: usize) -> Result<f64, String> {
+    ceiling_sample_from(dir, files, bytes_each, workers, None)
+}
+
+/// [`ceiling_sample`], optionally reading each file's bytes from
+/// `sources` first. The sources are only opened for reading.
+fn ceiling_sample_from(
+    dir: &Path,
+    files: u64,
+    bytes_each: u64,
+    workers: usize,
+    sources: Option<&[PathBuf]>,
+) -> Result<f64, String> {
     if dir.exists() {
         fs::remove_dir_all(dir).map_err(|err| format!("remove ceiling sample: {err}"))?;
     }
@@ -631,6 +667,25 @@ fn ceiling_sample(dir: &Path, files: u64, bytes_each: u64, workers: usize) -> Re
                     let path = dir.join(format!("ceiling-{index:04}.bin"));
                     let result = (|| -> Result<(), String> {
                         let mut file = open_new(&path).map_err(|err| err.to_string())?;
+                        if let Some(sources) = sources {
+                            let source = &sources[usize::try_from(index).unwrap_or(0)];
+                            let mut input = File::open(source)
+                                .map_err(|err| format!("read {}: {err}", source.display()))?;
+                            loop {
+                                let n = input
+                                    .read(&mut buf)
+                                    .map_err(|err| format!("read {}: {err}", source.display()))?;
+                                if n == 0 {
+                                    break;
+                                }
+                                file.write_all(&buf[..n]).map_err(|err| {
+                                    format!("ceiling write {}: {err}", path.display())
+                                })?;
+                            }
+                            sync_raw_file(&file, &path, RawSync::Import)?;
+                            drop(file);
+                            return sync_raw_dir(dir, RawSync::Import);
+                        }
                         let mut left = bytes_each;
                         while left > 0 {
                             let n =
@@ -814,6 +869,9 @@ mod tests {
             ceiling_mb_s: 600.0,
             ceiling_samples: vec![600.0],
             ceiling_ratio: 0.96,
+            copy_ceiling_mb_s: 500.0,
+            copy_ceiling_samples: vec![500.0],
+            copy_ceiling_ratio: 0.8,
             count_in: 1_000,
             count_out: 1_000,
             mismatched: 0,
