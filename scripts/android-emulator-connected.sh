@@ -45,4 +45,14 @@ fi
 gradle=$("$root/scripts/install-gradle.sh" | tail -n 1)
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" >"$root/mobile/android/local.properties"
 cd "$root/mobile/android"
-"$gradle" :backup:connectedDebugAndroidTest :host:connectedDebugAndroidTest --no-daemon --stacktrace
+selected="photos.albumen.backup.SelectedPhotosInstrumentedTest"
+api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')
+if [[ "$api" -ge 34 ]]; then
+  # Android 14 Select photos needs a fresh install that has never had full
+  # media access, so that class runs alone first. Gradle uninstalls the test
+  # APK when the run ends, and the run below grants full access again.
+  "$gradle" :backup:connectedDebugAndroidTest --no-daemon --stacktrace \
+    "-Pandroid.testInstrumentationRunnerArguments.class=$selected"
+fi
+"$gradle" :backup:connectedDebugAndroidTest :host:connectedDebugAndroidTest --no-daemon --stacktrace \
+  "-Pandroid.testInstrumentationRunnerArguments.notClass=$selected"
