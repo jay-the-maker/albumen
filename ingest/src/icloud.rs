@@ -2023,6 +2023,17 @@ mod tests {
     use zip::CompressionMethod;
     use zip::ZipWriter;
 
+    fn symlink_file(source: &Path, dest: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(source, dest)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(source, dest)
+        }
+    }
+
     fn stamp() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_546_300_800)
     }
@@ -2258,7 +2269,7 @@ mod tests {
         fs::create_dir(&from).unwrap();
         let outside = tmp.path().join("outside.HEIC");
         fs::write(&outside, b"outside").unwrap();
-        std::os::unix::fs::symlink(&outside, from.join("link.HEIC")).unwrap();
+        symlink_file(&outside, &from.join("link.HEIC")).unwrap();
         write_stamped(&from.join("IMG_0001.HEIC"), b"kept");
         let to = tmp.path().join("library");
         let err = import_icloud(&from, &to, &tmp.path().join("report.jsonl")).unwrap_err();

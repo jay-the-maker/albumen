@@ -57,19 +57,41 @@ fi
 # file cannot be unpacked.
 check_sha256 "$SHA256" "$TARBALL"
 
-if [[ ! -x "${ROOT}/exiftool" ]] || [[ "$("${ROOT}/exiftool" -ver 2>/dev/null || true)" != "$VERSION" ]]; then
-  rm -rf "$ROOT"
-  tar -xzf "$TARBALL" -C "$CACHE"
-fi
+windows_perl=0
+case "${OS_NAME:-$(uname -s)}" in
+  MINGW*|MSYS*|CYGWIN*) windows_perl=1 ;;
+esac
 
-actual="$("${ROOT}/exiftool" -ver)"
+if [[ "$windows_perl" -eq 1 ]]; then
+  if [[ ! -f "${ROOT}/exiftool" ]] || [[ "$(perl "${ROOT}/exiftool" -ver 2>/dev/null || true)" != "$VERSION" ]]; then
+    rm -rf "$ROOT"
+    tar -xzf "$TARBALL" -C "$CACHE"
+  fi
+  # Rust resolves a bare name only as name.exe. exiftool.cmd is the
+  # file that lookup can see, and it runs the pinned script with perl.
+  cat > "${ROOT}/exiftool.cmd" <<'EOF'
+@echo off
+perl "%~dp0exiftool" %*
+EOF
+  actual="$(perl "${ROOT}/exiftool" -ver)"
+else
+  if [[ ! -x "${ROOT}/exiftool" ]] || [[ "$("${ROOT}/exiftool" -ver 2>/dev/null || true)" != "$VERSION" ]]; then
+    rm -rf "$ROOT"
+    tar -xzf "$TARBALL" -C "$CACHE"
+  fi
+  actual="$("${ROOT}/exiftool" -ver)"
+fi
 if [[ "$actual" != "$VERSION" ]]; then
   echo "exiftool reported ${actual}, expected ${VERSION}" >&2
   exit 1
 fi
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
-  echo "$ROOT" >>"$GITHUB_PATH"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$ROOT" >>"$GITHUB_PATH"
+  else
+    echo "$ROOT" >>"$GITHUB_PATH"
+  fi
 fi
 
 printf '%s\n' "$ROOT"

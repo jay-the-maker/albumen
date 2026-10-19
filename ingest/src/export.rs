@@ -312,15 +312,27 @@ pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), Inge
             .map_err(|err| IngestError::io(&tmp, err))?;
         file.sync_all().map_err(|err| IngestError::io(&tmp, err))?;
         crate::dest::rename(&tmp, path)?;
-        File::open(parent)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|err| IngestError::io(parent, err))?;
+        sync_parent(parent)?;
         Ok(())
     })();
     if write_result.is_err() {
         crate::dest::remove_file_best_effort(&tmp);
     }
     write_result
+}
+
+/// Persist the directory entry for the renamed manifest.
+///
+/// The manifest file is already fsynced. On Windows, opening some directories
+/// (including the process temp root) returns access denied. That is not a
+/// missing file. The rename has already landed.
+fn sync_parent(parent: &Path) -> Result<(), IngestError> {
+    match File::open(parent).and_then(|dir| dir.sync_all()) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(err) => Err(IngestError::io(parent, err)),
+    }
 }
 
 fn hash_through_source(path: &Path) -> Result<(String, u64), IngestError> {
@@ -601,6 +613,27 @@ mod tests {
 
     fn mtime() -> std::time::SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_600_000_000)
+    }
+
+    #[test]
+    fn manifest_in_the_process_temp_directory_is_written() {
+        let path = std::env::temp_dir().join(format!(
+            "albumen-manifest-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let entries = [ManifestEntry {
+            relative_path: "aae/IMG_0008.jpg".to_string(),
+            sha256: "ab".repeat(32),
+            byte_len: 4,
+        }];
+        write_manifest(&path, &entries).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("aae/IMG_0008.jpg"), "{text}");
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]

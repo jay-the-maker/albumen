@@ -27,24 +27,9 @@ fn source_unchanged(root: &Path) {
     for line in sums.lines().filter(|line| !line.is_empty()) {
         let (hash, name) = line.split_once("  ").unwrap();
         let path = root.join(name);
-        let output = Command::new("sha256sum")
-            .arg(&path)
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .unwrap_or_else(|| {
-                Command::new("shasum")
-                    .args(["-a", "256"])
-                    .arg(&path)
-                    .output()
-                    .expect("sha256sum or shasum")
-            });
-        assert!(output.status.success(), "{name}");
-        let actual = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            actual.starts_with(hash),
-            "{name} changed in the source library"
-        );
+        let actual =
+            albumen_ingest::sha256_hex(&path).unwrap_or_else(|err| panic!("{name}: {err}"));
+        assert_eq!(actual, hash, "{name} changed in the source library");
         count += 1;
     }
     assert!(count >= 8);

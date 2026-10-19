@@ -24,6 +24,7 @@ jobs:
         # 24.04 is the pinned image. 26.04 stays in the matrix only while
         # that leg is green. macos-14 is the arm64 leg and runs the same
         # suite, including MinIO and rclone round-trips, from pinned binaries.
+        # windows-2025 is the pinned Windows image. It is not windows-latest.
         include:
           - os: ubuntu-24.04
             label: ubuntu-24.04
@@ -34,7 +35,19 @@ jobs:
           - os: macos-14
             label: macos-14 (arm64)
             timeout: 60
+          - os: windows-2025
+            label: windows-2025
+            timeout: 90
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Keep LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@1.99.1

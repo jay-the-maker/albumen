@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -29,6 +28,7 @@ use crate::checksum::{sha256_reader, to_hex};
 use crate::dest;
 use crate::discover::companion_names;
 use crate::error::IngestError;
+use crate::exiftool::exiftool_command;
 use crate::mtime::to_unix_nanos_string;
 use crate::source::SourceRoot;
 
@@ -656,7 +656,7 @@ fn count_newlines(file: &mut File, manifest: &Path, len: u64) -> Result<u64, Ing
 }
 
 fn require_exiftool() -> Result<(), IngestError> {
-    match Command::new("exiftool").arg("-ver").output() {
+    match exiftool_command().arg("-ver").output() {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => Err(IngestError::store(
             "exiftool",
@@ -678,7 +678,7 @@ fn read_metadata(
     root: &SourceRoot,
     relative_paths: &[String],
 ) -> Result<Vec<KeyMetadata>, IngestError> {
-    let output = Command::new("exiftool")
+    let output = exiftool_command()
         .current_dir(root.canonical())
         .arg("-json")
         .arg("-n")
@@ -1052,45 +1052,110 @@ fn cmp_walk(
 mod tests {
     use super::*;
     use crate::test_support::{write_file, Tmp};
-    use std::fs;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     struct ModeGuard {
+        #[cfg(unix)]
         saved: Vec<(PathBuf, u32)>,
+        #[cfg(not(unix))]
+        saved: Vec<PathBuf>,
     }
 
     impl Drop for ModeGuard {
         fn drop(&mut self) {
-            for (path, mode) in self.saved.iter().rev() {
-                let Ok(meta) = fs::symlink_metadata(path) else {
-                    continue;
-                };
-                let mut perms = meta.permissions();
-                perms.set_mode(*mode);
-                let _ = fs::set_permissions(path, perms);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                for (path, mode) in self.saved.iter().rev() {
+                    let Ok(meta) = fs::symlink_metadata(path) else {
+                        continue;
+                    };
+                    let mut perms = meta.permissions();
+                    perms.set_mode(*mode);
+                    let _ = fs::set_permissions(path, perms);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                for path in self.saved.iter().rev() {
+                    let Ok(meta) = fs::symlink_metadata(path) else {
+                        continue;
+                    };
+                    if meta.is_file() {
+                        let mut perms = meta.permissions();
+                        // This block is not compiled on Unix. Clearing the
+                        // Windows read-only attribute restores the fixture.
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        {
+                            perms.set_readonly(false);
+                        }
+                        let _ = fs::set_permissions(path, perms);
+                    }
+                }
             }
         }
     }
 
     fn lock_tree(root: &Path) -> ModeGuard {
-        let mut saved = Vec::new();
         let mut stack = vec![root.to_path_buf()];
+        let mut paths = Vec::new();
         while let Some(path) = stack.pop() {
             let meta = fs::symlink_metadata(&path).unwrap();
-            saved.push((path.clone(), meta.mode()));
+            paths.push(path.clone());
             if meta.is_dir() {
                 for entry in fs::read_dir(&path).unwrap() {
                     stack.push(entry.unwrap().path());
                 }
             }
         }
-        for (path, mode) in &saved {
-            let mut perms = fs::symlink_metadata(path).unwrap().permissions();
-            perms.set_mode(mode & !0o222);
-            fs::set_permissions(path, perms).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let saved = paths
+                .iter()
+                .map(|path| {
+                    let mode = fs::symlink_metadata(path).unwrap().mode();
+                    (path.clone(), mode)
+                })
+                .collect::<Vec<_>>();
+            for (path, mode) in &saved {
+                let mut perms = fs::symlink_metadata(path).unwrap().permissions();
+                perms.set_mode(mode & !0o222);
+                fs::set_permissions(path, perms).unwrap();
+            }
+            ModeGuard { saved }
         }
-        ModeGuard { saved }
+        #[cfg(not(unix))]
+        {
+            for path in &paths {
+                let meta = fs::symlink_metadata(path).unwrap();
+                if meta.is_file() {
+                    let mut perms = meta.permissions();
+                    perms.set_readonly(true);
+                    fs::set_permissions(path, perms).unwrap();
+                }
+            }
+            ModeGuard { saved: paths }
+        }
+    }
+
+    fn allow_write(path: &Path) {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o644);
+        }
+        #[cfg(not(unix))]
+        {
+            // This block is not compiled on Unix. Clearing the Windows
+            // read-only attribute lets the test change the fixture bytes.
+            #[allow(clippy::permissions_set_readonly_false)]
+            {
+                perms.set_readonly(false);
+            }
+        }
+        fs::set_permissions(path, perms).unwrap();
     }
 
     /// What scan must leave untouched. A read may update access time, and
@@ -1102,7 +1167,10 @@ mod tests {
         len: u64,
         sha: String,
         mtime: SystemTime,
+        #[cfg(unix)]
         mode: u32,
+        #[cfg(not(unix))]
+        readonly: bool,
     }
 
     fn list_rels(root: &Path) -> Vec<String> {
@@ -1156,7 +1224,13 @@ mod tests {
                     len: meta.len(),
                     sha,
                     mtime: meta.modified().unwrap(),
-                    mode: meta.mode(),
+                    #[cfg(unix)]
+                    mode: {
+                        use std::os::unix::fs::MetadataExt;
+                        meta.mode()
+                    },
+                    #[cfg(not(unix))]
+                    readonly: meta.permissions().readonly(),
                 }
             })
             .collect()
@@ -1178,7 +1252,7 @@ mod tests {
     }
 
     fn fixture(dir: &Path) {
-        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789);
+        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_700);
         fs::create_dir_all(dir.join("trip")).unwrap();
         write_file(dir, "a.txt", b"alpha", mtime);
         write_file(&dir.join("trip"), "IMG.jpg", b"jpeg-bytes", mtime);
@@ -1248,12 +1322,12 @@ mod tests {
         let tmp = Tmp::new();
         let source = tmp.path().join("library");
         fs::create_dir_all(&source).unwrap();
-        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789);
+        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_700);
         let path = write_file(&source, "a.txt", b"alpha", mtime)
             .canonicalize()
             .unwrap();
         let manifest = tmp.path().join("scan.jsonl");
-        let new_mtime = UNIX_EPOCH + Duration::new(1_700_000_000, 50);
+        let new_mtime = UNIX_EPOCH + Duration::new(1_700_000_000, 100);
         let _hook = HookGuard::install({
             let path = path.clone();
             move |opened: &Path| {
@@ -1343,9 +1417,7 @@ mod tests {
             let _guard = lock_tree(&source);
             scan_tree(&source, &manifest).unwrap();
         }
-        let mut perms = fs::metadata(source.join("a.txt")).unwrap().permissions();
-        perms.set_mode(0o644);
-        fs::set_permissions(source.join("a.txt"), perms).unwrap();
+        allow_write(&source.join("a.txt"));
         fs::write(source.join("a.txt"), b"alphb").unwrap();
         let mut seen = Vec::new();
         let err = verify_scan_manifest(&manifest, &source, &mut |drift| seen.push(drift.clone()))

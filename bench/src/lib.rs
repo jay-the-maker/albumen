@@ -23,11 +23,11 @@ use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use albumen_ingest::{
-    copy_verify, sha256_hex, Asset, AssetFile, DirectoryTree, ExportDest, LocalStore, Role,
+    copy_verify, exiftool_command, sha256_hex, Asset, AssetFile, DirectoryTree, ExportDest,
+    LocalStore, Role,
 };
 use albumen_mcp::Library;
 use serde_json::{json, Value};
@@ -468,7 +468,7 @@ fn browse_reference_ms(root: &Path) -> Result<f64, String> {
 fn exif_pass_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
     let started = Instant::now();
     for chunk in relative.chunks(albumen_mcp::metadata::exiftool_batch()) {
-        let output = Command::new("exiftool")
+        let output = exiftool_command()
             .current_dir(root)
             .arg("-json")
             .arg("-n")
@@ -573,7 +573,7 @@ fn xmp(caption: &str) -> String {
 }
 
 fn require_exiftool() -> Result<(), String> {
-    let output = Command::new("exiftool").arg("-ver").output().map_err(|err| {
+    let output = exiftool_command().arg("-ver").output().map_err(|err| {
         format!(
             "exiftool is required for the search benchmark ({err}). Run scripts/install-exiftool.sh and put it on PATH."
         )
