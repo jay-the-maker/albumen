@@ -13,6 +13,9 @@ import photos.albumen.backup.BackupSchedule
 import photos.albumen.backup.BackupStatusStore
 import photos.albumen.backup.CameraRoll
 import photos.albumen.backup.CameraRollBackupWorker
+import photos.albumen.backup.Pairing
+import photos.albumen.backup.PairingCode
+import photos.albumen.backup.PairingException
 
 /**
  * Requests [CameraRoll.requiredPermissions] and enqueues backup only when the
@@ -28,6 +31,13 @@ class HostActivity : ComponentActivity() {
     private var user: String = ""
     private var password: String = ""
     private var memberId: String = ""
+
+    /**
+     * Where a scanned pairing code is uploaded. Production uses the endpoint
+     * in the QR. A test may point that at a loopback on the same host and port.
+     */
+    internal var pairedUploadEndpoint: (PairingCode) -> String = { it.endpoint }
+
     private var decisionMessage: String =
         "Requesting access to images, video, and location so originals, including GPS, can be copied."
 
@@ -60,6 +70,44 @@ class HostActivity : ComponentActivity() {
                 render()
             }
         }
+
+    /**
+     * Entry a camera QR scanner calls with the decoded `albumen-pair://` text
+     * and the certificate fingerprint the handshake presented. The one-time
+     * token is the receiver password. The receiver user is the name printed
+     * beside the QR. There is no account field.
+     */
+    fun onScannedPairing(uri: String, presentedFingerprint: String): Boolean {
+        val code = try {
+            Pairing.parse(uri)
+        } catch (error: PairingException) {
+            decisionMessage = error.message ?: "The pairing code is not an albumen-pair v1 URI. The copy did not start."
+            render()
+            return false
+        }
+        val mismatch = Pairing.pin(code.fingerprint, presentedFingerprint)
+        if (mismatch != null) {
+            decisionMessage = mismatch
+            render()
+            return false
+        }
+        val blocked = CameraRoll.permissionBlock(this)
+        if (blocked != null) {
+            decisionMessage = blocked
+            render()
+            return false
+        }
+        CameraRollBackupWorker.enqueue(
+            this,
+            pairedUploadEndpoint(code),
+            RECEIVER_USER,
+            code.token,
+            memberId = code.member.orEmpty(),
+        )
+        decisionMessage = "Pairing code accepted. Backup can run.\n\n" + BackupSchedule.FIRST_RUN_MESSAGE
+        render()
+        return true
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -102,5 +150,8 @@ class HostActivity : ComponentActivity() {
         const val EXTRA_MEMBER = "photos.albumen.host.MEMBER"
         const val NOTIFICATION_DENIED =
             "Notification permission was denied. Backup failures stay on this screen."
+
+        /** The receiver user printed beside the pairing QR. It is not an account. */
+        const val RECEIVER_USER = "camera"
     }
 }

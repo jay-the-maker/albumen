@@ -29,13 +29,14 @@ Windows commands for the same four steps are the `windows` fields in `scripts/qu
 
 ## Phone backup
 
-The Android host sends to a receiver, so the quickstart above comes first. The phone then takes five steps. There is no account screen. The debug APK is installed by you. It is not a store install. The detail is [mobile-android-backup.md](mobile-android-backup.md).
+The Android host sends to a receiver, so the quickstart above comes first. The Android host and the iOS simulator then count the same user-facing steps. The list is [mobile/android/host/src/androidTest/assets/phone-friction-steps.txt](../mobile/android/host/src/androidTest/assets/phone-friction-steps.txt), and the iOS copy is the same file. CI fails the job when that list is longer than five. There is no account screen. The debug build is installed by you. It is not a store install. The detail is [mobile-android-backup.md](mobile-android-backup.md).
 
-1. Build the host with `scripts/android-ci.sh`.
-2. Install the host debug APK on the device.
-3. Launch `HostActivity` with intent extras `photos.albumen.host.ENDPOINT`, `photos.albumen.host.USER`, and `photos.albumen.host.PASSWORD`.
-4. Grant images, video, and location. That is one system dialog. Denying images or video does not enqueue. Denying location does not start the backup, because MediaStore would strip GPS. A partial grant is not enough.
-5. Leave the phone on a network.
+1. Install the app.
+2. Open it.
+3. Grant images, video, and location. That is one system dialog. Denying images or video does not enqueue. Denying location does not start the backup, because MediaStore would strip GPS. A partial grant is not enough.
+4. Scan the `albumen-pair://v1` QR from `albumen-receive --pair`. The scanner hands the app the decoded URI. The one-time token in that URI is the receiver password. The receiver user is the name printed beside the QR.
+
+The first verified copy follows that scan. It is not another tap. The phone stays on a network. The upload does not delete the camera-roll item.
 
 The first job is queued with no initial delay and a network constraint, so a verified copy can finish within 5 minutes of setup. Later backups run while the phone is idle, charging, and on a network. The upload does not delete the camera-roll item. iOS background upload is still the scoped extension in [camera-roll-scope.md](camera-roll-scope.md).
 

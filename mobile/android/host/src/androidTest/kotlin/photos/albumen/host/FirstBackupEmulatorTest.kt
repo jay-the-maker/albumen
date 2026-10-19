@@ -39,6 +39,7 @@ import photos.albumen.backup.CameraRoll
 import photos.albumen.backup.LoopbackWebDav
 import photos.albumen.backup.Sha256
 import photos.albumen.backup.SyntheticGpsJpeg
+import java.util.Base64
 import java.net.ServerSocket
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -154,6 +155,110 @@ class FirstBackupEmulatorTest {
             assertTrue(surfaced.screen.contains("The camera roll was not changed."))
             assertTrue(surfaced.notification.contains("The camera roll was not changed."))
             assertCameraRollUnchanged(context, name, jpeg, SyntheticGpsJpeg.exifApp1(jpeg))
+        }
+    }
+
+    @Test(timeout = 120_000)
+    fun pairingQrReachesAVerifiedCopyWithinFiveSteps() {
+        val context = targetContext()
+        val steps = phoneFrictionSteps(readFrictionSteps())
+        assertTrue("phone friction is ${steps.size} steps", steps.size <= 5)
+        assertFalse(steps.any { it.contains("account") || it.contains("login") || it.contains("signup") })
+        val name = "albumen-synthetic-pair.jpg"
+        val jpeg = insertSynthetic(context, name)
+        val sourceExif = SyntheticGpsJpeg.exifApp1(jpeg)
+        val fingerprint = "ab".repeat(32)
+        val token = "cd".repeat(32)
+        LoopbackWebDav { _, body ->
+            LoopbackWebDav.Reply(201, Sha256.hex(body), "Created")
+        }.use { server ->
+            val https = server.endpoint().replaceFirst("http://", "https://")
+            val uri = "albumen-pair://v1?endpoint=${percentEncode(https)}&fingerprint=$fingerprint&token=$token"
+            val performed = mutableListOf<String>()
+            fun step(id: String) {
+                val expected = steps.getOrNull(performed.size)
+                assertEquals("step ${performed.size + 1}", expected, id)
+                performed += id
+            }
+            val startedAt = SystemClock.elapsedRealtime()
+            assertNotNull(context.packageManager.getPackageInfo(context.packageName, 0))
+            step("install")
+            launchWithoutReceiver().use { scenario ->
+                step("open")
+                val granted = awaitScreen(scenario) { text ->
+                    text.isNotBlank() && !text.startsWith("Requesting access")
+                }
+                assertFalse(granted.contains("account", ignoreCase = true))
+                step("grant-media-and-location")
+                scenario.onActivity { activity ->
+                    activity.pairedUploadEndpoint = { server.endpoint() }
+                    assertTrue(activity.onScannedPairing(uri, fingerprint))
+                }
+                step("scan-pairing-qr")
+                assertEquals(steps, performed)
+                val info = awaitState(context, WorkInfo.State.SUCCEEDED)
+                val elapsed = SystemClock.elapsedRealtime() - startedAt
+                assertTrue(
+                    "first verified copy took ${elapsed}ms after install; the target is ${BackupSchedule.FIRST_BACKUP_TARGET_MINUTES} minutes",
+                    elapsed < TimeUnit.MINUTES.toMillis(BackupSchedule.FIRST_BACKUP_TARGET_MINUTES.toLong()),
+                )
+                assertEquals(WorkInfo.State.SUCCEEDED, info.state)
+                val received = checkNotNull(server.bodies.firstOrNull { it.contentEquals(jpeg) }) {
+                    "receiver did not store the synthetic original"
+                }
+                assertArrayEquals(jpeg, received)
+                assertArrayEquals(sourceExif, SyntheticGpsJpeg.exifApp1(received))
+                val basic = Base64.getEncoder().encodeToString("camera:$token".toByteArray(Charsets.UTF_8))
+                assertTrue(server.headerBlocks.any { it.contains(basic) })
+                val screen = screenText(scenario)
+                assertTrue(screen.contains("Verified "))
+                assertFalse(screen.contains("Verified 0 this run."))
+                assertTrue(screen.contains("Failures 0."))
+                assertFalse(screen.contains("account", ignoreCase = true))
+                assertCameraRollUnchanged(context, name, jpeg, sourceExif)
+            }
+        }
+    }
+
+    private fun launchWithoutReceiver(): ActivityScenario<HostActivity> =
+        ActivityScenario.launch(Intent(targetContext(), HostActivity::class.java))
+
+    private fun awaitScreen(
+        scenario: ActivityScenario<HostActivity>,
+        ready: (String) -> Boolean,
+    ): String {
+        val deadline = SystemClock.elapsedRealtime() + 20_000
+        var text = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            text = screenText(scenario)
+            if (ready(text)) {
+                return text
+            }
+            SystemClock.sleep(50)
+        }
+        throw AssertionError("screen stayed: $text")
+    }
+
+    private fun readFrictionSteps(): String =
+        InstrumentationRegistry.getInstrumentation().context.assets
+            .open("phone-friction-steps.txt")
+            .bufferedReader()
+            .use { it.readText() }
+
+    private fun phoneFrictionSteps(text: String): List<String> =
+        text.lineSequence().map { it.trim() }.filter { line -> line.isNotEmpty() && !line.startsWith("#") }.toList()
+
+    private fun percentEncode(text: String): String = buildString {
+        for (byte in text.toByteArray(Charsets.UTF_8)) {
+            val value = byte.toInt() and 0xFF
+            val ch = value.toChar()
+            if (ch.isLetterOrDigit() || ch == '-' || ch == '.' || ch == '_' || ch == '~') {
+                append(ch)
+            } else {
+                append('%')
+                append("0123456789ABCDEF"[value ushr 4])
+                append("0123456789ABCDEF"[value and 0x0F])
+            }
         }
     }
 
