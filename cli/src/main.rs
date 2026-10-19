@@ -166,7 +166,8 @@ fn run() -> Result<(), IngestError> {
                 return print_export_plan(&from, &to, &manifest_path);
             }
             let dest = open_target(&to)?;
-            let entries = export_tree(&from, dest.as_ref())?;
+            let source = SourceRoot::open(&from)?;
+            let entries = export_tree(&source, dest.as_ref())?;
             refuse_clobber(&manifest_path, &to, &entries)?;
             write_manifest(&manifest_path, &entries)?;
             println!("exported {} files to {to}", entries.len());
@@ -174,7 +175,8 @@ fn run() -> Result<(), IngestError> {
             Ok(())
         }
         Command::Scan { dir, manifest } => {
-            let stats = scan_tree(&dir, &manifest)?;
+            let source = SourceRoot::open(&dir)?;
+            let stats = scan_tree(&source, &manifest)?;
             println!(
                 "scanned {} files ({} bytes) into {}",
                 stats.files,
@@ -266,7 +268,8 @@ fn run() -> Result<(), IngestError> {
                             .to_string(),
                     });
                 }
-                verify_scan_manifest(&manifest, Path::new(&against), &mut |drift| {
+                let source = SourceRoot::open(Path::new(&against))?;
+                verify_scan_manifest(&manifest, &source, &mut |drift| {
                     println!("{} {} {}", drift.kind, drift.path, drift.detail);
                 })?;
                 println!("verified scan manifest against {against}");

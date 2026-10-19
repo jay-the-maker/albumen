@@ -151,21 +151,24 @@ impl ExportDest for DirectoryTree {
     }
 }
 
-/// Copy every file under `root`, keeping sidecars and pairs together.
+/// Copy every file under `source`, keeping sidecars and pairs together.
 ///
 /// The source tree is not modified. Relative paths are preserved.
-pub fn export_tree(root: &Path, dest: &dyn ExportDest) -> Result<Vec<ManifestEntry>, IngestError> {
+pub fn export_tree(
+    source: &crate::source::SourceRoot,
+    dest: &dyn ExportDest,
+) -> Result<Vec<ManifestEntry>, IngestError> {
+    let root = source.canonical();
     if !root.is_dir() {
         return Err(IngestError::NotAFile(root.to_path_buf()));
     }
-    let source = crate::source::SourceRoot::open(root)?;
     if let Some(dest_root) = dest.local_root() {
         source.refuse_destination(dest_root)?;
     }
     let mut files = Vec::new();
-    walk_sorted(root, None, &mut |relative| {
+    source.walk(None, &mut |relative| {
         files.push(relative.to_string());
-        WalkControl::Continue
+        true
     })?;
     let assets = plan_assets(root, &files)?;
     let mut entries = Vec::new();
@@ -449,64 +452,9 @@ pub fn walk_sorted(
         return Ok(());
     }
     let source = crate::source::SourceRoot::open(root)?;
-    match walk_dir(&source, root, "", after, visit)? {
-        WalkControl::Continue | WalkControl::Stop => Ok(()),
-    }
-}
-
-fn walk_dir(
-    source: &crate::source::SourceRoot,
-    dir: &Path,
-    prefix: &str,
-    after: Option<&str>,
-    visit: &mut dyn FnMut(&str) -> WalkControl,
-) -> Result<WalkControl, IngestError> {
-    let mut entries = Vec::new();
-    let read = source.read_dir(dir)?;
-    for entry in read {
-        let entry = entry.map_err(|err| IngestError::io(dir, err))?;
-        let path = entry.path();
-        let meta = source.metadata_nofollow(&path)?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return Err(IngestError::NonUtf8Filename { path });
-        };
-        check_filename(name)?;
-        if meta.is_dir() {
-            entries.push((name.to_string(), true));
-        } else if meta.is_file() {
-            entries.push((name.to_string(), false));
-        }
-    }
-    entries.sort_by(|left, right| cmp_walk(&left.0, left.1, &right.0, right.1));
-    for (name, is_dir) in entries {
-        let child = dir.join(&name);
-        let relative = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
-        if is_dir {
-            if let Some(after) = after {
-                if directory_is_at_or_before(&relative, after) {
-                    continue;
-                }
-            }
-            if walk_dir(source, &child, &relative, after, visit)? == WalkControl::Stop {
-                return Ok(WalkControl::Stop);
-            }
-        } else {
-            if let Some(after) = after {
-                if relative.as_str() <= after {
-                    continue;
-                }
-            }
-            if visit(&relative) == WalkControl::Stop {
-                return Ok(WalkControl::Stop);
-            }
-        }
-    }
-    Ok(WalkControl::Continue)
+    source.walk(after, &mut |relative| {
+        visit(relative) == WalkControl::Continue
+    })
 }
 
 /// How many characters of a filename are kept in a local scratch path.
@@ -520,34 +468,6 @@ pub(crate) fn scratch_name_chars() -> usize {
             _ => 80,
         },
         Err(_) => 80,
-    }
-}
-
-fn directory_is_at_or_before(relative: &str, after: &str) -> bool {
-    let mut prefix = String::with_capacity(relative.len() + 1);
-    prefix.push_str(relative);
-    prefix.push('/');
-    !after.starts_with(&prefix) && prefix.as_str() < after
-}
-
-fn cmp_walk(
-    left_name: &str,
-    left_dir: bool,
-    right_name: &str,
-    right_dir: bool,
-) -> std::cmp::Ordering {
-    let mut left = left_name.bytes().chain(left_dir.then_some(b'/'));
-    let mut right = right_name.bytes().chain(right_dir.then_some(b'/'));
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return std::cmp::Ordering::Equal,
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(left_byte), Some(right_byte)) => match left_byte.cmp(&right_byte) {
-                std::cmp::Ordering::Equal => {}
-                order => return order,
-            },
-        }
     }
 }
 
@@ -608,8 +528,13 @@ pub(crate) fn source_fingerprint(path: &Path) -> Result<(String, u64), IngestErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::SourceRoot;
     use crate::test_support::{write_file, Tmp};
     use std::time::Duration;
+
+    fn as_root(path: &Path) -> SourceRoot {
+        SourceRoot::open(path).unwrap()
+    }
 
     fn mtime() -> std::time::SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_600_000_000)
@@ -689,7 +614,7 @@ mod tests {
 
         let dest_root = tmp.path().join("export");
         let dest = DirectoryTree::new(&dest_root);
-        let entries = export_tree(&library, &dest).unwrap();
+        let entries = export_tree(&as_root(&library), &dest).unwrap();
         let paths: Vec<_> = entries
             .iter()
             .map(|entry| entry.relative_path.as_str())
@@ -717,7 +642,7 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        let again = export_tree(&library, &dest).unwrap();
+        let again = export_tree(&as_root(&library), &dest).unwrap();
         assert_eq!(again, entries);
         assert_eq!(
             fs::metadata(dest_root.join("raw-jpeg/IMG_0003.jpg"))
@@ -730,7 +655,7 @@ mod tests {
         let mut tampered = fs::read(dest_root.join("raw-jpeg/IMG_0003.jpg")).unwrap();
         tampered[0] ^= 0xff;
         fs::write(dest_root.join("raw-jpeg/IMG_0003.jpg"), &tampered).unwrap();
-        let err = export_tree(&library, &dest).unwrap_err();
+        let err = export_tree(&as_root(&library), &dest).unwrap_err();
         assert!(matches!(err, IngestError::AlreadyExists { .. }));
         assert_eq!(
             fs::read(dest_root.join("raw-jpeg/IMG_0003.jpg")).unwrap(),
@@ -750,13 +675,13 @@ mod tests {
         write_file(&library, "note.txt", b"note", mtime());
         let dest_root = tmp.path().join("export");
         let dest = DirectoryTree::new(&dest_root);
-        export_tree(&library, &dest).unwrap();
+        export_tree(&as_root(&library), &dest).unwrap();
         let kept = fs::metadata(dest_root.join("note.txt"))
             .unwrap()
             .modified()
             .unwrap();
         fs::remove_file(dest_root.join("video/IMG_0006.mp4")).unwrap();
-        export_tree(&library, &dest).unwrap();
+        export_tree(&as_root(&library), &dest).unwrap();
         assert_eq!(
             fs::read(dest_root.join("video/IMG_0006.mp4")).unwrap(),
             b"video"
@@ -803,7 +728,7 @@ mod tests {
         write_file(&library.join("pair"), "IMG_0003.aae", b"aae-bytes", mtime());
         let before = fs::read(&source).unwrap();
 
-        let entries = export_tree(&library, &store).unwrap();
+        let entries = export_tree(&as_root(&library), &store).unwrap();
         assert_eq!(
             entries
                 .iter()
@@ -812,14 +737,14 @@ mod tests {
             vec!["pair/IMG_0003.aae", "pair/IMG_0003.jpg"]
         );
         let etag = store.object_etag("pair/IMG_0003.jpg").unwrap();
-        let again = export_tree(&library, &store).unwrap();
+        let again = export_tree(&as_root(&library), &store).unwrap();
         assert_eq!(again, entries);
         assert_eq!(store.object_etag("pair/IMG_0003.jpg").unwrap(), etag);
         verify_tree(&entries, &store, &[]).unwrap();
         assert_eq!(fs::read(&source).unwrap(), before);
 
         fs::write(&source, b"replacement-bytes").unwrap();
-        let err = export_tree(&library, &store).unwrap_err();
+        let err = export_tree(&as_root(&library), &store).unwrap_err();
         assert!(matches!(err, IngestError::AlreadyExists { .. }));
         assert_eq!(store.object_etag("pair/IMG_0003.jpg").unwrap(), etag);
         let (hash, len) = store.read_hash("pair/IMG_0003.jpg").unwrap().unwrap();
