@@ -144,6 +144,7 @@ fn library_is_readable_and_exportable_with_no_network_or_account() {
             library.to_str().unwrap(),
             "--to",
             dest.to_str().unwrap(),
+            "--apply",
         ],
     );
     assert!(ok, "{text}");

@@ -51,6 +51,37 @@ fn source_unchanged(root: &Path) {
 }
 
 #[test]
+fn export_without_apply_writes_nothing() {
+    let fixtures = fixtures();
+    let dest = tempfile::tempdir().unwrap();
+    let dest_path = dest.path().join("out");
+    let (ok, text) = run(&[
+        OsStr::new("export"),
+        OsStr::new("--from"),
+        fixtures.as_os_str(),
+        OsStr::new("--to"),
+        dest_path.as_os_str(),
+    ]);
+    assert!(ok, "{text}");
+    assert!(text.contains("dry-run"), "{text}");
+    assert!(text.contains("network: none"), "{text}");
+    assert!(!dest_path.exists(), "{text}");
+    let (ok, text) = run(&[
+        OsStr::new("export"),
+        OsStr::new("--from"),
+        fixtures.as_os_str(),
+        OsStr::new("--to"),
+        OsStr::new("s3://bucket/prefix"),
+        OsStr::new("--manifest"),
+        dest.path().join("manifest.txt").as_os_str(),
+    ]);
+    assert!(ok, "{text}");
+    assert!(text.contains("dry-run"), "{text}");
+    assert!(text.contains("ALBUMEN_S3_ENDPOINT"), "{text}");
+    assert!(!dest.path().join("manifest.txt").exists());
+}
+
+#[test]
 fn export_and_verify_local_fixture_corpus() {
     let fixtures = fixtures();
     source_unchanged(&fixtures);
@@ -62,6 +93,7 @@ fn export_and_verify_local_fixture_corpus() {
         fixtures.as_os_str(),
         OsStr::new("--to"),
         dest_path.as_os_str(),
+        OsStr::new("--apply"),
     ]);
     assert!(ok, "{text}");
     let manifest = dest_path.join("ALBUMEN-MANIFEST.txt");
@@ -86,6 +118,7 @@ fn export_and_verify_local_fixture_corpus() {
         fixtures.as_os_str(),
         OsStr::new("--to"),
         dest_path.as_os_str(),
+        OsStr::new("--apply"),
     ]);
     assert!(ok, "{text}");
     assert_eq!(
@@ -107,6 +140,7 @@ fn export_and_verify_local_fixture_corpus() {
         fixtures.as_os_str(),
         OsStr::new("--to"),
         dest_path.as_os_str(),
+        OsStr::new("--apply"),
     ]);
     assert!(ok, "{text}");
     assert!(dest_path.join("video/IMG_0006.mp4").is_file());
@@ -128,6 +162,7 @@ fn export_and_verify_local_fixture_corpus() {
         fixtures.as_os_str(),
         OsStr::new("--to"),
         dest_path.as_os_str(),
+        OsStr::new("--apply"),
     ]);
     assert!(!ok, "{text}");
     assert!(text.contains("refusing to overwrite"));
@@ -172,6 +207,7 @@ fn export_and_verify_s3_fixture_corpus() {
         OsStr::new(&to),
         OsStr::new("--manifest"),
         manifest.path().as_os_str(),
+        OsStr::new("--execute"),
     ]);
     assert!(ok, "{text}");
     let (ok, text) = run(&[
@@ -190,6 +226,7 @@ fn export_and_verify_s3_fixture_corpus() {
         OsStr::new(&to),
         OsStr::new("--manifest"),
         manifest.path().as_os_str(),
+        OsStr::new("--execute"),
     ]);
     assert!(ok, "{text}");
     let (ok, text) = run(&[

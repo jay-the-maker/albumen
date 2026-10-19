@@ -49,6 +49,11 @@ jobs:
       - name: Install pinned rclone
         run: scripts/install-rclone.sh
 
+      - name: Ban writes outside the destination module
+        run: |
+          python3 scripts/check-dest-writes.py --self-test
+          python3 scripts/check-dest-writes.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -129,3 +134,28 @@ jobs:
 
       - name: Compare the scaled run with the stored baseline
         run: cargo run --release --locked -p albumen-bench -- --check
+
+  sandbox:
+    name: scan opens no sockets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install rootless podman and strace
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap slirp4netns strace
+          mkdir -p "${XDG_RUNTIME_DIR:-/tmp/albumen-runtime-$(id -u)}"
+          chmod 700 "${XDG_RUNTIME_DIR:-/tmp/albumen-runtime-$(id -u)}"
+          podman info --format '{{.Host.Security.Rootless}}' | grep -qx true
+
+      - name: Strace scan and run it with network syscalls denied
+        run: scripts/scan-no-network.sh
+
+      - name: Sandbox trial against a copy of the fixtures
+        run: scripts/sandbox-trial.sh

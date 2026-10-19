@@ -10,6 +10,9 @@ Reliability, fidelity, respect, control, scale, and the measured performance and
 - [Performance budgets](https://github.com/jay-the-maker/albumen/blob/main/docs/performance-budgets.md): Cold start, thumbnails, scroll, search, import, and backup CPU and battery. Client metrics are targets until the apps exist.
 - [Friction](https://github.com/jay-the-maker/albumen/blob/main/docs/friction.md): Steps from install to a first backup, and the sane-defaults, no-account, and no-nags rules.
 - [Scale](https://github.com/jay-the-maker/albumen/blob/main/docs/scale.md): No artificial ceilings. Soft defaults, streaming pages, and the safety bounds that stay.
+- [Test ladder](https://github.com/jay-the-maker/albumen/blob/main/docs/test-ladder.md): Four rungs before a real machine. Sources stay read-only.
+- [Threat model](https://github.com/jay-the-maker/albumen/blob/main/docs/threat-model.md): What each binary can read, write, and reach on the network.
+- [Release verify](https://github.com/jay-the-maker/albumen/blob/main/docs/release-verify.md): Checksums, keyless signatures, and the notarization gap.
 - [Agent guide](https://github.com/jay-the-maker/albumen/blob/main/AGENTS.md): Build and test commands, the round-trip gate, never-delete rules, and where to start.
 - [Contributing](https://github.com/jay-the-maker/albumen/blob/main/CONTRIBUTING.md): Philosophy acknowledgment, Developer Certificate of Origin, and how agents contribute.
 - [README](https://github.com/jay-the-maker/albumen/blob/main/README.md): What the repository does today.

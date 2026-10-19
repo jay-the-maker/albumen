@@ -105,57 +105,22 @@ impl Quarantine {
     }
 }
 
-/// Copy-verify the asset, then rename each source into `quarantine`.
+/// Quarantine cannot target a source.
 ///
-/// This is not a default path. Sources are renamed only after every
-/// destination has verified. The rename is the only change to a source: the
-/// bytes stay in the trash directory, and nothing is unlinked. If the trash
-/// directory already has that filename, or the rename cannot be done, the
-/// source stays where it is.
+/// A user's archive may be their only copy. This function used to rename
+/// sources into a trash directory after a verified copy. It no longer copies
+/// and it no longer renames. There is no flag that turns the rename back on.
 pub fn copy_verify_quarantine<S: BlobStore + ?Sized>(
     asset: &Asset,
-    store: &S,
-    quarantine: &Quarantine,
+    _store: &S,
+    _quarantine: &Quarantine,
 ) -> Result<IngestReport, IngestError> {
-    let report = copy_verify(asset, store)?;
-    let mut parked = Vec::new();
-    for file in asset.files() {
-        match rename_into_trash(&file.path, &quarantine.trash_dir) {
-            Ok(dest) => parked.push(dest),
-            Err(err) => {
-                let parked = parked
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(IngestError::store(
-                    "quarantine",
-                    file_name_str(&file.path).unwrap_or_else(|_| file.path.display().to_string()),
-                    format!("{err}; sources already in trash: {parked}; nothing was unlinked"),
-                ));
-            }
-        }
-    }
-    Ok(report)
-}
-
-/// Move `source` into `trash_dir` by rename. Never unlinks.
-fn rename_into_trash(source: &Path, trash_dir: &Path) -> Result<std::path::PathBuf, IngestError> {
-    let name = file_name_str(source)?;
-    crate::discover::check_filename(&name)?;
-    std::fs::create_dir_all(trash_dir).map_err(|err| IngestError::io(trash_dir, err))?;
-    let dest = trash_dir.join(&name);
-    if dest.exists() {
-        return Err(IngestError::AlreadyExists {
-            filename: name,
-            destination: dest.display().to_string(),
-        });
-    }
-    std::fs::rename(source, &dest).map_err(|err| IngestError::io(source, err))?;
-    if !dest.is_file() {
-        return Err(IngestError::NotAFile(dest));
-    }
-    Ok(dest)
+    let path = asset
+        .files()
+        .first()
+        .map(|file| file.path.display().to_string())
+        .unwrap_or_else(|| "source".to_string());
+    Err(IngestError::SourceReadOnly { path })
 }
 
 #[cfg(test)]
@@ -230,7 +195,9 @@ mod tests {
     fn default_copy_does_not_remove_or_alter_a_source() {
         let tmp = Tmp::new();
         let mtime = UNIX_EPOCH + Duration::from_secs(1_500_000_000);
-        let source = write_file(tmp.path(), "solo.jpg", b"original-bytes", mtime);
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "solo.jpg", b"original-bytes", mtime);
         let before = source_snap(&source);
         let asset = Asset::from_files(vec![AssetFile {
             path: source.clone(),
@@ -288,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_renames_into_trash_and_does_not_unlink() {
+    fn quarantine_cannot_target_a_source() {
         let tmp = Tmp::new();
         let mtime = UNIX_EPOCH + Duration::from_secs(1_500_000_200);
         let source = write_file(tmp.path(), "solo.jpg", b"original", mtime);
@@ -300,32 +267,22 @@ mod tests {
         .unwrap();
         let dest = tmp.path().join("library");
         let trash = tmp.path().join("trash");
-        let report =
-            copy_verify_quarantine(&asset, &LocalStore::new(&dest), &Quarantine::new(&trash))
-                .unwrap();
-        let parked = trash.join("solo.jpg");
-        assert!(!source.exists());
-        assert_eq!(std::fs::read(&parked).unwrap(), b"original");
-        assert_eq!(std::fs::read(dest.join("solo.jpg")).unwrap(), b"original");
-        assert_eq!(report.files[0].mtime, mtime);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::metadata(&parked).unwrap();
-            assert_eq!(meta.dev(), before.dev);
-            assert_eq!(meta.ino(), before.ino);
-        }
+        let err = copy_verify_quarantine(&asset, &LocalStore::new(&dest), &Quarantine::new(&trash))
+            .unwrap_err();
+        assert!(matches!(err, IngestError::SourceReadOnly { .. }), "{err}");
+        assert_same_source(&source, &before);
+        assert!(!dest.join("solo.jpg").exists());
+        assert!(!trash.exists());
     }
 
     #[test]
-    fn quarantine_refuses_to_overwrite_trash_and_leaves_the_source() {
+    fn quarantine_refuses_even_when_trash_is_empty() {
         let tmp = Tmp::new();
         let mtime = UNIX_EPOCH + Duration::from_secs(1_500_000_300);
         let source = write_file(tmp.path(), "solo.jpg", b"original", mtime);
         let before = source_snap(&source);
         let trash = tmp.path().join("trash");
         std::fs::create_dir(&trash).unwrap();
-        std::fs::write(trash.join("solo.jpg"), b"already-parked").unwrap();
         let asset = Asset::from_files(vec![AssetFile {
             path: source.clone(),
             role: Role::Primary,
@@ -337,18 +294,9 @@ mod tests {
             &Quarantine::new(&trash),
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            IngestError::Store {
-                operation: "quarantine",
-                ..
-            }
-        ));
+        assert!(matches!(err, IngestError::SourceReadOnly { .. }), "{err}");
         assert_same_source(&source, &before);
-        assert_eq!(
-            std::fs::read(trash.join("solo.jpg")).unwrap(),
-            b"already-parked"
-        );
+        assert!(trash.read_dir().unwrap().next().is_none());
     }
 
     struct SourceSnap {

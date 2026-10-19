@@ -220,7 +220,7 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     let source_jpeg = snapshot(&outside.join("photo.jpg"));
     let source_xmp = snapshot(&outside.join("photo.xmp"));
 
-    let mut client = Client::start(&library, &["--enable-export", "--enable-upload"]);
+    let mut client = Client::start(&library, &["--enable-export", "--enable-upload", "--apply"]);
     handshake(&mut client);
     let names = tool_names(&client.request(2, "tools/list", json!({})));
     assert_eq!(
@@ -353,7 +353,7 @@ fn enabled_export_to_s3_verifies_and_leaves_the_library() {
     let to = format!("s3://{bucket}/{prefix}");
     let manifest = root.path().join("manifest.txt");
 
-    let mut client = Client::start(&library, &["--enable-export"]);
+    let mut client = Client::start(&library, &["--enable-export", "--execute"]);
     handshake(&mut client);
     let names = tool_names(&client.request(2, "tools/list", json!({})));
     assert_eq!(
