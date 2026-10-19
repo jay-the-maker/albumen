@@ -46,7 +46,7 @@ function New-Archive([string]$Dest, [string]$Mode) {
     Write-Ascii "$archive.sha256" "$(Get-Sha256Hex $archive)  $leaf`n"
 }
 
-function Assert-Failed([scriptblock]$Body, [string]$Home) {
+function Assert-Failed([scriptblock]$Body, [string]$UserRoot) {
     $failed = $false
     try {
         & $Body
@@ -54,7 +54,7 @@ function Assert-Failed([scriptblock]$Body, [string]$Home) {
         $failed = $true
     }
     if (-not $failed) { throw 'installer succeeded and should have failed' }
-    $bin = Join-Path $Home "AppData\Local\albumen\bin\$($Bins[0])"
+    $bin = Join-Path $UserRoot "AppData\Local\albumen\bin\$($Bins[0])"
     if (Test-Path -LiteralPath $bin) { throw "installer wrote $bin after a failed check" }
 }
 
@@ -66,10 +66,10 @@ $savedPath = $env:PATH
 try {
     $good = Join-Path $Work 'good'
     New-Archive $good 'good'
-    $home = Join-Path $Work 'home-good'
-    New-Item -ItemType Directory -Force -Path $home | Out-Null
-    $env:USERPROFILE = $home
-    $env:LOCALAPPDATA = Join-Path $home 'AppData\Local'
+    $userRoot = Join-Path $Work 'home-good'
+    New-Item -ItemType Directory -Force -Path $userRoot | Out-Null
+    $env:USERPROFILE = $userRoot
+    $env:LOCALAPPDATA = Join-Path $userRoot 'AppData\Local'
     $env:ALBUMEN_ARCHIVE = Join-Path $good "$Artifact.tar.gz"
     $env:ALBUMEN_HOME = $null
     $out = & $Installer | Out-String
@@ -82,25 +82,25 @@ try {
     $bad = Join-Path $Work 'bad'
     New-Archive $bad 'good'
     Write-Ascii (Join-Path $bad "$Artifact.tar.gz.sha256") "$((('0' * 64)))  $Artifact.tar.gz`n"
-    $home = Join-Path $Work 'home-bad'
-    New-Item -ItemType Directory -Force -Path $home | Out-Null
+    $userRoot = Join-Path $Work 'home-bad'
+    New-Item -ItemType Directory -Force -Path $userRoot | Out-Null
     Assert-Failed {
-        $env:USERPROFILE = $home
-        $env:LOCALAPPDATA = Join-Path $home 'AppData\Local'
+        $env:USERPROFILE = $userRoot
+        $env:LOCALAPPDATA = Join-Path $userRoot 'AppData\Local'
         $env:ALBUMEN_ARCHIVE = Join-Path $bad "$Artifact.tar.gz"
         & $Installer | Out-Null
-    } $home
+    } $userRoot
 
     $inner = Join-Path $Work 'inner'
     New-Archive $inner 'bad-inner'
-    $home = Join-Path $Work 'home-inner'
-    New-Item -ItemType Directory -Force -Path $home | Out-Null
+    $userRoot = Join-Path $Work 'home-inner'
+    New-Item -ItemType Directory -Force -Path $userRoot | Out-Null
     Assert-Failed {
-        $env:USERPROFILE = $home
-        $env:LOCALAPPDATA = Join-Path $home 'AppData\Local'
+        $env:USERPROFILE = $userRoot
+        $env:LOCALAPPDATA = Join-Path $userRoot 'AppData\Local'
         $env:ALBUMEN_ARCHIVE = Join-Path $inner "$Artifact.tar.gz"
         & $Installer | Out-Null
-    } $home
+    } $userRoot
 
     $fake = Join-Path $Work 'fake'
     New-Item -ItemType Directory -Force -Path $fake | Out-Null
@@ -109,30 +109,30 @@ try {
     $cosignDir = Join-Path $Work 'cosign-reject'
     New-Archive $cosignDir 'good'
     Write-Ascii (Join-Path $cosignDir "$Artifact.$($Bins[0]).bundle") ''
-    $home = Join-Path $Work 'home-cosign'
-    New-Item -ItemType Directory -Force -Path $home | Out-Null
+    $userRoot = Join-Path $Work 'home-cosign'
+    New-Item -ItemType Directory -Force -Path $userRoot | Out-Null
     $env:PATH = "$fake;$savedPath"
     $env:COSIGN_LOG = $log
     $env:COSIGN_RC = '1'
     Assert-Failed {
-        $env:USERPROFILE = $home
-        $env:LOCALAPPDATA = Join-Path $home 'AppData\Local'
+        $env:USERPROFILE = $userRoot
+        $env:LOCALAPPDATA = Join-Path $userRoot 'AppData\Local'
         $env:ALBUMEN_ARCHIVE = Join-Path $cosignDir "$Artifact.tar.gz"
         & $Installer | Out-Null
-    } $home
+    } $userRoot
     $logged = [IO.File]::ReadAllText($log)
     if ($logged -notmatch 'verify-blob') { throw "cosign was not invoked: $logged" }
 
-    $home = Join-Path $Work 'home-outside'
-    New-Item -ItemType Directory -Force -Path $home | Out-Null
+    $userRoot = Join-Path $Work 'home-outside'
+    New-Item -ItemType Directory -Force -Path $userRoot | Out-Null
     $outside = Join-Path $Work 'outside-dest'
     Assert-Failed {
-        $env:USERPROFILE = $home
-        $env:LOCALAPPDATA = Join-Path $home 'AppData\Local'
+        $env:USERPROFILE = $userRoot
+        $env:LOCALAPPDATA = Join-Path $userRoot 'AppData\Local'
         $env:ALBUMEN_HOME = $outside
         $env:ALBUMEN_ARCHIVE = Join-Path $good "$Artifact.tar.gz"
         & $Installer | Out-Null
-    } $home
+    } $userRoot
     if (Test-Path -LiteralPath $outside) { throw 'installer created a directory outside the home directory' }
 
     Write-Output 'install.ps1 checks: ok'

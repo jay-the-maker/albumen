@@ -408,14 +408,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $home = Join-Path $env:RUNNER_TEMP 'albumen-quickstart-home'
-          New-Item -ItemType Directory -Force -Path $home | Out-Null
-          $local = Join-Path $home 'AppData\Local'
+          $profileRoot = Join-Path $env:RUNNER_TEMP 'albumen-quickstart-home'
+          New-Item -ItemType Directory -Force -Path $profileRoot | Out-Null
+          $local = Join-Path $profileRoot 'AppData\Local'
           New-Item -ItemType Directory -Force -Path $local | Out-Null
-          $env:USERPROFILE = $home
+          $env:USERPROFILE = $profileRoot
           $env:LOCALAPPDATA = $local
           $env:ALBUMEN_ARCHIVE = Join-Path $env:GITHUB_WORKSPACE 'release-archive\${{ matrix.artifact }}.tar.gz'
-          $out = Join-Path $home 'quickstart.out'
+          $out = Join-Path $profileRoot 'quickstart.out'
           & (Join-Path $env:GITHUB_WORKSPACE 'scripts\quickstart.ps1') | Tee-Object -FilePath $out
           if (-not (Select-String -Path $out -Pattern '^verified: ' -Quiet)) { throw 'SHA-256 verification did not print' }
           if (-not (Select-String -Path $out -Pattern '^source unchanged$' -Quiet)) { throw 'source was not reported unchanged' }

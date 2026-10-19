@@ -153,16 +153,16 @@ function Try-SaveUrl([string]$Url, [string]$Dest) {
 
 function Get-InstallDest([string]$Requested) {
     if (-not $env:USERPROFILE) { throw 'USERPROFILE is not set' }
-    $home = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+    $userRoot = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
     $dest = $Requested.TrimEnd('\')
     if ($dest.Contains('..')) {
         throw 'refusing a path that climbs out of the home directory'
     }
     if (-not [IO.Path]::IsPathRooted($dest)) {
-        $dest = Join-Path $home $dest
+        $dest = Join-Path $userRoot $dest
     }
     $full = [IO.Path]::GetFullPath($dest).TrimEnd('\')
-    $prefix = $home + '\'
+    $prefix = $userRoot + '\'
     if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing to install outside your home directory: $full"
     }
