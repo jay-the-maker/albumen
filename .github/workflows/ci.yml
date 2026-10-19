@@ -336,6 +336,56 @@ jobs:
           fi
           scripts/no-unexpected-egress.sh
 
+  zero-network:
+    name: zero network (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: ubuntu-24.04
+          - os: macos-14
+            label: macos-14
+          - os: windows-2025
+            label: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install pinned ExifTool
+        shell: bash
+        run: scripts/install-exiftool.sh
+
+      - name: Install strace
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace
+
+      - name: Prove scan, index, and search make no connections
+        if: runner.os != 'Windows'
+        shell: bash
+        run: scripts/zero-network.sh
+
+      - name: Prove scan, index, and search make no connections
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -File scripts/zero-network.ps1
+
   package-release:
     name: package release archive (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
