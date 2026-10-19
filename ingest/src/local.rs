@@ -8,7 +8,7 @@ use crate::checksum::{copy_hashed, sha256_file, to_hex};
 use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
-use crate::mtime::{mtime_matches, mtime_of, set_mtime, sync_file, to_unix_nanos_string};
+use crate::mtime::{mtime_matches, mtime_of, sync_file, to_unix_nanos_string};
 use crate::source::{parent_dir, SourceRoot};
 use crate::store::{BlobStore, VerifiedObject};
 
@@ -64,8 +64,14 @@ impl BlobStore for LocalStore {
 
 /// Copy one file into `dest_dir`, keeping its filename and mtime.
 ///
-/// The destination file is hashed after the write. On mismatch the
-/// destination is removed and the error names both SHA-256 digests.
+/// The source is read once: SHA-256 is updated as those bytes are written.
+/// Named streams are copied next, because a stream write can change the
+/// file's mtime. The preserved mtime is then set and the file is fsynced
+/// once, so the bytes and the time are durable together. The destination
+/// path is opened again and hashed. That read-back is required. The
+/// directory is synced after it. The file is not reported stored until
+/// both syncs have returned. On mismatch the destination is removed and
+/// the error names both SHA-256 digests.
 pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject, IngestError> {
     if !source.is_file() {
         return Err(IngestError::NotAFile(source.to_path_buf()));
@@ -99,9 +105,13 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     let input = root.open_read(source)?;
     let output = dest::open_new(&dest)?;
     let written_hash = copy_hashed(input, &output, source, &dest)?;
+    // Streams land before the mtime is set. The write handle stays open so
+    // the fsync below covers the bytes this handle wrote and the mtime.
+    copy_named_streams(source, &dest, &filename)?;
+    let expected_mtime = crate::mtime::representable_mtime(mtime);
+    dest::set_mtime_on(&output, &dest, expected_mtime)?;
     sync_file(&output, &dest)?;
     drop(output);
-    copy_named_streams(source, &dest, &filename)?;
 
     let record = finalize_verified(&dest, &filename, &written_hash, mtime)?;
     dest::sync_dir(dest_dir)?;
@@ -169,6 +179,8 @@ pub(crate) fn copy_verify_reader<R: Read>(
     };
     let output = dest::open_new(dest)?;
     let written_hash = copy_hashed(reader, &output, source_label, dest)?;
+    let expected_mtime = crate::mtime::representable_mtime(mtime);
+    dest::set_mtime_on(&output, dest, expected_mtime)?;
     sync_file(&output, dest)?;
     drop(output);
 
@@ -189,8 +201,10 @@ pub(crate) fn finalize_verified(
     expected: &[u8; 32],
     mtime: std::time::SystemTime,
 ) -> Result<VerifiedObject, IngestError> {
-    // Camera-to-cloud CI times this re-read only. The hash made while
-    // copying, and the fsync before it, stay outside the clock.
+    // The caller has already set the mtime and fsynced the file. This
+    // re-reads the destination path and hashes those bytes. Camera-to-cloud
+    // CI times this re-read only. The hash made while copying, and the
+    // fsync before it, stay outside the clock.
     let started = std::time::Instant::now();
     let actual = sha256_file(path)?;
     let sha256_verify_ms = started.elapsed().as_millis();
@@ -206,7 +220,6 @@ pub(crate) fn finalize_verified(
     }
 
     let expected_mtime = crate::mtime::representable_mtime(mtime);
-    set_mtime(path, expected_mtime)?;
     let stored_mtime = mtime_of(path)?;
     if !mtime_matches(expected_mtime, stored_mtime) {
         let removed = dest::remove_file(path).is_ok();

@@ -302,14 +302,25 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), IngestError> {
     Ok(())
 }
 
+/// Set the modification time on a file this process already has open.
+///
+/// This does not fsync. The caller fsyncs that same handle so the bytes and
+/// the time become durable together, before the file is reported stored.
+pub fn set_mtime_on(file: &File, path: &Path, mtime: SystemTime) -> Result<(), IngestError> {
+    file.set_times(std::fs::FileTimes::new().set_modified(mtime))
+        .map_err(|err| IngestError::io(path, err))
+}
+
+/// Set the modification time and fsync that file once.
+///
+/// The `sync_all` commits the time and any bytes still dirty for this inode.
 pub fn set_mtime(path: &Path, mtime: SystemTime) -> Result<(), IngestError> {
     let opened = opened(path);
     let file = OpenOptions::new()
         .write(true)
         .open(&opened)
         .map_err(|err| IngestError::io(path, err))?;
-    file.set_times(std::fs::FileTimes::new().set_modified(mtime))
-        .map_err(|err| IngestError::io(path, err))?;
+    set_mtime_on(&file, path, mtime)?;
     file.sync_all().map_err(|err| IngestError::io(path, err))?;
     Ok(())
 }

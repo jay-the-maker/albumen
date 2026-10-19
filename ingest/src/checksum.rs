@@ -50,6 +50,9 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// Hash the bytes read from `reader` while writing them to `writer`.
+/// Copy `reader` to `writer`, hashing the bytes as they pass.
+///
+/// The source is read once. The returned digest is the bytes written.
 pub(crate) fn copy_hashed<R: Read, W: std::io::Write>(
     mut reader: R,
     mut writer: W,
