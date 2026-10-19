@@ -21,6 +21,7 @@ This is the outline of the system. The ingest crate, the export command, and the
 | Google Takeout import (`albumen import-takeout`) | Here. Streams split zip and tgz parts read-only. See [importers/takeout.md](importers/takeout.md) |
 | iCloud Photos import (`albumen import-icloud`) | Here. Reads a download, export, or Photos library copy. See [importers/icloud.md](importers/icloud.md) |
 | rclone-backed SMB, SFTP, WebDAV, B2 | SFTP, WebDAV, and B2 write through `RcloneStore` and `copy_verify`. SMB is not started |
+| Family library | Design only. [design/family-sharing.md](design/family-sharing.md). Not implemented |
 
 ## Shape
 
