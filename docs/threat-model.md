@@ -56,6 +56,6 @@ A scan, a local export, a Takeout or iCloud dry-run, `platform-dirs`, an MCP sea
 
 ## What this does not claim
 
-Apple notarization is not done. Gatekeeper will warn on the macOS binaries. The gap is recorded in [release-verify.md](release-verify.md). The ladder in [test-ladder.md](test-ladder.md) is how a real machine is approached. The last rung is [trial-macos.md](trial-macos.md): a copied folder, mounted read-only, on a dedicated non-admin Mac. Gated: run on an owner's machine only after rungs 1-3 are green and with the owner's explicit approval. CI macOS runners are the default place this runs.
+Release binaries are checked with the checksum and the keyless signature. Apple notarization is not done. Gatekeeper will warn when you open a macOS binary. That warning is expected. The notes are in [release-verify.md](release-verify.md). The ladder in [test-ladder.md](test-ladder.md) is how a real machine is approached. The last rung is [trial-macos.md](trial-macos.md): a copied folder, mounted read-only, on a dedicated non-admin Mac. Gated: run on an owner's machine only after rungs 1-3 are green and with the owner's explicit approval. CI macOS runners are the default place this runs.
 
 **Planned:** the million-item tree on Linux and Windows. The scheduled job runs on `macos-14` only.

@@ -57,7 +57,7 @@ scripts/macos-readonly-sandbox.sh \
 
 ## Install the binaries
 
-The `v0.1.0` tag is unchanged. The macOS workflow uploads these binaries onto that existing GitHub release. How to check the checksum and the keyless signature is [release-verify.md](release-verify.md). Notarization is deferred.
+The `v0.1.0` tag is unchanged. The release workflow uploads these binaries onto that existing GitHub release, along with Linux and Windows archives. How to check the checksum and the keyless signature is [release-verify.md](release-verify.md). Gatekeeper will warn when you open the binary. That warning is expected. Notarization is deferred.
 
 ```bash
 gh release download v0.1.0 --repo jay-the-maker/albumen --pattern 'albumen-macos-arm64*'
