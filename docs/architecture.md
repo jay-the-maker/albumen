@@ -57,6 +57,8 @@ The bytes on disk are the library. The catalog is a cache. If the catalog is del
 
 `copy_verify` is the only default path. `copy_verify_quarantine` is an explicit per-run opt-in. After the copy verifies, it renames each source into a trash directory the caller supplies for that call. It never unlinks a source. If the rename would overwrite something in the trash, the source stays. The CLI does not call it.
 
+A stored original is not unlinked after that check. The receiver refuses WebDAV `DELETE` and `MOVE`, SFTP remove and rename, and FTP `DELE`, `RMD`, and rename. If the receipt sidecar cannot be written, or the library is asked to hide a file, Albumen writes `{filename}.albumen-tombstone` and leaves the original in place. Importers and the MCP server have no remove tool. `BlobStore::delete` and an export rollback remove only a destination this call just wrote, before that call has finished.
+
 Android motion photos are one JPEG with an embedded video and XMP. They stay intact because the file is never rewritten. There is no separate pair to discover.
 
 ## Companions discovered today

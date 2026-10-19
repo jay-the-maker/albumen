@@ -3,8 +3,10 @@
 //! A received upload is a temporary file until `copy_verify_file` accepts it.
 //! A different file with the same camera filename is stored under another name.
 //! The camera filename and its directory are written to a sidecar. An identical
-//! byte string is not stored twice. A failed upload deletes only the spool,
-//! and a sidecar failure deletes the destination this call just wrote.
+//! byte string is not stored twice. A failed upload deletes only the spool.
+//! If the receipt sidecar cannot be written, the verified original stays and a
+//! tombstone is written beside it. `hide` does the same: the original is not
+//! unlinked.
 //!
 //! `source_mtime` and the stored file's mtime are written once, inside the
 //! upload that created the file. A later offer is appended to the sidecar and
@@ -20,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use albumen_ingest::{copy_verify_file, sha256_hex, VerifiedObject};
 
 const SIDECAR_SUFFIX: &str = ".albumen.json";
+const TOMBSTONE_SUFFIX: &str = ".albumen-tombstone";
 
 #[derive(Debug)]
 pub struct Library {
@@ -118,7 +121,9 @@ impl Library {
             mtime_conflicts: Vec::new(),
         };
         if let Err(err) = self.write_sidecar(&record) {
-            let _ = fs::remove_file(self.root.join(&verified.filename));
+            // The original is already copy-verified. A failed receipt is a
+            // tombstone, not an unlink.
+            let _ = self.write_tombstone(&verified.filename, "receipt sidecar was not written");
             return Err(err);
         }
         Ok(Commit::Stored {
@@ -187,6 +192,10 @@ impl Library {
 
     fn write_sidecar(&self, record: &Record) -> Result<VerifiedObject, String> {
         let name = format!("{}{SIDECAR_SUFFIX}", record.stored_name);
+        let dest = self.root.join(&name);
+        if sidecar_rename_should_fail(&dest) {
+            return Err("injected failure before sidecar rename".to_string());
+        }
         let dir = tempfile::TempDir::new().map_err(|err| err.to_string())?;
         let path = dir.path().join(&name);
         let mut file = File::create(&path).map_err(|err| err.to_string())?;
@@ -194,6 +203,79 @@ impl Library {
             .map_err(|err| err.to_string())?;
         file.sync_all().map_err(|err| err.to_string())?;
         copy_verify_file(&path, &self.root).map_err(|err| err.to_string())
+    }
+
+    /// Mark `stored_name` hidden. The original stays where it is.
+    ///
+    /// The tombstone is `{stored_name}.albumen-tombstone`. A second hide
+    /// replaces that sidecar by rename and does not unlink the original.
+    pub fn hide(&self, stored_name: &str) -> Result<(), String> {
+        let _guard = self
+            .commit_lock
+            .lock()
+            .map_err(|_| "receive commit lock was poisoned".to_string())?;
+        self.hide_locked(stored_name)
+    }
+
+    fn hide_locked(&self, stored_name: &str) -> Result<(), String> {
+        check_stored_name(stored_name)?;
+        let original = self.root.join(stored_name);
+        let meta = fs::symlink_metadata(&original).map_err(|err| err.to_string())?;
+        if !meta.is_file() {
+            return Err(format!("{stored_name} is not a stored original"));
+        }
+        self.write_tombstone(stored_name, "hide")
+    }
+
+    fn write_tombstone(&self, stored_name: &str, reason: &str) -> Result<(), String> {
+        let name = format!("{stored_name}{TOMBSTONE_SUFFIX}");
+        let body = format!(
+            "{{\"hidden\":true,\"reason\":{},\"stored_name\":{}}}\n",
+            json_string(reason),
+            json_string(stored_name)
+        );
+        let dest = self.root.join(&name);
+        if fs::symlink_metadata(&dest).is_ok() {
+            return self.write_atomic(&name, &body);
+        }
+        let dir = tempfile::TempDir::new().map_err(|err| err.to_string())?;
+        let path = dir.path().join(&name);
+        let mut file = File::create(&path).map_err(|err| err.to_string())?;
+        file.write_all(body.as_bytes())
+            .map_err(|err| err.to_string())?;
+        file.sync_all().map_err(|err| err.to_string())?;
+        drop(file);
+        copy_verify_file(&path, &self.root).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    fn write_atomic(&self, name: &str, bytes: &str) -> Result<(), String> {
+        let dest = self.root.join(name);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let tmp = self
+            .root
+            .join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
+        let result = (|| {
+            let mut file = File::create(&tmp).map_err(|err| err.to_string())?;
+            file.write_all(bytes.as_bytes())
+                .map_err(|err| err.to_string())?;
+            file.sync_all().map_err(|err| err.to_string())?;
+            drop(file);
+            fs::rename(&tmp, &dest).map_err(|err| err.to_string())?;
+            sync_dir(&self.root)?;
+            let again = fs::read(&dest).map_err(|err| err.to_string())?;
+            if again != bytes.as_bytes() {
+                return Err(format!("{name} bytes changed during replace"));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// Record a camera mtime offered after the file was committed.
@@ -508,6 +590,21 @@ fn conflicts_json(conflicts: &[MtimeConflict]) -> String {
     out
 }
 
+fn check_stored_name(name: &str) -> Result<(), String> {
+    let unsafe_name = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name.chars().any(char::is_control);
+    if unsafe_name {
+        Err(format!("unsafe stored name {name}"))
+    } else {
+        Ok(())
+    }
+}
+
 fn json_string(value: &str) -> String {
     let mut out = String::from("\"");
     for ch in value.chars() {
@@ -766,6 +863,7 @@ mod tests {
         arm_fail_before_sidecar_rename, disambiguated, Arrival, Library, MtimeProtocol, Record,
         Spool,
     };
+    use std::os::unix::fs::MetadataExt;
     use std::time::UNIX_EPOCH;
 
     #[test]
@@ -880,5 +978,47 @@ mod tests {
             std::fs::metadata(&photo).unwrap().modified().unwrap(),
             mtime_before
         );
+    }
+
+    #[test]
+    fn sidecar_failure_and_hide_keep_the_original() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let mut spool = Spool::create("IMG_0001.JPG").unwrap();
+        spool.write_at(0, b"original-bytes").unwrap();
+        spool.set_mtime(1_000_000_000).unwrap();
+        let sidecar = root.path().join("IMG_0001.JPG.albumen.json");
+        arm_fail_before_sidecar_rename(sidecar);
+        let err = library
+            .commit(
+                &mut spool,
+                &Arrival {
+                    camera_filename: "IMG_0001.JPG".into(),
+                    directory: "DCIM".into(),
+                },
+                MtimeProtocol::WebDav,
+            )
+            .unwrap_err();
+        assert!(err.contains("injected failure"), "{err}");
+        let photo = root.path().join("IMG_0001.JPG");
+        let inode = std::fs::metadata(&photo).unwrap().ino();
+        assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
+        let tombstone =
+            std::fs::read_to_string(root.path().join("IMG_0001.JPG.albumen-tombstone")).unwrap();
+        assert!(tombstone.contains("\"hidden\":true"), "{tombstone}");
+        assert!(
+            tombstone.contains("receipt sidecar was not written"),
+            "{tombstone}"
+        );
+
+        library.hide("IMG_0001.JPG").unwrap();
+        assert_eq!(std::fs::metadata(&photo).unwrap().ino(), inode);
+        assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
+        let hidden =
+            std::fs::read_to_string(root.path().join("IMG_0001.JPG.albumen-tombstone")).unwrap();
+        assert!(hidden.contains("\"reason\":\"hide\""), "{hidden}");
+        library.hide("IMG_0001.JPG").unwrap();
+        assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
+        assert!(library.hide("../IMG_0001.JPG").is_err());
     }
 }
