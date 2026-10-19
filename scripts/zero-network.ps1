@@ -8,11 +8,13 @@
 #
 # windows-2025 pktmon has no process filter. A machine-wide capture would
 # include the runner. When --process-name is accepted, that filter is the
-# observer. Otherwise the observer is an outbound block for albumen.exe,
-# albumen-mcp.exe, and perl.exe (ExifTool), audited as Filtering Platform
-# failure events. The canary has to show a blocked connect to 203.0.113.5
-# and a blocked DNS send to that address on port 53. Windows Firewall does
-# not classify a loopback destination, and the script names that gap.
+# observer. Otherwise the per-process observer is an ETW session on
+# Microsoft-Windows-Kernel-Network (NT Kernel Logger if that provider records
+# nothing). TCP connect/accept and UDP send/recv carry a payload PID, including
+# sends to 127.0.0.1. The canary PID must show an external connect, a DNS send,
+# and a loopback send. Scan, index, and search PIDs, including perl.exe, must
+# show none. An outbound firewall block with a failure audit is a second layer.
+# Windows Firewall still does not classify a loopback destination.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -136,7 +138,8 @@ function Start-Pktmon([string[]]$ProcessNames) {
     $startHelp = & pktmon start --help 2>&1 | Out-String
     $startArgs = @('start', '--capture', '--pkt-size', '128', '--file-name', $etl, '--file-size', '32')
     if ($startHelp -match 'loopback') {
-        & pktmon @startArgs --flags 0x10
+        # 0x10 is a string: Windows PowerShell 5.1 refuses a native exe when any argument is an int.
+        & pktmon @startArgs --flags '0x10'
         if ($LASTEXITCODE -eq 0) { return }
         # A failed start may have left the monitor running. Stopping it writes
         # "not running" to stderr when it did not, and Windows PowerShell turns
@@ -281,6 +284,321 @@ function Get-FilterEvents([datetime]$Since) {
     return @($found)
 }
 
+$script:TraceSession = 'albumen-zero-net'
+$script:KernelLoggerStarted = $false
+$script:AnalyticEnabled = $false
+$script:ObservedPids = $null
+$script:ObservedImages = @{}
+$script:WatchProcesses = $false
+
+# Trace tools run through System.Diagnostics.Process with one command line, so
+# Windows PowerShell 5.1 never binds their arguments. Its native-command path
+# threw "Argument types do not match" before logman started. The name stays
+# apart from Invoke-Native, which the build uses.
+function Format-TraceArg([string]$Value) {
+    if ($Value -eq '') { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Invoke-TraceTool([string]$Tool, [string[]]$Arguments) {
+    $exe = Join-Path $env:SystemRoot "System32\$Tool.exe"
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $exe
+    $info.Arguments = (@($Arguments | ForEach-Object { Format-TraceArg $_ }) -join ' ')
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.CreateNoWindow = $true
+    $proc = [Diagnostics.Process]::Start($info)
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $proc.WaitForExit()
+    $stderr = $stderrTask.Result
+    $result = [pscustomobject]@{
+        Exit = [int]$proc.ExitCode
+        Text = "$Tool $($info.Arguments)`n$stdout$stderr"
+    }
+    $proc.Dispose()
+    $result
+}
+
+function Enable-KernelAnalytic {
+    $status = Invoke-TraceTool 'wevtutil' @('gl', 'Microsoft-Windows-Kernel-Network/Analytic')
+    if ($status.Text -match 'enabled:\s*true') { return }
+    $set = Invoke-TraceTool 'wevtutil' @('sl', 'Microsoft-Windows-Kernel-Network/Analytic', '/e:true', '/q:true')
+    if ($set.Exit -eq 0) { $script:AnalyticEnabled = $true }
+}
+
+function Start-KernelTrace([string]$Etl, [string]$Keywords) {
+    if (Test-Path -LiteralPath $Etl) { Remove-Item -LiteralPath $Etl -Force }
+    [void](Invoke-TraceTool 'logman' @('stop', $script:TraceSession, '-ets'))
+    Enable-KernelAnalytic
+    $common = @('start', $script:TraceSession, '-ets', '-o', $Etl, '-max', '128', '-nb', '32', '32', '-bs', '128',
+        '-p', 'Microsoft-Windows-Kernel-Network', $Keywords, '0xff')
+    $first = Invoke-TraceTool 'logman' ($common + @('-p', 'Microsoft-Windows-Kernel-Process', '0x10', '0xff'))
+    if ($first.Exit -eq 0) { return }
+    [void](Invoke-TraceTool 'logman' @('stop', $script:TraceSession, '-ets'))
+    $second = Invoke-TraceTool 'logman' $common
+    if ($second.Exit -ne 0) {
+        throw "logman could not start Microsoft-Windows-Kernel-Network (keywords $Keywords)`n$($first.Text)`n$($second.Text)"
+    }
+}
+
+function Stop-KernelTrace {
+    [void](Invoke-TraceTool 'logman' @('stop', $script:TraceSession, '-ets'))
+}
+
+function Start-NtKernelLogger([string]$Etl) {
+    if (Test-Path -LiteralPath $Etl) { Remove-Item -LiteralPath $Etl -Force }
+    $existing = Invoke-TraceTool 'logman' @('query', 'NT Kernel Logger', '-ets')
+    if ($existing.Exit -eq 0 -and $existing.Text -match 'Running') {
+        throw @"
+NT Kernel Logger is already running on this runner, so a second kernel network
+session cannot start.
+$($existing.Text)
+"@
+    }
+    # 0x10000 is EVENT_TRACE_FLAG_NETWORK_TCPIP.
+    $started = Invoke-TraceTool 'logman' @('start', 'NT Kernel Logger', '-ets', '-o', $Etl, '-max', '128',
+        '-p', 'Windows Kernel Trace', '0x10000')
+    if ($started.Exit -ne 0) {
+        throw "logman could not start the NT Kernel Logger network provider`n$($started.Text)"
+    }
+    $script:KernelLoggerStarted = $true
+}
+
+function Stop-NtKernelLogger {
+    if (-not $script:KernelLoggerStarted) { return }
+    [void](Invoke-TraceTool 'logman' @('stop', 'NT Kernel Logger', '-ets'))
+    $script:KernelLoggerStarted = $false
+}
+
+function Convert-TraceXml([string]$Etl, [string]$Xml) {
+    if (Test-Path -LiteralPath $Xml) { Remove-Item -LiteralPath $Xml -Force }
+    $decoded = Invoke-TraceTool 'tracerpt' @($Etl, '-o', $Xml, '-of', 'XML', '-y')
+    if ($decoded.Exit -ne 0 -or -not (Test-Path -LiteralPath $Xml)) {
+        throw "tracerpt could not decode the kernel network trace`n$($decoded.Text)"
+    }
+}
+
+function Get-AddressForms([string]$Value) {
+    $forms = New-Object System.Collections.Generic.List[string]
+    $trimmed = $Value.Trim()
+    if (-not $trimmed) { return @() }
+    $forms.Add($trimmed)
+    if ($trimmed -match '^\d+$') {
+        $bytes = [BitConverter]::GetBytes([uint32]$trimmed)
+        $forms.Add("$($bytes[0]).$($bytes[1]).$($bytes[2]).$($bytes[3])")
+        $forms.Add("$($bytes[3]).$($bytes[2]).$($bytes[1]).$($bytes[0])")
+    }
+    return @($forms)
+}
+
+function Test-Port([int]$Port, [int]$Want) {
+    $swapped = (($Want -band 0xff) -shl 8) -bor (($Want -shr 8) -band 0xff)
+    return $Port -eq $Want -or $Port -eq $swapped
+}
+
+function Get-TraceEvents([string]$XmlPath) {
+    $text = [IO.File]::ReadAllText($XmlPath)
+    $found = New-Object System.Collections.Generic.List[object]
+    foreach ($chunk in [regex]::Matches($text, '(?s)<Event\b[^>]*>.*?</Event>')) {
+        $body = $chunk.Value
+        $id = 0
+        if ($body -match '<EventID[^>]*>\s*(\d+)\s*</EventID>') { $id = [int]$Matches[1] }
+        $payloadPid = -1
+        if ($body -match '<Data Name="(?:PID|Pid)">\s*(\d+)\s*</Data>') { $payloadPid = [int]$Matches[1] }
+        $processId = -1
+        if ($body -match '<Data Name="ProcessID">\s*(\d+)\s*</Data>') { $processId = [int]$Matches[1] }
+        $parentId = -1
+        if ($body -match '<Data Name="ParentProcessID">\s*(\d+)\s*</Data>') { $parentId = [int]$Matches[1] }
+        $daddr = ''
+        if ($body -match '<Data Name="(?:daddr|DestAddress|RemoteAddress)">\s*([^<]*?)\s*</Data>') { $daddr = $Matches[1] }
+        $saddr = ''
+        if ($body -match '<Data Name="(?:saddr|SrcAddress|LocalAddress)">\s*([^<]*?)\s*</Data>') { $saddr = $Matches[1] }
+        $dport = 0
+        if ($body -match '<Data Name="(?:dport|DestPort|RemotePort)">\s*(\d+)\s*</Data>') { $dport = [int]$Matches[1] }
+        $image = ''
+        if ($body -match '<Data Name="(?:ImageFileName|ImageName|ProcessName)">\s*([^<]*?)\s*</Data>') {
+            $image = $Matches[1]
+        }
+        $provider = ''
+        if ($body -match '<Provider[^>]*Name="([^"]+)"') { $provider = $Matches[1] }
+        $found.Add([pscustomobject]@{
+            Id = $id
+            Pid = $payloadPid
+            ProcessId = $processId
+            ParentId = $parentId
+            Daddr = $daddr
+            Saddr = $saddr
+            Dport = $dport
+            Image = $image
+            Provider = $provider
+            Body = $body
+        })
+    }
+    # @() over a List[object] throws "Argument types do not match" in PowerShell.
+    return $found.ToArray()
+}
+
+function Merge-ProcessImages($Events) {
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($event in $Events) {
+            $procId = [int]$event.ProcessId
+            if ($procId -lt 0) { continue }
+            $leaf = @(([string]$event.Image) -split '[\\/]')[-1]
+            $parentKnown = $event.ParentId -ge 0 -and $script:ObservedPids.Contains([int]$event.ParentId)
+            $selfKnown = $script:ObservedPids.Contains($procId)
+            $ownImage = $leaf -match '^albumen(\.exe|-mcp\.exe)$'
+            if ($parentKnown -or $selfKnown -or $ownImage) {
+                if ($script:ObservedPids.Add($procId)) { $changed = $true }
+                if ($leaf) { $script:ObservedImages[$procId] = $leaf }
+            }
+        }
+    }
+}
+
+function Invoke-TracedCanary([string]$Etl) {
+    $attempts = @(
+        @{ Mode = 'manifest'; Keywords = '0x30' },
+        @{ Mode = 'manifest'; Keywords = '0xffffffffffffffff' },
+        @{ Mode = 'kernel-logger'; Keywords = '' }
+    )
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($attempt in $attempts) {
+        try {
+            if ($attempt.Mode -eq 'manifest') {
+                Start-KernelTrace $Etl $attempt.Keywords
+                try {
+                    foreach ($note in @(Invoke-Canary)) {
+                        if ($note) { $script:CanaryNotes += [string]$note }
+                    }
+                    Start-Sleep -Milliseconds 400
+                } finally {
+                    Stop-KernelTrace
+                }
+            } else {
+                Start-NtKernelLogger $Etl
+                try {
+                    foreach ($note in @(Invoke-Canary)) {
+                        if ($note) { $script:CanaryNotes += [string]$note }
+                    }
+                    Start-Sleep -Milliseconds 400
+                } finally {
+                    Stop-NtKernelLogger
+                }
+            }
+            $xml = "$Etl.xml"
+            Convert-TraceXml $Etl $xml
+            Assert-CanaryTrace @(Get-TraceEvents $xml) $PID
+            $script:TraceMode = [string]$attempt.Mode
+            $script:TraceKeywords = [string]$attempt.Keywords
+            return
+        } catch {
+            $errors.Add("$($attempt.Mode) $($attempt.Keywords): $($_.Exception.Message)`n$($_.InvocationInfo.PositionMessage)`n$($_.ScriptStackTrace)")
+            Stop-KernelTrace
+            Stop-NtKernelLogger
+        }
+    }
+    throw @"
+No kernel ETW session recorded the canary's external connect, DNS send, and loopback send.
+$($errors -join "`n----`n")
+"@
+}
+
+function Invoke-TracedCommands([string]$Etl) {
+    $script:ObservedPids = New-Object 'System.Collections.Generic.HashSet[int]'
+    $script:ObservedImages = @{}
+    $script:WatchProcesses = $true
+    if ($script:TraceMode -eq 'kernel-logger') {
+        Start-NtKernelLogger $Etl
+        try { Invoke-ObservedCommands } finally { Stop-NtKernelLogger }
+    } else {
+        Start-KernelTrace $Etl $script:TraceKeywords
+        try { Invoke-ObservedCommands } finally { Stop-KernelTrace }
+    }
+    $xml = "$Etl.xml"
+    Convert-TraceXml $Etl $xml
+    $events = @(Get-TraceEvents $xml)
+    Merge-ProcessImages $events
+    $perlSeen = @($script:ObservedImages.GetEnumerator() | Where-Object { [string]$_.Value -match '^perl\.exe$' })
+    if ($perlSeen.Count -eq 0) {
+        $listed = ($script:ObservedImages.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
+        throw "the per-process observer never saw perl.exe, so an ExifTool loopback send would not be attributed. PIDs: $listed"
+    }
+    Assert-CleanTrace $events
+    $script:WatchProcesses = $false
+}
+
+function Test-WatchedAddress($Event, [string]$Address) {
+    foreach ($form in (Get-AddressForms $Event.Daddr)) {
+        if ($form -eq $Address) { return $true }
+    }
+    return $false
+}
+
+function Assert-CanaryTrace($Events, [int]$CanaryPid) {
+    $mine = @($Events | Where-Object { $_.Pid -eq $CanaryPid -and $_.Daddr })
+    $external = @($mine | Where-Object { (Test-WatchedAddress $_ '203.0.113.5') -and -not (Test-Port $_.Dport 53) })
+    $dns = @($mine | Where-Object { (Test-WatchedAddress $_ '203.0.113.5') -and (Test-Port $_.Dport 53) })
+    $loopback = @($mine | Where-Object { (Test-WatchedAddress $_ '127.0.0.1') -and (Test-Port $_.Dport 53) })
+    if ($external.Count -eq 0 -or $dns.Count -eq 0 -or $loopback.Count -eq 0) {
+        $sample = ''
+        $shown = @($mine | Select-Object -First 1)
+        if ($shown.Count -eq 0) { $shown = @($Events | Where-Object { $_.Daddr } | Select-Object -First 1) }
+        if ($shown.Count -gt 0) { $sample = $shown[0].Body }
+        throw @"
+Kernel network ETW did not record the canary PID $CanaryPid.
+External events: $($external.Count). DNS port 53 events: $($dns.Count). Loopback 127.0.0.1:53 events: $($loopback.Count). Parsed events: $($Events.Count).
+Sample:
+$sample
+"@
+    }
+    $withPid = @($Events | Where-Object { $_.Pid -ge 0 -and $_.Daddr })
+    Write-Output "zero-network: kernel ETW canary trace parsed $($Events.Count) events, $($withPid.Count) network events with a PID, $($mine.Count) from canary PID $CanaryPid"
+    Write-Output "zero-network: kernel ETW canary PID $CanaryPid external connect 203.0.113.5: $($external.Count), DNS send 203.0.113.5:53: $($dns.Count), loopback send 127.0.0.1:53: $($loopback.Count)"
+}
+
+function Assert-CleanTrace($Events) {
+    $network = @($Events | Where-Object { $_.Pid -ge 0 -and ($_.Daddr -or $_.Saddr) })
+    $others = @($network | Where-Object { -not $script:ObservedPids.Contains([int]$_.Pid) })
+    Write-Output "zero-network: kernel ETW clean trace parsed $($Events.Count) events, $($network.Count) network events with a PID, $($others.Count) from other processes"
+    foreach ($entry in @($script:ObservedImages.GetEnumerator() | Sort-Object { [int]$_.Key })) {
+        $observedPid = [int]$entry.Key
+        $count = @($network | Where-Object { [int]$_.Pid -eq $observedPid }).Count
+        Write-Output "zero-network: kernel ETW PID $observedPid ($($entry.Value)) network events: $count"
+    }
+    $hits = @($Events | Where-Object { $_.Pid -ge 0 -and $script:ObservedPids.Contains([int]$_.Pid) -and ($_.Daddr -or $_.Saddr) })
+    if ($hits.Count -gt 0) {
+        $hit = $hits[0]
+        throw "kernel ETW recorded a network event for PID $($hit.Pid) ($($script:ObservedImages[[int]$hit.Pid])) event $($hit.Id) $($hit.Saddr) -> $($hit.Daddr):$($hit.Dport)"
+    }
+    $listed = ($script:ObservedImages.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
+    Write-Output "zero-network: kernel ETW saw no TCP or UDP event for scan, index, or search PIDs ($listed)"
+}
+
+function Note-Tree([int]$Root) {
+    $frontier = @($Root)
+    for ($depth = 0; $depth -lt 4; $depth++) {
+        $next = @()
+        foreach ($parent in $frontier) {
+            $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$parent" -ErrorAction SilentlyContinue)
+            foreach ($kid in $kids) {
+                $id = [int]$kid.ProcessId
+                if ($script:ObservedPids.Add($id)) {
+                    $script:ObservedImages[$id] = [string]$kid.Name
+                    $next += $id
+                }
+            }
+        }
+        if ($next.Count -eq 0) { break }
+        $frontier = $next
+    }
+}
+
 function Invoke-Albumen([string]$Name, [string]$Exe, [string[]]$ArgumentList, [string]$Stdin) {
     $stdout = Join-Path $work "$Name.stdout"
     $stderr = Join-Path $work "$Name.stderr"
@@ -291,11 +609,24 @@ function Invoke-Albumen([string]$Name, [string]$Exe, [string[]]$ArgumentList, [s
         RedirectStandardOutput = $stdout
         RedirectStandardError = $stderr
         PassThru = $true
-        Wait = $true
+        Wait = (-not $script:WatchProcesses)
         NoNewWindow = $true
     }
     if ($Stdin) { $start.RedirectStandardInput = $Stdin }
     $proc = Start-Process @start
+    if ($script:WatchProcesses) {
+        # Without a cached handle, Start-Process without -Wait reports a null ExitCode.
+        $null = $proc.Handle
+        [void]$script:ObservedPids.Add([int]$proc.Id)
+        $script:ObservedImages[[int]$proc.Id] = [IO.Path]::GetFileName($Exe)
+        while (-not $proc.HasExited) {
+            Note-Tree ([int]$proc.Id)
+            Start-Sleep -Milliseconds 20
+        }
+        $proc.WaitForExit()
+        Note-Tree ([int]$proc.Id)
+        $proc.Refresh()
+    }
     if ($proc.ExitCode -ne 0) {
         $err = ''
         if (Test-Path -LiteralPath $stderr) { $err = [IO.File]::ReadAllText($stderr) }
@@ -398,6 +729,13 @@ try {
         Write-Output 'zero-network: windows pktmon process filter and firewall failure audit saw no packet and no blocked connection from scan, index, or search'
     } else {
         Write-Output 'zero-network: pktmon filter add has no process-name on this image, so the observer is the firewall audit'
+        # The kernel ETW canary runs before the canary block rule, so a send the
+        # firewall would drop at connect time still reaches the TCP/IP stack.
+        $script:CanaryNotes = @()
+        $script:TraceMode = ''
+        $script:TraceKeywords = ''
+        Invoke-TracedCanary (Join-Path $work 'kernel-canary.etl')
+        Write-Output "zero-network: kernel ETW mode $($script:TraceMode) $($script:TraceKeywords)"
         $powershell = (Get-Process -Id $PID).Path
         $loopbackRuleNote = ''
         try {
@@ -408,6 +746,7 @@ try {
         }
         Enable-FailureAudit 'Filtering Platform Connection'
         Enable-FailureAudit 'Filtering Platform Packet Drop'
+        Start-Sleep -Seconds 1
         $canaryStart = (Get-Date).AddSeconds(-2)
         $canaryNotes = @(Invoke-Canary)
         $canaryEvents = @()
@@ -462,7 +801,7 @@ $sample
         [void](Add-BlockRule $perl.Source $null)
         Start-Sleep -Seconds 1
         $cleanStart = Get-Date
-        Invoke-ObservedCommands
+        Invoke-TracedCommands (Join-Path $work 'kernel-clean.etl')
         $cleanEvents = @()
         for ($attempt = 0; $attempt -lt 5; $attempt++) {
             Start-Sleep -Seconds 1
@@ -476,26 +815,14 @@ $sample
         }
         Assert-SourceUnchanged
         Write-Output "zero-network: firewall audit saw $($sawExternal.Count) blocked connect(s) to 203.0.113.5 and $($sawDns.Count) blocked DNS send(s) to 203.0.113.5 port 53"
-        if ($sawLoopbackExternal.Count -gt 0) {
-            Write-Output 'zero-network: firewall audit saw a connect from 127.0.0.1 toward 203.0.113.5'
-        } else {
-            Write-Output @"
-zero-network: a connect from a 127.0.0.1 bind toward 203.0.113.5 produced no Filtering Platform event.
-Socket result: $($canaryNotes -join '; ')
-pktmon cannot attribute that attempt. pktmon filter add on this image:
-$probeText
-"@
-        }
-        if ($sawLoopbackDns.Count -gt 0) {
-            Write-Output 'zero-network: firewall audit saw a DNS send to 127.0.0.1 port 53'
-        } else {
-            $loopbackWhy = 'Windows Firewall does not classify loopback destinations, and pktmon has no process filter to attribute one.'
+        if ($sawLoopbackDns.Count -eq 0) {
+            $loopbackWhy = 'Windows Firewall does not classify a loopback destination.'
             if ($loopbackRuleNote) {
                 $loopbackWhy = "The firewall refused a loopback remote address ($loopbackRuleNote). $loopbackWhy"
             }
-            Write-Output "zero-network: a UDP send to 127.0.0.1 port 53 produced no Filtering Platform event. $loopbackWhy"
+            Write-Output "zero-network: $loopbackWhy The kernel ETW session is the observer for 127.0.0.1."
         }
-        Write-Output 'zero-network: windows firewall failure audit saw no connection from scan, index, or search'
+        Write-Output 'zero-network: windows kernel ETW and firewall failure audit saw no connection from scan, index, or search'
     }
 } finally {
     Clear-Pktmon
@@ -506,6 +833,13 @@ $probeText
     $ErrorActionPreference = 'Continue'
     foreach ($sub in $script:AuditsEnabled) {
         & auditpol /set /subcategory:"$sub" /failure:disable 2>&1 | Out-Null
+    }
+    & logman stop $script:TraceSession -ets 2>&1 | Out-Null
+    if ($script:KernelLoggerStarted) {
+        & logman stop 'NT Kernel Logger' -ets 2>&1 | Out-Null
+    }
+    if ($script:AnalyticEnabled) {
+        & wevtutil sl 'Microsoft-Windows-Kernel-Network/Analytic' /e:false /q:true 2>&1 | Out-Null
     }
     $ErrorActionPreference = $restorePreference
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
