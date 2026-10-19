@@ -270,7 +270,19 @@ fn id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
     Some((meta.dev(), meta.ino()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::windows::fs::MetadataExt;
+    // `file_index` is still unstable. A hard link shares the creation
+    // FILETIME of the original, so that time is the identity.
+    let created = meta.creation_time();
+    if created == 0 {
+        return None;
+    }
+    Some((0, created))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn id_of(_meta: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
