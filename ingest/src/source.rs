@@ -120,6 +120,20 @@ impl SourceRoot {
         Ok(())
     }
 
+    /// Refuse `dest` when it resolves to this root or inside it. Unlike
+    /// [`Self::refuse_destination`] this does not look for hard links, so it
+    /// fits a directory this process creates for its own files.
+    pub(crate) fn refuse_inside(&self, dest: &Path) -> Result<(), IngestError> {
+        let resolved = resolve_dest(dest)?;
+        if path_is_inside(&self.canonical, &resolved) {
+            return Err(IngestError::DestinationInsideSource {
+                destination: dest.display().to_string(),
+                source_tree: self.canonical.display().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn ensure_inside(&self, path: &Path) -> Result<(), IngestError> {
         let resolved = path
             .canonicalize()
@@ -209,7 +223,7 @@ fn directory_is_at_or_before(relative: &str, after: &str) -> bool {
     !after.starts_with(&prefix) && prefix.as_str() < after
 }
 
-fn cmp_walk(
+pub(crate) fn cmp_walk(
     left_name: &str,
     left_dir: bool,
     right_name: &str,

@@ -1,0 +1,81 @@
+name: library scale
+
+# Times albumen-mcp on a synthetic 380,000-item library on each desktop OS:
+# the first index build, cold start, time to first answer, search p50/p95
+# over 200 fixed queries, and peak memory. The library
+# is generated in the job by scripts/library-scale.py. Nothing is committed
+# and no real photo is read. Report only: a number that misses its target is
+# written to the job summary and does not fail the job.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/library-scale.yml"
+      - "scripts/library-scale.py"
+      - "mcp/**"
+      - "ingest/**"
+      - "Cargo.lock"
+  workflow_dispatch:
+    inputs:
+      items:
+        description: "Library size"
+        default: "380000"
+
+permissions:
+  contents: read
+
+jobs:
+  library-scale:
+    name: library scale (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Search reads the saved index, so a run is generation plus one index
+    # build plus 201 searches.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build albumen-mcp
+        run: cargo build --release --locked -p albumen-mcp
+
+      - name: Smoke run at 2,000 items
+        run: |
+          python scripts/library-scale.py \
+            --binary "target/release/albumen-mcp$([ "$RUNNER_OS" = Windows ] && echo .exe)" \
+            --library "${RUNNER_TEMP}/library-smoke" --index-dir "${RUNNER_TEMP}/index-smoke" --items 2000 --leg "${{ matrix.os }}-smoke"
+
+      - name: Generate and time the full library
+        env:
+          ITEMS: ${{ github.event.inputs.items || '380000' }}
+        run: |
+          python scripts/library-scale.py \
+            --binary "target/release/albumen-mcp$([ "$RUNNER_OS" = Windows ] && echo .exe)" \
+            --library "${RUNNER_TEMP}/library-scale" --index-dir "${RUNNER_TEMP}/index-scale" --items "${ITEMS}" \
+            --leg "${{ matrix.os }}" --json "${RUNNER_TEMP}/library-scale.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: library-scale-${{ matrix.os }}
+          path: ${{ runner.temp }}/library-scale.json
+          if-no-files-found: ignore
