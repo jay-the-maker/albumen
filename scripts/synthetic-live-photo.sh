@@ -180,7 +180,7 @@ exiftool -overwrite_original \
 # will store one that already has the Apple iOS header and an IFD at byte 14.
 # Tag 0x0011 is ContentIdentifier. The string offset is from the start of the
 # block: 14 bytes of header plus an 18-byte IFD.
-"$PY" - "$CONTENT_ID" "$work/apple-makernote.bin" <<'PY'
+"$PY" - "$CONTENT_ID" "$(native "$work/apple-makernote.bin")" <<'PY'
 import struct, sys
 text = sys.argv[1].encode("ascii") + b"\x00"
 entry = struct.pack(">HHII", 0x0011, 2, len(text), 32)
