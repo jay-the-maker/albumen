@@ -323,6 +323,8 @@ jobs:
         env:
           ALBUMEN_THROUGHPUT_LEG: ${{ matrix.label }}
           ALBUMEN_THROUGHPUT_DIR: ${{ github.workspace }}/throughput-data
+          # Measurement only: alternate raw-first and import-first rounds.
+          ALBUMEN_THROUGHPUT_ORDER: alternate
         run: |
           df -h "${GITHUB_WORKSPACE}" /tmp || true
           # The corpus is 5 GB of sources plus 5 GB of destination. ubuntu-26.04
