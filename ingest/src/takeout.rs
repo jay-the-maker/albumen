@@ -879,7 +879,7 @@ fn display_name(path: &Path) -> String {
     file_name_str(path).unwrap_or_else(|_| path.display().to_string())
 }
 
-fn dos_to_system_time(dt: &zip::DateTime) -> Option<SystemTime> {
+pub(crate) fn dos_to_system_time(dt: &zip::DateTime) -> Option<SystemTime> {
     let days = days_from_civil(
         i32::from(dt.year()),
         i32::from(dt.month()),

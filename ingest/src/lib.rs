@@ -13,8 +13,10 @@ mod checksum;
 mod discover;
 mod error;
 mod export;
+mod icloud;
 mod local;
 mod mtime;
+mod photos_library;
 mod rclone;
 mod s3;
 mod scan;
@@ -28,6 +30,7 @@ pub use export::{
     export_tree, format_manifest, parse_manifest, verify_tree, walk_sorted, write_manifest,
     DirectoryTree, ExportDest, ManifestEntry, Placed, WalkControl,
 };
+pub use icloud::{import_icloud, IcloudReport};
 pub use local::{copy_verify_file, LocalStore};
 pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};

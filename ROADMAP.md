@@ -8,6 +8,10 @@ Albumen is early. This list is the work that is not in the tree yet. The ingest 
 
 Shipped as `albumen import-takeout`. Split zip and tgz parts are streamed read-only, each original is `copy_verify`'d, and Takeout JSON stays byte-for-byte beside the original. See [docs/importers/takeout.md](docs/importers/takeout.md).
 
+## iCloud Photos
+
+Shipped as `albumen import-icloud`. A multi-part download (zip parts plus Photo Details CSVs), a Photos export, or a copied Photos library is read-only. Originals, edited versions, Live Photo pairs, and AAE/XMP sidecars are `copy_verify`'d. CSVs stay byte-for-byte. Album, favorite, and caption metadata is a sidecar export from `Photos.sqlite` opened `mode=ro&immutable=1`. See [docs/importers/icloud.md](docs/importers/icloud.md).
+
 ## Export everything
 
 Shipped as `albumen export` and `albumen verify-manifest`. The command copy-verifies the library, sidecars, and pairs to a directory or `s3://` prefix, writes a SHA-256 manifest, and can be run again without overwriting. See the README.

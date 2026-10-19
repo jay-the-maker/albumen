@@ -42,6 +42,7 @@ Checksum verification, write-once mtime, and the refusal to overwrite a differen
 - The export manifest. `albumen export` writes one line per file because the manifest is the whole tree. Search and browse do not use that listing.
 - Pair discovery reads the parent directory for a same-stem companion. It does not cap how many files may sit there.
 - Takeout import. Zip and tgz members are streamed. There is no compiled cap on part count, member count, or member size. The 1 MiB copy buffer is the hashing buffer. Rejecting `..` and absolute member paths is the filename safety bound.
+- iCloud Photos import. A directory is walked one folder at a time, and an archive is streamed. There is no compiled cap on part count, file count, or file size. The 1 MiB copy buffer and the 8 KiB sidecar scan buffer are hashing and search windows. Photos library metadata is read one asset at a time. Rejecting `..` and absolute member paths is the filename safety bound. Opening `Photos.sqlite` with `mode=ro&immutable=1` is what keeps the library from being rewritten.
 
 ## Scale test
 

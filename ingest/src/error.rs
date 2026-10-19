@@ -124,6 +124,17 @@ pub enum IngestError {
         archives_unchanged: bool,
         report: String,
     },
+
+    #[error(
+        "icloud reconciliation failed: count_in {count_in} count_out {count_out} mismatched {mismatched} sources_unchanged {sources_unchanged}; report {report}"
+    )]
+    IcloudReconciliation {
+        count_in: u64,
+        count_out: u64,
+        mismatched: u64,
+        sources_unchanged: bool,
+        report: String,
+    },
 }
 
 impl IngestError {
