@@ -32,6 +32,8 @@ use crate::error::IngestError;
 #[derive(Debug, Clone)]
 pub struct SourceRoot {
     canonical: PathBuf,
+    /// The path this root was opened from, as given.
+    opened: PathBuf,
 }
 
 impl SourceRoot {
@@ -43,10 +45,11 @@ impl SourceRoot {
                 std::io::Error::new(ErrorKind::NotFound, "source does not exist"),
             ));
         }
-        let canonical = path
-            .canonicalize()
-            .map_err(|err| IngestError::io(path, err))?;
-        Ok(Self { canonical })
+        let canonical = canonical_of(path).map_err(|err| IngestError::io(path, err))?;
+        Ok(Self {
+            canonical,
+            opened: path.to_path_buf(),
+        })
     }
 
     pub fn canonical(&self) -> &Path {
@@ -75,8 +78,20 @@ impl SourceRoot {
         if meta.file_type().is_symlink() {
             return Err(IngestError::Symlink(path.to_path_buf()));
         }
-        self.ensure_inside(path)?;
+        // A plain name directly in the folder this root was opened from,
+        // that is not a symlink, resolves to that name in the canonical
+        // root. Anything else is resolved in full.
+        if !self.is_direct_child(path) {
+            self.ensure_inside(path)?;
+        }
         Ok(meta)
+    }
+
+    fn is_direct_child(&self, path: &Path) -> bool {
+        let mut parts = path.components();
+        matches!(parts.next_back(), Some(std::path::Component::Normal(_)))
+            && parts.as_path() == self.opened.as_path()
+            && !self.opened.as_os_str().is_empty()
     }
 
     /// Stat a probed sibling. Missing paths and symlinks are `None`.
@@ -121,8 +136,12 @@ impl SourceRoot {
     /// answer it gives alone.
     pub fn refuse_destinations(&self, dests: &[&Path]) -> Result<(), IngestError> {
         let lookups = Lookups::default();
+        // The source walk depends only on the destination identities it
+        // looks for. A file and its new parent directory usually give the
+        // same identities, so one walk answers both.
+        let mut walked: Option<(DestIds, bool)> = None;
         for dest in dests {
-            if destination_aliases(self, dest, &lookups)? {
+            if destination_aliases(self, dest, &lookups, &mut walked)? {
                 return Err(IngestError::DestinationInsideSource {
                     destination: dest.display().to_string(),
                     source_tree: self.canonical.display().to_string(),
@@ -322,12 +341,21 @@ fn destination_aliases(
     root: &SourceRoot,
     dest: &Path,
     lookups: &Lookups,
+    walked: &mut Option<(DestIds, bool)>,
 ) -> Result<bool, IngestError> {
     let resolved = resolve_dest(dest)?;
     if path_is_inside(&root.canonical, &resolved, lookups) {
         return Ok(true);
     }
-    hardlink_aliases(root, dest, lookups)
+    let ids = dest_ids(root, dest, lookups)?;
+    if let Some((seen, found)) = walked.as_ref() {
+        if *seen == ids {
+            return Ok(*found);
+        }
+    }
+    let found = hardlink_aliases(root, &ids)?;
+    *walked = Some((ids, found));
+    Ok(found)
 }
 
 /// `dest` is `root` or a path under it.
@@ -442,9 +470,8 @@ fn resolve_dest(dest: &Path) -> Result<PathBuf, IngestError> {
     let mut cursor = dest;
     loop {
         if cursor.exists() {
-            let mut resolved = cursor
-                .canonicalize()
-                .map_err(|err| IngestError::io(&cursor, err))?;
+            let mut resolved =
+                canonical_of(&cursor).map_err(|err| IngestError::io(&cursor, err))?;
             for part in missing.iter().rev() {
                 resolved.push(part);
             }
@@ -476,12 +503,12 @@ fn resolve_dest(dest: &Path) -> Result<PathBuf, IngestError> {
     }
 }
 
-fn hardlink_aliases(
-    root: &SourceRoot,
-    dest: &Path,
-    lookups: &Lookups,
-) -> Result<bool, IngestError> {
-    let (interesting, only_dirs) = dest_ids(root, dest, lookups)?;
+/// Identities of a destination and its existing ancestors, and whether all
+/// of them are directories.
+type DestIds = (Vec<(u64, u64)>, bool);
+
+fn hardlink_aliases(root: &SourceRoot, ids: &DestIds) -> Result<bool, IngestError> {
+    let (interesting, only_dirs) = (&ids.0, ids.1);
     if interesting.is_empty() {
         return Ok(false);
     }
@@ -598,6 +625,56 @@ fn id_of(_meta: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
+/// Remembered canonical paths, by the path as given, with the device and
+/// inode it led to.
+#[cfg(unix)]
+type Resolved = std::collections::HashMap<PathBuf, ((u64, u64), PathBuf)>;
+
+/// `path.canonicalize()`, remembered on this thread for absolute paths.
+///
+/// An import resolves the same source folder and destination folder once
+/// per file. On Unix a remembered answer is used only while `path` still
+/// leads to the same directory (device and inode) it led to when it was
+/// resolved, so a folder that was moved or replaced, or a symlink that
+/// now points elsewhere, is resolved again.
+fn canonical_of(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        thread_local! {
+            static RESOLVED: std::cell::RefCell<Resolved> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        if path.is_absolute() {
+            let meta = fs::metadata(path)?;
+            let id = (meta.dev(), meta.ino());
+            if let Some(found) = RESOLVED.with(|cache| {
+                cache
+                    .borrow()
+                    .get(path)
+                    .filter(|(seen, _)| *seen == id)
+                    .map(|(_, canonical)| canonical.clone())
+            }) {
+                return Ok(found);
+            }
+            let canonical = path.canonicalize()?;
+            let resolved = fs::metadata(&canonical)?;
+            // Remember it only when nothing moved while it was resolved.
+            if (resolved.dev(), resolved.ino()) == id {
+                RESOLVED.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    if cache.len() >= 1024 {
+                        cache.clear();
+                    }
+                    cache.insert(path.to_path_buf(), (id, canonical.clone()));
+                });
+            }
+            return Ok(canonical);
+        }
+    }
+    path.canonicalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +703,114 @@ mod tests {
             assert_eq!(sha256_file(&path).unwrap(), before_hash, "{relative}");
             assert_eq!(mtime_of(&path).unwrap(), before_mtime, "{relative}");
         }
+    }
+
+    #[cfg(unix)]
+    fn tmp_dirs() -> (crate::test_support::Tmp, PathBuf, PathBuf) {
+        let tmp = crate::test_support::Tmp::new();
+        let base = tmp.path().canonicalize().unwrap();
+        let library = base.join("library");
+        let elsewhere = base.join("elsewhere");
+        fs::create_dir_all(library.join("album")).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(library.join("album/a.jpg"), b"a").unwrap();
+        (tmp, library, elsewhere)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_opened_through_a_symlinked_parent_resolves_to_its_target() {
+        let (_tmp, library, elsewhere) = tmp_dirs();
+        let link = elsewhere.join("via-link");
+        std::os::unix::fs::symlink(library.join("album"), &link).unwrap();
+        for _ in 0..2 {
+            // The second open is answered from the remembered resolution.
+            let root = SourceRoot::open(&link).unwrap();
+            assert_eq!(root.canonical(), library.join("album"));
+            assert!(root.open_read(&link.join("a.jpg")).is_ok());
+            assert!(root.refuse_destination(&link.join("new")).is_err());
+            assert!(root.refuse_destination(&elsewhere.join("out")).is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_remembered_root_is_resolved_again_when_its_path_changes() {
+        let (_tmp, library, elsewhere) = tmp_dirs();
+        let link = elsewhere.join("moving");
+        std::os::unix::fs::symlink(library.join("album"), &link).unwrap();
+        assert_eq!(
+            SourceRoot::open(&link).unwrap().canonical(),
+            library.join("album")
+        );
+        fs::remove_file(&link).unwrap();
+        fs::create_dir(elsewhere.join("other")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("other"), &link).unwrap();
+        assert_eq!(
+            SourceRoot::open(&link).unwrap().canonical(),
+            elsewhere.join("other")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_reached_through_a_symlink_into_the_source_is_refused() {
+        let (_tmp, library, elsewhere) = tmp_dirs();
+        let root = SourceRoot::open(&library.join("album")).unwrap();
+        let into = elsewhere.join("into-source");
+        std::os::unix::fs::symlink(&library, &into).unwrap();
+        for _ in 0..2 {
+            let dest_dir = into.join("album");
+            let dest = dest_dir.join("b.jpg");
+            assert!(root.refuse_destinations(&[&dest_dir, &dest]).is_err());
+            assert!(root
+                .refuse_destinations(&[&into.join("album/new/b.jpg")])
+                .is_err());
+        }
+        // A destination beside the source, not inside it, is allowed.
+        let beside = into.join("beside");
+        assert!(root
+            .refuse_destinations(&[&beside, &beside.join("b.jpg")])
+            .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_in_the_root_is_still_refused() {
+        let (_tmp, library, elsewhere) = tmp_dirs();
+        fs::write(elsewhere.join("outside.jpg"), b"o").unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("outside.jpg"), library.join("album/l.jpg"))
+            .unwrap();
+        let root = SourceRoot::open(&library.join("album")).unwrap();
+        assert!(matches!(
+            root.open_read(&library.join("album/l.jpg")),
+            Err(IngestError::Symlink(_))
+        ));
+        // A path that leaves the root through `..` is resolved in full.
+        assert!(root
+            .open_read(&library.join("album/../album/a.jpg"))
+            .is_ok());
+        assert!(root.open_read(&elsewhere.join("outside.jpg")).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_destination_through_the_data_volume_firmlink_is_refused() {
+        // /System/Volumes/Data/... and /... are one directory on macOS.
+        let (_tmp, library, _elsewhere) = tmp_dirs();
+        let data = Path::new("/System/Volumes/Data");
+        let through = data.join(library.strip_prefix("/").unwrap());
+        if !through.exists() {
+            return;
+        }
+        let root = SourceRoot::open(&library.join("album")).unwrap();
+        for _ in 0..2 {
+            let dest_dir = through.join("album");
+            assert!(root
+                .refuse_destinations(&[&dest_dir, &dest_dir.join("b.jpg")])
+                .is_err());
+        }
+        let root = SourceRoot::open(&through.join("album")).unwrap();
+        assert!(root.refuse_destinations(&[&library.join("album")]).is_err());
     }
 }
