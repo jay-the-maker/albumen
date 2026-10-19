@@ -171,6 +171,16 @@ jobs:
       - name: Prove the default library mount cannot change originals
         run: scripts/check-library-mount.sh albumen-mcp:ci
 
+  mcpb:
+    name: mcpb validate and pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pack a stub bundle with the official mcpb CLI
+        run: scripts/pack-mcpb.sh --self-test
+
   bench:
     name: performance regression
     runs-on: ubuntu-24.04

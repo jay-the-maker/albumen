@@ -8,7 +8,7 @@ The default registry mount is `type=bind,src={library_path},dst=/library,readonl
 
 `.github/workflows/publish-mcp.yml` is the publish path. It runs on a `v*` tag, pushes that image with `GITHUB_TOKEN`, then runs `mcp-publisher login github-oidc` and `mcp-publisher publish`. The tag, `server.json`, and `mcp/Cargo.toml` must be the same version. Do not publish by hand.
 
-`glama.json` records the Glama maintainer. It is not a submission. Smithery, PulseMCP, mcp.so, and the `modelcontextprotocol/servers` list are not submitted from this repository.
+`glama.json` records the Glama maintainer. It is not a submission. Smithery, PulseMCP, mcp.so, and the `modelcontextprotocol/servers` list are not submitted from this repository. The MCP Bundle on the GitHub release is documented in [mcpb.md](mcpb.md). The release workflow does not publish that bundle to Smithery.
 
 ## Tools
 

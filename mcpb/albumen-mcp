@@ -1,0 +1,26 @@
+#!/bin/sh
+# Pick the albumen-mcp binary for this machine and exec it.
+# Arguments come from the host. This script does not add any.
+set -eu
+dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+os=$(uname -s)
+arch=$(uname -m)
+case "$os:$arch" in
+  Linux:x86_64)
+    bin=albumen-mcp-linux-x86_64
+    ;;
+  Linux:aarch64|Linux:arm64)
+    bin=albumen-mcp-linux-aarch64
+    ;;
+  Darwin:arm64)
+    bin=albumen-mcp-darwin-arm64
+    ;;
+  Darwin:x86_64)
+    bin=albumen-mcp-darwin-x86_64
+    ;;
+  *)
+    echo "albumen-mcp: no binary for $os $arch" >&2
+    exit 1
+    ;;
+esac
+exec "$dir/$bin" "$@"

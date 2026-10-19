@@ -1,0 +1,57 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "albumen",
+  "display_name": "Albumen",
+  "version": "0.0.0",
+  "description": "Search and browse an Albumen library. The library stays read-only. Export and upload are off.",
+  "long_description": "Albumen reads originals and leaves their bytes, names, and metadata as they are. This bundle asks for a library directory and starts the server against that directory. Search and browse are the tools. Export and upload stay off. There is no delete tool.",
+  "author": {
+    "name": "jay-the-maker",
+    "url": "https://github.com/jay-the-maker"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jay-the-maker/albumen"
+  },
+  "homepage": "https://github.com/jay-the-maker/albumen",
+  "documentation": "https://github.com/jay-the-maker/albumen/blob/main/docs/mcpb.md",
+  "support": "https://github.com/jay-the-maker/albumen/issues",
+  "license": "Apache-2.0",
+  "keywords": ["photos", "library", "read-only"],
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"]
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "server/albumen-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/albumen-mcp",
+      "args": ["--library", "${user_config.library}"],
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/albumen-mcp-win32-x86_64.exe",
+          "args": ["--library", "${user_config.library}"]
+        }
+      }
+    }
+  },
+  "user_config": {
+    "library": {
+      "type": "directory",
+      "title": "Library",
+      "description": "Directory of originals. Albumen reads this directory and does not modify it.",
+      "required": true
+    }
+  },
+  "tools": [
+    {
+      "name": "search",
+      "description": "Read the library. Filter on path, capture date, camera, lens, GPS, keyword, and caption."
+    },
+    {
+      "name": "browse",
+      "description": "List files under a relative prefix. Reads only."
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+# The filename stays macos-binaries.yml. Keyless cosign certificates name this
+# file, and docs/release-verify.md matches that path.
 name: macos-binaries
 
 on:
@@ -6,7 +8,7 @@ on:
       release:
         description: GitHub release tag to attach
         required: true
-        default: v0.1.0
+        default: v0.1.1
   push:
     tags: ["v*"]
 
@@ -77,5 +79,116 @@ jobs:
             albumen-mcp.bundle \
             albumen-receive.bundle \
             albumen-macos-arm64.tar.gz.bundle \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  mcp-binary:
+    name: albumen-mcp ${{ matrix.binary }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: albumen-mcp-linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: albumen-mcp-linux-aarch64
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: albumen-mcp-win32-x86_64.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            binary: albumen-mcp-win32-aarch64.exe
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            binary: albumen-mcp-darwin-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: albumen-mcp-darwin-x86_64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build albumen-mcp
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/albumen"
+          export CARGO_INCREMENTAL=0
+          export CARGO_PROFILE_RELEASE_INCREMENTAL=false
+          export CARGO_PROFILE_RELEASE_DEBUG=false
+          export CARGO_PROFILE_RELEASE_STRIP=symbols
+          cargo build --release --locked --target "$TARGET" -p albumen-mcp
+
+      - name: Stage the binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          bin="target/${TARGET}/release/albumen-mcp"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            bin="${bin}.exe"
+          fi
+          test -f "$bin"
+          cp "$bin" "$BINARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+
+  mcpb:
+    name: albumen-mcp.mcpb
+    needs: mcp-binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: mcp-bins
+          pattern: albumen-mcp-*
+          merge-multiple: true
+
+      - uses: sigstore/cosign-installer@v3.8.2
+
+      - name: Validate, pack, and checksum the MCPB
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release || github.ref_name }}
+        run: |
+          version=${TAG#v}
+          scripts/pack-mcpb.sh "$version" mcp-bins albumen-mcp.mcpb
+
+      - name: Sign the MCPB
+        run: cosign sign-blob --yes --bundle albumen-mcp.mcpb.bundle albumen-mcp.mcpb
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: albumen-mcp.mcpb
+
+      - name: Upload the MCPB to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release || github.ref_name }}
+        run: |
+          gh release upload "$TAG" \
+            albumen-mcp.mcpb \
+            albumen-mcp.mcpb.bundle \
+            SHA256SUMS \
             --repo "${{ github.repository }}" \
             --clobber

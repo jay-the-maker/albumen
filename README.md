@@ -54,7 +54,7 @@ docker build -t albumen-mcp .
 docker run --rm -i --mount type=bind,src="$PWD/library",dst=/library,readonly albumen-mcp
 ```
 
-That mount is read-only. A writable directory for opt-in export or upload is a separate mount at `/destination`, not the library of originals. Tag `v0.1.1` publishes `ghcr.io/jay-the-maker/albumen-mcp:0.1.1` and the [server.json](server.json) entry `io.github.jay-the-maker/albumen` to the MCP Registry. [glama.json](glama.json) names the maintainer for Glama. This repository does not submit Glama, Smithery, PulseMCP, or mcp.so by itself.
+That mount is read-only. A writable directory for opt-in export or upload is a separate mount at `/destination`, not the library of originals. Tag `v0.1.1` publishes `ghcr.io/jay-the-maker/albumen-mcp:0.1.1` and the [server.json](server.json) entry `io.github.jay-the-maker/albumen` to the MCP Registry. [glama.json](glama.json) names the maintainer for Glama. This repository does not submit Glama, Smithery, PulseMCP, or mcp.so by itself. The desktop bundle and how to check its checksum and signature are in [docs/mcpb.md](docs/mcpb.md). The release workflow does not publish that bundle to Smithery.
 
 ## Ingest core
 

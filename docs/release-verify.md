@@ -27,6 +27,8 @@ gh attestation verify albumen-macos-arm64.tar.gz --repo jay-the-maker/albumen
 
 Repeat `cosign verify-blob` for `albumen-mcp`, `albumen-receive`, and `albumen-macos-arm64.tar.gz`.
 
+The MCP Bundle on the same workflow is `albumen-mcp.mcpb`. Its checksum, keyless signature, and GitHub attestation are in [mcpb.md](mcpb.md). The release asset `SHA256SUMS` lists that bundle. The `SHA256SUMS` inside `albumen-macos-arm64.tar.gz` lists the three macOS binaries.
+
 ## Gatekeeper
 
 Release binaries are checked with the checksum and the keyless signature. Notarization needs a paid Apple Developer Program membership. Gatekeeper will warn when you open the binary. That warning is expected.
