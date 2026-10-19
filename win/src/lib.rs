@@ -113,6 +113,36 @@ pub fn raw_stream_names(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     sys::raw_stream_names(path)
 }
 
+/// User plus kernel CPU time this process has used, from `GetProcessTimes`.
+#[cfg(windows)]
+pub fn process_cpu_time() -> std::io::Result<std::time::Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ticks =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    // FILETIME counts 100-nanosecond intervals.
+    Ok(std::time::Duration::from_nanos(
+        (ticks(kernel) + ticks(user)).saturating_mul(100),
+    ))
+}
+
 #[cfg(not(windows))]
 pub fn raw_stream_names(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     let _ = path;

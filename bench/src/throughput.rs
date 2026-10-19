@@ -44,6 +44,10 @@ pub const DEFAULT_THROUGHPUT_BYTES: u64 = 5_000_000;
 /// Product target for import MB/s divided by raw MB/s. CI prints the ratio
 /// and does not fail below this. See `docs/performance-budgets.md`.
 pub const THROUGHPUT_RATIO_FLOOR: f64 = 0.80;
+/// Product target for import CPU: at most this percent of the machine while
+/// 1,000 photos import. Report only. The definition is
+/// [`ThroughputReport::cpu_percent`].
+pub const CPU_PERCENT_TARGET: f64 = 10.0;
 /// Upper bound on import workers. The pool is also limited by the CPU count
 /// and by the number of files.
 pub const MAX_IMPORT_WORKERS: usize = 8;
@@ -93,6 +97,17 @@ pub struct ThroughputReport {
     pub mismatched: u64,
     pub source_changed: u64,
     pub workers: u64,
+    /// Process CPU time (user plus system, all threads) spent during the
+    /// timed import, in seconds.
+    pub cpu_seconds: f64,
+    /// Logical cores, from `std::thread::available_parallelism`.
+    pub cores: u64,
+    /// `cpu_seconds / (import_seconds * cores) * 100`: the share of the whole
+    /// machine the import used while it ran. 100 means every core was busy
+    /// for the whole import.
+    pub cpu_percent: f64,
+    /// `cpu_seconds * 1000 / files`: CPU seconds per 1,000 imported photos.
+    pub cpu_seconds_per_1000: f64,
 }
 
 impl ThroughputReport {
@@ -144,6 +159,12 @@ impl ThroughputReport {
             "source_changed": self.source_changed,
             "workers": self.workers,
             "reconciled_percent": self.reconciled_percent(),
+            "cpu_seconds": self.cpu_seconds,
+            "cores": self.cores,
+            "cpu_percent": self.cpu_percent,
+            "cpu_seconds_per_1000": self.cpu_seconds_per_1000,
+            "cpu_percent_target": CPU_PERCENT_TARGET,
+            "cpu_percent_met": self.cpu_percent <= CPU_PERCENT_TARGET,
         })
     }
 }
@@ -205,9 +226,14 @@ pub fn measure_throughput(
     fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
     let workers = import_workers(files);
     reset_copy_profile();
+    let cpu_before = process_cpu_time()?;
     let started = Instant::now();
     let (count_out, mismatched, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
     let import_seconds = started.elapsed().as_secs_f64().max(1e-9);
+    let cpu_seconds = process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+    let cores = thread::available_parallelism()
+        .map(|cores| cores.get())
+        .unwrap_or(1) as u64;
     let phases = copy_phases();
     let source_changed = sources_changed(&snaps)?;
     // The destination was created by this process for the measurement. It is
@@ -250,7 +276,26 @@ pub fn measure_throughput(
         mismatched,
         source_changed,
         workers: u64::try_from(workers).unwrap_or(0),
+        cpu_seconds,
+        cores,
+        cpu_percent: cpu_seconds / (import_seconds * cores as f64) * 100.0,
+        cpu_seconds_per_1000: cpu_seconds * 1000.0 / (files as f64),
     })
+}
+
+/// User plus system CPU time of this process, all threads.
+#[cfg(unix)]
+fn process_cpu_time() -> Result<std::time::Duration, String> {
+    let time = rustix::time::clock_gettime(rustix::time::ClockId::ProcessCPUTime);
+    Ok(std::time::Duration::new(
+        u64::try_from(time.tv_sec).unwrap_or(0),
+        u32::try_from(time.tv_nsec).unwrap_or(0),
+    ))
+}
+
+#[cfg(windows)]
+fn process_cpu_time() -> Result<std::time::Duration, String> {
+    albumen_win::process_cpu_time().map_err(|err| format!("GetProcessTimes: {err}"))
 }
 
 fn import_workers(files: u64) -> usize {
@@ -755,6 +800,10 @@ mod tests {
             mismatched: 0,
             source_changed: 0,
             workers: 1,
+            cpu_seconds: 4.0,
+            cores: 4,
+            cpu_percent: 5.6,
+            cpu_seconds_per_1000: 4.0,
         };
         assert!(report.reconciled());
         assert!(!ratio_passes(report.ratio));
@@ -768,6 +817,8 @@ mod tests {
     #[test]
     fn two_small_files_reconcile_and_leave_the_source_unchanged() {
         let report = measure_throughput("test", 2, 8192).unwrap();
+        assert!(report.cpu_seconds >= 0.0 && report.cpu_percent.is_finite());
+        assert!(report.cores >= 1);
         assert!(report.reconciled(), "{report:?}");
         assert_eq!(report.reconciled_percent(), 100.0);
         assert!(report.ratio.is_finite() && report.ratio > 0.0);
