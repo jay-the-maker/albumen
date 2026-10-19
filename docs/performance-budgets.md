@@ -265,3 +265,30 @@ Two thumbnail numbers are budgets, and both are team targets. The 1.0 s ceiling 
 ## Import CPU
 
 The `import throughput` job reports `cpu_percent` for the 1,000-photo import against a 10 percent target. Definition: process CPU time (user plus system, all threads, measured around the timed `copy_verify` import only) divided by (import wall time × logical cores), times 100. 100 means every core was busy for the whole import. CPU time is `CLOCK_PROCESS_CPUTIME_ID` on Linux and macOS and `GetProcessTimes` on Windows; cores are `std::thread::available_parallelism`. The job also prints `cpu_seconds_per_1000`, the CPU seconds spent per 1,000 imported photos. Report only.
+
+### Proposal: CPU seconds per GB in place of `cpu_percent`
+
+Status: a proposal for a team target, not adopted. The team decides it. Until then the 10 percent `cpu_percent` target above stands.
+
+**Why change.** `cpu_percent` divides CPU time by wall time, so it rises when the disk gets faster: the same work finished in half the time scores twice the percent. A run on a slow disk can meet 10 percent without doing less work, and a faster disk can miss it while doing less. The import is mostly fsync-bound, so this effect is large on CI runners.
+
+**Proposed metric.** Process CPU seconds per GB imported (10^9 bytes), per round of the `import throughput` job. It counts the same work as `cpu_percent`: the copy, both SHA-256 passes, the fsyncs, and the read-back. Because it divides by bytes instead of wall time, a faster or slower disk does not move it. CPU seconds per 1,000 photos is the same number scaled by photo size: the job uses 5 MB photos, so 1 s/GB is 5 s per 1,000 photos.
+
+**Proposed target.** ≤ 3.0 CPU seconds per GB on every leg, or ≤ 15 CPU seconds per 1,000 five-megabyte photos. `cpu_percent` would still be printed, as context, without a target.
+
+**Evidence.** CI runs on 2026-10-19. #109 is the per-phase CPU work and #112 carries it onto the pipelined import from #110:
+
+| leg | main ae1cb87 (run 39272133628) s/GB, cpu_percent, MB/s | #112 b453a10 (run 39274872606) s/GB, cpu_percent, MB/s | #109 39bab3a s/GB (before #110) |
+|---|---|---|---|
+| ubuntu-24.04 | 3.44, 36.0%, 418 | 1.86, 9.5%, 206 | 2.17 |
+| ubuntu-26.04 | 3.28, 34.3%, 418 | 2.79, 14.3%, 201 | 2.13 |
+| windows-2025 | 3.24, 17.0%, 217 | 2.93, 16.4%, 224 | 3.68 |
+| macos-14 | 4.47, 56.9%, 376 | 1.93, 34.4%, 547 | 3.38 |
+
+- **The disk drives cpu_percent.**
+  - On ubuntu-24.04 the runner's disk was half as fast in the #112 run, and `cpu_percent` fell from 36% to 9.5%, well past the 46% drop in work per GB.
+  - On macos-14 the import ran 45% faster. Work per GB fell 57%, yet `cpu_percent` stayed at 34%.
+- **How the 3.0 s/GB value was set.**
+  - It is the slowest leg on #112, windows-2025 at 2.93, rounded up to the next half second. Every leg meets it today, and a regression of a few tenths shows.
+  - The floor is the SHA-256 work alone: two passes per GB at each runner's one-thread in-memory rate, 1,498 to 2,155 MB/s with the CPU SHA-256 instructions. That is about 0.9 to 1.3 s/GB, and it stays.
+  - Windows preflight is the largest cost above that floor (4.2 s per 5 GB round) and has a cut in progress.
