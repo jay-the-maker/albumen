@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `albumen export`, `albumen scan`, and `albumen verify-manifest`.
+//! `albumen export`, `albumen import-takeout`, `albumen scan`, and
+//! `albumen verify-manifest`.
 //!
 //! Export is `copy_verify` across a library. It does not modify sources and
-//! it does not overwrite a destination that differs. Scan only reads the
-//! source and writes a JSONL manifest outside that tree.
+//! it does not overwrite a destination that differs. Takeout import streams
+//! zip and tgz parts read-only. Scan only reads the source and writes a JSONL
+//! manifest outside that tree.
 
 // IngestError is the library's error. The CLI prints it; it does not reshape it.
 #![allow(clippy::result_large_err)]
@@ -13,15 +15,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use albumen_ingest::{
-    export_tree, parse_manifest, scan_tree, verify_scan_manifest, verify_tree, write_manifest,
-    DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
+    export_tree, import_takeout, parse_manifest, scan_tree, verify_scan_manifest, verify_tree,
+    write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
 };
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "albumen",
-    about = "Bit-exact photo library export and read-only scan"
+    about = "Bit-exact photo library export, Takeout import, and read-only scan"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -53,6 +55,23 @@ enum Command {
         /// JSONL manifest to write. Must not resolve inside the library.
         #[arg(long)]
         manifest: PathBuf,
+    },
+    /// Copy a Google Takeout zip or tgz download into a library.
+    ///
+    /// Archives are opened read-only and streamed. Each file is copy-verified.
+    /// Takeout JSON stays byte-for-byte beside its original. photoTakenTime
+    /// stays in that sidecar. The command exits non-zero when the
+    /// reconciliation report does not match.
+    ImportTakeout {
+        /// Directory of split .zip and .tgz parts, or one archive.
+        #[arg(long)]
+        from: PathBuf,
+        /// Destination library. Must not be the archive directory.
+        #[arg(long)]
+        to: PathBuf,
+        /// JSONL reconciliation report, outside the archives and the library.
+        #[arg(long)]
+        report: PathBuf,
     },
     /// Hash the exported files, or a scan manifest, and compare them.
     VerifyManifest {
@@ -99,6 +118,17 @@ fn run() -> Result<(), IngestError> {
                 stats.bytes,
                 manifest.display()
             );
+            Ok(())
+        }
+        Command::ImportTakeout { from, to, report } => {
+            let outcome = import_takeout(&from, &to, &report)?;
+            println!(
+                "imported {} files ({} in) to {}",
+                outcome.count_out,
+                outcome.count_in,
+                to.display()
+            );
+            println!("report {}", report.display());
             Ok(())
         }
         Command::VerifyManifest { manifest, against } => {

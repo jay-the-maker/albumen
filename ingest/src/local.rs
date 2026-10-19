@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::checksum::{copy_hashed, sha256_file, to_hex};
@@ -90,6 +91,49 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     drop(output);
 
     let record = finalize_verified(&dest, &filename, &written_hash, mtime)?;
+    guard.armed = false;
+    Ok(record)
+}
+
+/// Stream `reader` into a new file at `dest` and verify it the same way as
+/// [`copy_verify_file`].
+///
+/// The destination is created with `create_new`. An existing path is left
+/// untouched. On a hash or mtime mismatch, only that new file is removed.
+pub(crate) fn copy_verify_reader<R: Read>(
+    reader: &mut R,
+    source_label: &Path,
+    dest: &Path,
+    mtime: std::time::SystemTime,
+) -> Result<VerifiedObject, IngestError> {
+    let filename = file_name_str(dest)?;
+    check_filename(&filename)?;
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|err| IngestError::io(parent, err))?;
+        }
+    }
+    if fs::symlink_metadata(dest).is_ok() {
+        return Err(IngestError::AlreadyExists {
+            filename: filename.clone(),
+            destination: dest.display().to_string(),
+        });
+    }
+
+    let mut guard = RemoveOnDrop {
+        path: dest.to_path_buf(),
+        armed: true,
+    };
+    let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .map_err(|err| IngestError::io(dest, err))?;
+    let written_hash = copy_hashed(reader, &output, source_label, dest)?;
+    sync_file(&output, dest)?;
+    drop(output);
+
+    let record = finalize_verified(dest, &filename, &written_hash, mtime)?;
     guard.armed = false;
     Ok(record)
 }

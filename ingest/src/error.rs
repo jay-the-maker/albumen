@@ -113,6 +113,17 @@ pub enum IngestError {
 
     #[error("scan manifest drift: {count} difference(s)")]
     ManifestDrift { count: u64 },
+
+    #[error(
+        "takeout reconciliation failed: count_in {count_in} count_out {count_out} mismatched {mismatched} archives_unchanged {archives_unchanged}; report {report}"
+    )]
+    TakeoutReconciliation {
+        count_in: u64,
+        count_out: u64,
+        mismatched: u64,
+        archives_unchanged: bool,
+        report: String,
+    },
 }
 
 impl IngestError {

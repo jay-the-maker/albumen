@@ -92,6 +92,16 @@ albumen verify-manifest --manifest ./library-manifest.txt --against s3://my-buck
 
 The manifest lists SHA-256, byte length, and the relative path. `verify-manifest` hashes the destination bytes and fails if a file is missing, extra, or different. S3 uses the same `ALBUMEN_S3_*` variables as ingest.
 
+## Google Takeout
+
+`albumen import-takeout` streams a Google Takeout download of `.zip` and `.tgz` parts. The archives are opened read-only and are not extracted in place. Each file is `copy_verify`'d. Takeout JSON is kept byte-for-byte next to its original. `photoTakenTime` stays in that sidecar and is not written into the original. The command writes a reconciliation report and exits non-zero unless the count in equals the count out and every SHA-256 matches.
+
+```bash
+albumen import-takeout --from ~/Downloads/takeout --to ~/library --report ~/takeout-report.jsonl
+```
+
+The design note is [docs/importers/takeout.md](docs/importers/takeout.md).
+
 ## Read-only macOS trial
 
 `albumen scan <dir> --manifest <out>` walks a library without opening it for write and records path, size, mtime, SHA-256, pairs, sidecars, and key metadata in a JSONL manifest. The manifest has to resolve outside the library. Run the same command again to resume. `albumen verify-manifest` re-hashes a scan manifest and reports drift. The exact commands for a subset of a large volume are in [docs/trial-macos.md](docs/trial-macos.md).

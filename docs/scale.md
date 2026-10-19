@@ -41,6 +41,7 @@ Checksum verification, write-once mtime, and the refusal to overwrite a differen
 - A directory listing held while that directory is sorted. Page order has to be stable. The bound is the directory the user created, not a number in the source.
 - The export manifest. `albumen export` writes one line per file because the manifest is the whole tree. Search and browse do not use that listing.
 - Pair discovery reads the parent directory for a same-stem companion. It does not cap how many files may sit there.
+- Takeout import. Zip and tgz members are streamed. There is no compiled cap on part count, member count, or member size. The 1 MiB copy buffer is the hashing buffer. Rejecting `..` and absolute member paths is the filename safety bound.
 
 ## Scale test
 

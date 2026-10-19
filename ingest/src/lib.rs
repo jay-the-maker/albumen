@@ -19,6 +19,7 @@ mod rclone;
 mod s3;
 mod scan;
 mod store;
+mod takeout;
 
 pub use checksum::{sha256_file, sha256_hex};
 pub use discover::{discover, Asset, AssetFile, Role};
@@ -35,6 +36,7 @@ pub use store::{
     copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,
     VerifiedObject,
 };
+pub use takeout::{import_takeout, TakeoutReport};
 
 #[cfg(test)]
 mod test_support {
