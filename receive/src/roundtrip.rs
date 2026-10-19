@@ -4,7 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use albumen_ingest::sha256_hex;
+use albumen_ingest::{
+    discover, exiftool_command, export_tree, sha256_hex, DirectoryTree, Role, SourceRoot,
+};
 use russh::client::{self, Handler};
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,6 +16,113 @@ use crate::{listen, Settings};
 
 fn fixtures() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures")
+}
+
+#[tokio::test]
+async fn synthetic_live_photo_survives_the_webdav_receiver() {
+    let generated = tempfile::tempdir().unwrap();
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../scripts/synthetic-live-photo.sh");
+    let bash = bash_program();
+    let output = std::process::Command::new(&bash)
+        .arg(&script)
+        .arg(generated.path())
+        .output()
+        .unwrap_or_else(|err| panic!("run {} {}: {err}", bash.display(), script.display()));
+    assert!(
+        output.status.success(),
+        "synthetic live photo failed via {} (status {:?})\nstdout:\n{}\nstderr:\n{}",
+        bash.display(),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let heic = generated.path().join("IMG_LIVE.heic");
+    let mov = generated.path().join("IMG_LIVE.mov");
+    let heic_bytes = std::fs::read(&heic).unwrap();
+    let mov_bytes = std::fs::read(&mov).unwrap();
+    let heic_sha = sha256_hex(&heic).unwrap();
+    let mov_sha = sha256_hex(&mov).unwrap();
+
+    let root = tempfile::tempdir().unwrap();
+    let listening = listen(
+        Settings {
+            library: root.path().to_path_buf(),
+            user: "camera".into(),
+            password: "roll".into(),
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let webdav = listening.webdav.unwrap();
+    http_put(webdav, "/IMG_LIVE.heic", &heic_bytes, "201", &heic_sha).await;
+    http_put(webdav, "/IMG_LIVE.mov", &mov_bytes, "201", &mov_sha).await;
+
+    let stored_heic = root.path().join("IMG_LIVE.heic");
+    let stored_mov = root.path().join("IMG_LIVE.mov");
+    assert_eq!(sha256_hex(&stored_heic).unwrap(), heic_sha);
+    assert_eq!(sha256_hex(&stored_mov).unwrap(), mov_sha);
+    assert_eq!(std::fs::read(&heic).unwrap(), heic_bytes);
+    let asset = discover(&stored_heic).unwrap();
+    assert_eq!(asset.files().len(), 2);
+    assert_eq!(asset.files()[1].role, Role::Pair);
+    assert_eq!(asset.files()[1].path.file_name().unwrap(), "IMG_LIVE.mov");
+    assert_eq!(
+        identifier(&stored_heic, "XMP-dc:Identifier").as_deref(),
+        Some("A1B2C3D4-E5F6-4071-8A9B-C0D1E2F30405")
+    );
+    assert_eq!(
+        identifier(&stored_mov, "Keys:ContentIdentifier").as_deref(),
+        Some("A1B2C3D4-E5F6-4071-8A9B-C0D1E2F30405")
+    );
+
+    let exported = tempfile::tempdir().unwrap();
+    export_tree(
+        &SourceRoot::open(root.path()).unwrap(),
+        &DirectoryTree::new(exported.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        sha256_hex(&exported.path().join("IMG_LIVE.heic")).unwrap(),
+        heic_sha
+    );
+    assert_eq!(
+        sha256_hex(&exported.path().join("IMG_LIVE.mov")).unwrap(),
+        mov_sha
+    );
+}
+
+fn bash_program() -> std::path::PathBuf {
+    if cfg!(windows) {
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    std::path::PathBuf::from("bash")
+}
+
+fn identifier(path: &std::path::Path, key: &str) -> Option<String> {
+    let output = exiftool_command()
+        .args(["-s3", &format!("-{key}")])
+        .arg(path)
+        .output()
+        .expect("exiftool");
+    assert!(output.status.success(), "{}", path.display());
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 #[tokio::test]
