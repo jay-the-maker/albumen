@@ -4,8 +4,8 @@
 //!
 //! `scripts/synthetic-live-photo.sh` encodes the pixels and asks ExifTool to
 //! write one shared UUID. The movie tag is `Keys:ContentIdentifier`. The still
-//! tag is whatever that script was able to store. Today that is
-//! `XMP-dc:Identifier`, and `tests/fixtures/LICENSES.md` says why.
+//! tag is `Apple:ContentIdentifier`, written as a generated maker-note block.
+//! `tests/fixtures/LICENSES.md` records that block.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use albumen_ingest::{
 use serde_json::{Map, Value};
 
 const CONTENT_ID: &str = "A1B2C3D4-E5F6-4071-8A9B-C0D1E2F30405";
-const HEIC_TAG: &str = "XMP-dc:Identifier";
+const HEIC_TAG: &str = "Apple:ContentIdentifier";
 const MOV_TAG: &str = "Keys:ContentIdentifier";
 const HEIC_NAME: &str = "IMG_LIVE.heic";
 const MOV_NAME: &str = "IMG_LIVE.mov";
@@ -39,7 +39,7 @@ fn synthetic_live_photo_survives_import_and_export() {
     let licenses = fs::read_to_string(repo_path("tests/fixtures/LICENSES.md")).unwrap();
     assert!(licenses.contains(CONTENT_ID));
     assert!(licenses.contains(HEIC_TAG));
-    assert!(licenses.contains("does not create an Apple maker-note block"));
+    assert!(licenses.contains("MakerNoteApple"));
 
     let generated = tempfile::tempdir().unwrap();
     let tag = generate(generated.path());
@@ -52,14 +52,6 @@ fn synthetic_live_photo_survives_import_and_export() {
     let mov_sha = sha256_hex(&mov).unwrap();
     assert_identifier(&heic, HEIC_TAG, CONTENT_ID);
     assert_identifier(&mov, MOV_TAG, CONTENT_ID);
-    assert!(
-        !exif_dump(&heic)
-            .as_object()
-            .unwrap()
-            .keys()
-            .any(|key| key == "ContentIdentifier" || key.ends_with(":ContentIdentifier")),
-        "HEIC gained a ContentIdentifier tag; update LICENSES.md with the tag ExifTool stored"
-    );
     assert_discovered_pair(&heic);
 
     let staged = tempfile::tempdir().unwrap();

@@ -34,7 +34,7 @@ No CC0, CC-BY, or public-domain HEIC plus MOV pair with one shared content ident
 - The heic.fyi CC0 set states that it does not include Live Photo links or Apple maker notes.
 - [stoffis-git/livephoto-check](https://github.com/stoffis-git/livephoto-check) is MIT code. Its repository does not publish the camera-captured HEIC or MOV it describes.
 - Public iPhone Live Photo samples, including the PhotoPrism iPhone X set, have no stated media license. They were not fetched.
-- ExifTool cannot create Apple maker notes, or a QuickTime `Keys:ContentIdentifier`, in a HEIC that does not already have them. Pairing a generated MOV with `exif-gps-date.heic` would not be a Live Photo pair.
+- `-Apple:ContentIdentifier` does not create a maker-note block, so assigning that tag on `exif-gps-date.heic` would not link it to a generated MOV. The synthetic section below writes a generated block instead.
 - [immich-app/test-assets](https://github.com/immich-app/test-assets) is AGPL-3.0. Nothing from it was copied.
 
 ## Synthetic Live Photo generated in CI
@@ -44,10 +44,21 @@ No CC0, CC-BY, or public-domain HEIC plus MOV pair with one shared content ident
 | File | How it is made | Identifier tag |
 | --- | --- | --- |
 | `IMG_LIVE.mov` | ffmpeg `libx264`, one second, no audio | `Keys:ContentIdentifier` |
-| `IMG_LIVE.heic` | ffmpeg `libx265` still, wrapped in a single-item HEIC container by the script | `XMP-dc:Identifier` |
+| `IMG_LIVE.heic` | ffmpeg `libx265` still, wrapped in a single-item HEIC container by the script | `Apple:ContentIdentifier` |
 
-The HEIC tag is `XMP-dc:Identifier` because ExifTool 13.59 does not create an Apple maker-note block or a QuickTime Keys box in a HEIC that lacks them. `-Apple:ContentIdentifier` and `-Keys:ContentIdentifier` update zero files. The script tries those two writes first and keeps `XMP-dc:Identifier` only when they do not stick. Albumen `discover` pairs the still and the movie by filename stem in the same directory. The real-corpus check groups files that share an ExifTool tag named `ContentIdentifier`; that name is on the movie, and the still carries the same UUID under `XMP-dc:Identifier`.
+`-Apple:ContentIdentifier` updates zero files: ExifTool 13.59 does not create an Apple maker-note block from that tag. `-Keys:ContentIdentifier` also updates zero files on this HEIC, because the container has no QuickTime Keys box. The script instead writes a generated block with `-EXIF:MakerNoteApple<=`. The block is `Apple iOS\0`, then `\0\x01MM`, then an IFD at byte 14. The only IFD entry is tag 0x0011, ASCII, and the string sits at offset 32. ExifTool then reports `Apple:ContentIdentifier`. The block is not copied from a camera or from ExifTool's own `t/images/Apple.jpg`. Albumen `discover` pairs the still and the movie by filename stem in the same directory.
 
-## IPTC — not in these license-clean files
+`ingest/tests/real_corpus.rs` reads an ExifTool key named `ContentIdentifier` or ending in `:ContentIdentifier`, groups files in one directory that share that value, and requires `discover` to return the other file as `Role::Pair`. The test returns without reading a corpus when `ALBUMEN_REAL_CORPUS` is unset. CI does not set that variable, and this tree does not contain a device corpus, so that test is not evidence that a camera Live Photo was round-tripped here. The CI pair above is the check that the Apple tag survives import and export.
 
-Neither file above has an IPTC group under ExifTool 13.59 (`-a -G1`). The IPTC Photo Metadata reference JPEG at https://iptc.org/std/photometadata/examples/IPTC-PhotometadataRef-Std2025.1.jpg does contain IPTC, and its copyright notice is `Copyright (Notice) 2025.1 IPTC - www.iptc.org`. That is not CC0, CC-BY, or public domain, so it is not a fixture. The synthetic CC0 JPEG in `fixtures/jpeg-gps/` still carries IPTC through the existing corpus round-trip.
+## IPTC Core generated onto CC0 copies
+
+The downloaded HEIC and ProRAW above still have no IPTC group. The IPTC Photo Metadata reference JPEG at https://iptc.org/std/photometadata/examples/IPTC-PhotometadataRef-Std2025.1.jpg does contain IPTC, and its copyright notice is `Copyright (Notice) 2025.1 IPTC - www.iptc.org`. That is not CC0, CC-BY, or public domain, so it is not a fixture.
+
+`scripts/write-iptc-core.sh` copies `fixtures/jpeg-gps/IMG_0001.jpg` and `fixtures/heic/IMG_0002.heic` and writes IPTC Core with ExifTool 13.59. The originals stay as they were. The copies are committed as `IMG_0010.jpg` and `IMG_0011.heic` because the corpus round-trip stores by filename and must not collide with `IMG_0001.jpg` or `IMG_0002.heic`. The script has to reproduce these SHA-256 values:
+
+| File | SHA-256 |
+| --- | --- |
+| `fixtures/iptc/IMG_0010.jpg` | `2f9307265d29e613457a8b434467cb8c57cfebacb5b15c8d082038cfdafabded` |
+| `fixtures/iptc/IMG_0011.heic` | `c724675f291a91aa073d19ef830d58ff33cb9b8f3fe2511fcbec91d849f0e21b` |
+
+The fields are by-line `Albumen Project`, caption `Synthetic CC0 fixture. Not a photograph.`, keywords `albumen` and `cc0`, city `Fixture City`, country `Fixture Country`, and copyright notice `CC0 1.0 Universal`. `XMP-iptcCore:CountryCode` is `XC` and `XMP-iptcCore:Location` is `Synthetic location`. The same XMP fields are written on both files. A HEIC has no IPTC box, so the HEIC stores the JPEG's IIM records as EXIF `IPTC-NAA`. ExifTool `-a -G1` reports that block in the `IPTC` group and the core namespace as `XMP-iptcCore`. Dates written into the packet are `2012:06:15 10:30:00`, so the bytes do not depend on the clock.

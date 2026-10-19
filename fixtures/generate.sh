@@ -161,10 +161,9 @@ convert -size 320x240 'xc:#8C3A3A' -strip PNG:live-photo/src.png
 heif-enc -q 70 -o live-photo/IMG_0005.heic live-photo/src.png >/dev/null
 rm -f live-photo/src.png
 CONTENT_ID="B4E3C1A0-7F2D-4C8A-9E11-0A1B2C3D4E5F"
-# ExifTool can write EXIF and XMP into a fresh HEIC, but it will not create
-# Apple maker notes or a QuickTime Keys box that is not already there. The
-# MOV carries the real Keys:ContentIdentifier. The still repeats that UUID
-# in XMP so the pair is linked in metadata as well as by filename.
+# -Apple:ContentIdentifier does not create a maker-note directory. The still
+# gets a generated block (header Apple iOS, IFD tag 0x0011 at byte 14) and the
+# same UUID in XMP. The MOV carries Keys:ContentIdentifier.
 exiftool -overwrite_original \
   -Make=Albumen \
   -Model="Fixture Live Photo" \
@@ -175,6 +174,17 @@ exiftool -overwrite_original \
   -ImageDescription="Synthetic CC0 Live Photo still. Pair with IMG_0005.mov." \
   -XMP-dc:Identifier="$CONTENT_ID" \
   live-photo/IMG_0005.heic >/dev/null
+python3 - "$CONTENT_ID" live-photo/apple-makernote.bin <<'PY'
+import struct, sys
+text = sys.argv[1].encode("ascii") + b"\x00"
+entry = struct.pack(">HHII", 0x0011, 2, len(text), 32)
+ifd = struct.pack(">H", 1) + entry + struct.pack(">I", 0)
+open(sys.argv[2], "wb").write(b"Apple iOS\x00\x00\x01MM" + ifd + text)
+PY
+exiftool -overwrite_original -m \
+  -EXIF:MakerNoteApple"<=-" \
+  live-photo/IMG_0005.heic <live-photo/apple-makernote.bin >/dev/null
+rm -f live-photo/apple-makernote.bin
 
 ffmpeg -y -hide_banner -loglevel error \
   -f lavfi -i "color=c=0x8C3A3A:s=320x240:d=1,format=yuv420p" \
@@ -276,9 +286,13 @@ EOF
 # Drop generator leftovers exiftool may leave behind.
 find . -name '*_original' -delete
 
+# IPTC Core is written onto copies of the JPEG and HEIC this script just
+# produced. Another ExifTool version will not match the pinned SHA-256.
+bash "$ROOT/../scripts/write-iptc-core.sh" "$ROOT/iptc"
+
 (
   cd "$ROOT"
-  find jpeg-gps heic raw-jpeg xmp live-photo video motion-photo aae ultra-hdr -type f ! -name 'src.png' -print0 \
+  find jpeg-gps heic raw-jpeg xmp live-photo video motion-photo aae ultra-hdr iptc -type f ! -name 'src.png' -print0 \
     | sort -z \
     | xargs -0 sha256sum
 ) > SHA256SUMS

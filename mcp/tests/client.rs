@@ -450,14 +450,19 @@ fn metadata_search_reads_files_and_sidecars_without_writing() {
     ));
     assert!(!is_error, "{body}");
     let sf = body["files"].as_array().unwrap();
-    assert_eq!(sf.len(), 1);
-    assert_eq!(sf[0]["path"], "jpeg-gps/IMG_0001.jpg");
-    assert_eq!(sf[0]["longitude"], -122.4783);
-    assert!(sf[0]["keywords"]
-        .as_array()
-        .unwrap()
+    let sf_paths: Vec<_> = sf
         .iter()
-        .any(|item| item == "cc0"));
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(sf_paths, vec!["iptc/IMG_0010.jpg", "jpeg-gps/IMG_0001.jpg"]);
+    for file in sf {
+        assert_eq!(file["longitude"], -122.4783);
+        assert!(file["keywords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "cc0"));
+    }
 
     let paths = search_paths(
         &mut client,
@@ -475,15 +480,30 @@ fn metadata_search_reads_files_and_sidecars_without_writing() {
         paths.contains(&"heic/IMG_0002.heic".to_string()),
         "{paths:?}"
     );
+    assert!(
+        paths.contains(&"iptc/IMG_0011.heic".to_string()),
+        "{paths:?}"
+    );
     assert!(paths.contains(&"xmp/IMG_0004.jpg".to_string()), "{paths:?}");
     assert!(paths.contains(&"xmp/IMG_0004.xmp".to_string()), "{paths:?}");
     assert!(
         !paths.contains(&"jpeg-gps/IMG_0001.jpg".to_string()),
         "{paths:?}"
     );
+    assert!(
+        !paths.contains(&"iptc/IMG_0010.jpg".to_string()),
+        "{paths:?}"
+    );
 
     let paths = search_paths(&mut client, 8, json!({"keyword": "cc0"}));
-    assert_eq!(paths, vec!["jpeg-gps/IMG_0001.jpg".to_string()]);
+    assert_eq!(
+        paths,
+        vec![
+            "iptc/IMG_0010.jpg".to_string(),
+            "iptc/IMG_0011.heic".to_string(),
+            "jpeg-gps/IMG_0001.jpg".to_string(),
+        ]
+    );
 
     let paths = search_paths(&mut client, 9, json!({"caption": "sidecar fixture"}));
     assert!(paths.contains(&"xmp/IMG_0004.jpg".to_string()), "{paths:?}");
