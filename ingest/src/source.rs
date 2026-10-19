@@ -415,7 +415,7 @@ fn resolve_dest(dest: &Path) -> Result<PathBuf, IngestError> {
 }
 
 fn hardlink_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError> {
-    let interesting = dest_ids(root, dest)?;
+    let (interesting, only_dirs) = dest_ids(root, dest)?;
     if interesting.is_empty() {
         return Ok(false);
     }
@@ -434,6 +434,17 @@ fn hardlink_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError>
         let read = fs::read_dir(&dir).map_err(|err| IngestError::io(&dir, err))?;
         for entry in read {
             let entry = entry.map_err(|err| IngestError::io(&dir, err))?;
+            // When every id is a directory's, only a directory entry can
+            // match: an inode has one type. The entry type comes from the
+            // directory listing, so files are skipped without a stat.
+            if only_dirs {
+                let kind = entry
+                    .file_type()
+                    .map_err(|err| IngestError::io(entry.path(), err))?;
+                if !kind.is_dir() {
+                    continue;
+                }
+            }
             let path = entry.path();
             let child = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
             if child.file_type().is_symlink() {
@@ -450,13 +461,16 @@ fn hardlink_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError>
     Ok(false)
 }
 
-fn dest_ids(root: &SourceRoot, dest: &Path) -> Result<Vec<(u64, u64)>, IngestError> {
+/// Identities of `dest` and its existing ancestors, and whether all of them
+/// are directories.
+fn dest_ids(root: &SourceRoot, dest: &Path) -> Result<(Vec<(u64, u64)>, bool), IngestError> {
     let mut ids = Vec::new();
+    let mut only_dirs = true;
     let mut cursor = dest.to_path_buf();
     if !cursor.exists() {
         while !cursor.exists() {
             if !cursor.pop() {
-                return Ok(ids);
+                return Ok((ids, only_dirs));
             }
         }
     }
@@ -474,13 +488,14 @@ fn dest_ids(root: &SourceRoot, dest: &Path) -> Result<Vec<(u64, u64)>, IngestErr
         if !meta.file_type().is_symlink() {
             if let Some(id) = id_of(&meta) {
                 ids.push(id);
+                only_dirs &= meta.is_dir();
             }
         }
         if !cursor.pop() {
             break;
         }
     }
-    Ok(ids)
+    Ok((ids, only_dirs))
 }
 
 #[cfg(unix)]
