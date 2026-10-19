@@ -52,6 +52,7 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
             library: root.path().to_path_buf(),
             user: "camera".into(),
             password: "roll".into(),
+            member: None,
         },
         Some("127.0.0.1:0".parse().unwrap()),
         None,

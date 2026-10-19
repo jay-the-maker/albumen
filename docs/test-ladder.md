@@ -50,6 +50,28 @@ Exit: the ignored test passes on the scheduled or manual `macos-14` job and the 
 
 **Planned:** the same generated tree on a Linux runner and on a Windows runner. Those jobs are not in the workflow. Until they are, rung 3 is enforced on macOS only.
 
+## Real-device backup protocol — waiting on Jay's OK, do not run
+
+**Waiting on Jay's OK. Do not run.** This is not a CI job, not a pull-request check, and not the next rung. Nothing in this section runs until Jay approves it in writing.
+
+No Jay phone, no Jay Mac, and no Jay RAID is touched until that approval. The machines in the steps below are not those machines. CI runners and the synthetic libraries in this repository are the only places the workflows run.
+
+First principle: there is no write path to originals, to a source, or to another member's namespace. The phone's camera roll stays where it is. A backup reads it and writes the copy only into that member's own prefix, `members/<that-member-ed25519-pubkey>/`, on storage that is not the source. A receiver or a test harness that would write anywhere else does not start. Bytes, mtime, and sidecars of every other member are compared by SHA-256 before and after and have to match. A source is opened read-only. Leaving the library is `albumen export`, then `albumen verify-manifest`. There is no delete.
+
+Devices, after approval, and only devices that are not Jay's:
+
+- One Android phone, charging, on Wi-Fi, with a camera roll of synthetic items or of copies the owner of that phone made for this run.
+- One iPhone, charging, on Wi-Fi, with the same kind of roll.
+- One receiver on disk that is not a Jay Mac and not a Jay RAID. The library is new, or it is a family library whose other members were seeded with synthetic objects before the run.
+
+Duration: 24 hours or more of wall clock. The clock starts when the first backup is armed and stops only after that window, including time the phone is asleep.
+
+Faults, injected on a schedule that is seeded and written down before the window starts: network drop (the path between the phone and the receiver closes during a PUT), power loss (the phone reboots, or the backup process is killed, during an upload), receiver down (the receiver is not listening), and a SHA-256 mismatch (the receiver answers 201 with a digest that is not the bytes it was sent). Each fault is logged with the seed, the item name, and the time. The same seed has to reproduce the schedule.
+
+What is measured: verified percent against elapsed time, the time at which verified items first reach 99.9 percent, and silent failures. A silent failure is an item that was attempted, is still unverified, and whose filename is absent from the status file and from the backup notification. The run fails if that count is not zero. Original bytes, mtime, and embedded metadata on the phone are compared with the copy that verified. Other members' originals, mtime, and sidecars are byte-identical by SHA-256.
+
+The scheduled CI soak is not this protocol. It does not last 24 hours, it does not reboot a phone, and it does not open a real camera roll.
+
 ## Rung 4 — last rung, owner Mac
 
 The procedure is [trial-macos.md](trial-macos.md).
