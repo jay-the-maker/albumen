@@ -45,7 +45,7 @@ The receiver comes first. With Rust installed, that path is in [friction.md](fri
 4. Grant images, video, and location. That is one system dialog. Denying images or video does not enqueue. Denying location does not start the backup.
 5. Leave the phone on a network.
 
-The endpoint is the WebDAV root, such as `http://192.168.1.20:8080/`. The documented receiver speaks HTTP, so the host allows cleartext to the address you pass. An `https://` endpoint still uses the platform trust store. The password in the extra is the receiver password you chose. It is stored in the Keystore and is not put in the permission request or the WorkManager input.
+The endpoint is the WebDAV root, such as `http://192.168.1.20:8080/`. The documented receiver speaks HTTP, so the host allows cleartext to the address you pass. An `https://` endpoint still uses the platform trust store. `albumen-receive --pair` prints a QR for `albumen-pair://v1`. `Pairing.parse` reads that URI, and `Pairing.pin` compares the certificate SHA-256 with the fingerprint in the code. A mismatch is a sentence on the status path and the copy does not start. The password in the extra is the receiver password you chose. It is stored in the Keystore and is not put in the permission request or the WorkManager input.
 
 Android 14 selected photos (`READ_MEDIA_VISUAL_USER_SELECTED`) is not a grant. The library does not open the photo picker.
 

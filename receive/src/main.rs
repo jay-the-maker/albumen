@@ -11,9 +11,10 @@ use std::process::ExitCode;
 use std::io::Write;
 
 use albumen_ingest::dest;
+use albumen_receive::pairing;
 use albumen_receive::secrets;
 use albumen_receive::service::{self, ServiceHost, ServiceSpec};
-use albumen_receive::{listen, Settings};
+use albumen_receive::{listen, listen_paired, Listening, Settings};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -42,8 +43,21 @@ struct Cli {
     ftp: Option<SocketAddr>,
     /// Ed25519 public key of the joined member. The library must be a family
     /// library, and uploads are stored only under `members/<member>/`.
+    /// With `--pair`, the same key is included in the pairing URI.
     #[arg(long)]
     member: Option<String>,
+    /// Serve WebDAV over TLS and show a pairing QR. The certificate is
+    /// generated on first run and pinned by its SHA-256 fingerprint.
+    #[arg(long)]
+    pair: bool,
+    /// Write the pairing QR as a PNG. Requires `--pair`. The file is written
+    /// only with `--apply` or `--execute`.
+    #[arg(long)]
+    qr_png: Option<PathBuf>,
+    /// Host name in the pairing URI when `--webdav` is 0.0.0.0 or ::.
+    /// A host name or IP address, without a scheme or port.
+    #[arg(long)]
+    advertise: Option<String>,
     /// Listen and store uploads. Without this or `--execute`, print the plan and write nothing.
     #[arg(long)]
     apply: bool,
@@ -87,6 +101,12 @@ fn run() -> Result<(), String> {
     if cli.keyring && cli.password.is_some() {
         return Err("pass --password or --keyring, not both".to_string());
     }
+    if cli.qr_png.is_some() && !cli.pair {
+        return Err("--qr-png requires --pair".to_string());
+    }
+    if cli.advertise.is_some() && !cli.pair {
+        return Err("--advertise requires --pair".to_string());
+    }
     if cli.keyring_set && !(cli.apply || cli.execute) {
         println!("dry-run: keyring unchanged. Pass --apply or --execute to store the password.");
         println!("  user: {}", cli.user);
@@ -116,8 +136,9 @@ fn run() -> Result<(), String> {
     if password.is_empty() {
         return Err("password must not be empty".to_string());
     }
+    let user = cli.user.clone();
     let settings = Settings {
-        library: cli.to,
+        library: cli.to.clone(),
         user: cli.user,
         password,
         member: cli.member.clone(),
@@ -127,11 +148,29 @@ fn run() -> Result<(), String> {
         .build()
         .map_err(|err| err.to_string())?;
     runtime.block_on(async move {
-        let listening = listen(settings, cli.webdav, cli.sftp, cli.ftp)
+        let (listening, session) = if cli.pair {
+            let Some(webdav) = cli.webdav else {
+                return Err("--pair requires --webdav".to_string());
+            };
+            let (listening, session) = listen_paired(
+                settings,
+                webdav,
+                cli.sftp,
+                cli.ftp,
+                cli.advertise.as_deref(),
+            )
             .await
             .map_err(|err| err.to_string())?;
+            (listening, Some(session))
+        } else {
+            let listening = listen(settings, cli.webdav, cli.sftp, cli.ftp)
+                .await
+                .map_err(|err| err.to_string())?;
+            (listening, None)
+        };
         if let Some(addr) = listening.webdav {
-            println!("webdav http://{addr}");
+            let scheme = if cli.pair { "https" } else { "http" };
+            println!("webdav {scheme}://{addr}");
         }
         if let Some(addr) = listening.sftp {
             println!("sftp {addr}");
@@ -139,10 +178,60 @@ fn run() -> Result<(), String> {
         if let Some(addr) = listening.ftp {
             println!("ftp {addr}");
         }
+        if let Some(session) = session {
+            let addr = listening.webdav.ok_or("pairing WebDAV did not bind")?;
+            let endpoint = pairing::endpoint_url(addr, cli.advertise.as_deref())?;
+            let uri = pairing::format_uri(
+                &endpoint,
+                &session.fingerprint,
+                session.token.one_time_token(),
+                cli.member.as_deref(),
+            )?;
+            if let Some(path) = &cli.qr_png {
+                pairing::write_qr_png(path, &uri)?;
+                println!("qr-png {}", path.display());
+            }
+            println!("{}", pairing::qr_terminal(&uri)?);
+            println!("pairing-uri {uri}");
+            println!("pairing-fingerprint {}", session.fingerprint);
+        }
+        print_camera_settings(&listening, &user, cli.pair);
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::future::pending::<()>().await;
         Ok(())
     })
+}
+
+fn print_camera_settings(listening: &Listening, user: &str, paired: bool) {
+    println!("camera setup");
+    if let Some(addr) = listening.webdav {
+        let scheme = if paired { "https" } else { "http" };
+        println!("  webdav url: {scheme}://{addr}/");
+        println!("  webdav user: {user}");
+        println!("  webdav password: the password for this process");
+        if paired {
+            println!("  webdav tls: certificate pinned by the pairing QR");
+        } else {
+            println!("  webdav tls: off");
+        }
+    } else {
+        println!("  webdav: off");
+    }
+    if let Some(addr) = listening.ftp {
+        println!("  ftp host: {}", addr.ip());
+        println!("  ftp port: {}", addr.port());
+        println!("  ftp user: {user}");
+        println!("  ftp encryption: none");
+        println!("  ftp password: the password for this process");
+    } else {
+        println!("  ftp: off");
+    }
+    if let Some(addr) = listening.sftp {
+        println!("  sftp host: {}", addr.ip());
+        println!("  sftp port: {}", addr.port());
+        println!("  sftp user: {user}");
+        println!("  sftp password: the password for this process");
+    }
 }
 
 fn print_plan(cli: &Cli) {
@@ -177,12 +266,62 @@ fn print_plan(cli: &Cli) {
     println!("  webdav: {}", addr_text(cli.webdav));
     println!("  sftp: {}", addr_text(cli.sftp));
     println!("  ftp: {}", addr_text(cli.ftp));
-    if cli.webdav.is_none() && cli.sftp.is_none() && cli.ftp.is_none() {
+    if cli.pair {
+        println!(
+            "  pairing: would generate a self-signed certificate on first run and show a QR code"
+        );
+        println!("  pairing-uri: albumen-pair://v1 with the endpoint, certificate fingerprint, one-time token, and member when set");
+        match &cli.qr_png {
+            Some(path) => println!("  qr-png: would write {}", path.display()),
+            None => println!("  qr-png: off"),
+        }
+        match &cli.advertise {
+            Some(host) => println!("  advertise: {host}"),
+            None => println!("  advertise: the bound address"),
+        }
+    } else {
+        println!("  pairing: off");
+    }
+    print_planned_camera_settings(cli);
+    if cli.pair && cli.webdav.is_none() {
+        println!("  would-refuse: --pair requires --webdav");
+    } else if cli.webdav.is_none() && cli.sftp.is_none() && cli.ftp.is_none() {
         println!("  would-refuse: pass at least one of --webdav, --sftp, or --ftp");
+    } else if cli.pair
+        && cli.advertise.is_none()
+        && cli.webdav.is_some_and(|addr| addr.ip().is_unspecified())
+    {
+        println!("  would-refuse: --pair on 0.0.0.0 or :: needs --advertise <host>");
     } else {
         println!("  network: listen on the addresses above. No outbound connection.");
     }
     println!("  writes: copy_verify into the library. Never overwrite. No delete.");
+}
+
+fn print_planned_camera_settings(cli: &Cli) {
+    println!("camera setup");
+    if let Some(addr) = cli.webdav {
+        let scheme = if cli.pair { "https" } else { "http" };
+        println!("  webdav url: {scheme}://{addr}/");
+        println!("  webdav user: {}", cli.user);
+        println!("  webdav password: the password for this process");
+        if cli.pair {
+            println!("  webdav tls: certificate pinned by the pairing QR");
+        } else {
+            println!("  webdav tls: off");
+        }
+    } else {
+        println!("  webdav: off");
+    }
+    if let Some(addr) = cli.ftp {
+        println!("  ftp host: {}", addr.ip());
+        println!("  ftp port: {}", addr.port());
+        println!("  ftp user: {}", cli.user);
+        println!("  ftp encryption: none");
+        println!("  ftp password: the password for this process");
+    } else {
+        println!("  ftp: off");
+    }
 }
 
 fn password_from_flag_or_env(password: Option<&str>) -> Result<String, String> {

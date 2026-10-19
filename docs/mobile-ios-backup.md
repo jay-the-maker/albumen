@@ -24,7 +24,7 @@ The host also submits a `BGProcessingTask` named `photos.albumen.backup.refresh`
 
 The app group is `group.photos.albumen`. The keychain access group suffix is `photos.albumen.shared`, prefixed by `$(AppIdentifierPrefix)` in the entitlements and in `AlbumenKeychainAccessGroup`. An unsigned build leaves that prefix unexpanded, so the process uses its own keychain item until a signed build shares the group.
 
-Cleartext HTTP is allowed because the documented receiver speaks HTTP. An `https://` endpoint still uses the system trust store.
+Cleartext HTTP is allowed because the documented receiver speaks HTTP. An `https://` endpoint still uses the system trust store. `albumen-receive --pair` prints a QR for `albumen-pair://v1`. `Pairing.parse` reads that URI, and `Pairing.pin` compares the certificate SHA-256 with the fingerprint in the code. A mismatch is a sentence the status screen can show, and the copy does not start.
 
 ## Failures
 

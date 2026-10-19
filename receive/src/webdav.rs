@@ -9,8 +9,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use base64::Engine;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+use crate::pairing::PairingToken;
+
+trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 use crate::store::{Arrival, Commit, Library, Spool};
 
@@ -18,6 +23,8 @@ use crate::store::{Arrival, Commit, Library, Spool};
 pub struct Auth {
     pub user: String,
     pub password: String,
+    /// One-time token from the pairing QR. The camera password stays valid.
+    pub pairing_token: Option<Arc<PairingToken>>,
 }
 
 pub async fn spawn(
@@ -49,8 +56,46 @@ pub async fn spawn(
     Ok(bound)
 }
 
+pub async fn spawn_tls(
+    addr: SocketAddr,
+    library: Arc<Library>,
+    auth: Arc<Auth>,
+    acceptor: tokio_rustls::TlsAcceptor,
+) -> std::io::Result<SocketAddr> {
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((socket, _)) => {
+                    let library = Arc::clone(&library);
+                    let auth = Arc::clone(&auth);
+                    let acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        match acceptor.accept(socket).await {
+                            Ok(tls) => {
+                                if let Err(err) = handle(tls, library, auth).await {
+                                    eprintln!("albumen-receive webdav: {err}");
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("albumen-receive webdav tls: {err}");
+                            }
+                        }
+                    });
+                }
+                Err(err) => {
+                    eprintln!("albumen-receive webdav accept: {err}");
+                    break;
+                }
+            }
+        }
+    });
+    Ok(bound)
+}
+
 async fn handle(
-    mut socket: TcpStream,
+    mut socket: impl Stream,
     library: Arc<Library>,
     auth: Arc<Auth>,
 ) -> std::io::Result<()> {
@@ -157,7 +202,11 @@ fn max_header_bytes() -> usize {
     }
 }
 
-async fn discard_body(socket: &mut TcpStream, leftover: &[u8], length: u64) -> Result<(), String> {
+async fn discard_body(
+    socket: &mut impl Stream,
+    leftover: &[u8],
+    length: u64,
+) -> Result<(), String> {
     let mut written = leftover.len() as u64;
     let mut buf = [0u8; 64 * 1024];
     while written < length {
@@ -175,7 +224,7 @@ async fn discard_body(socket: &mut TcpStream, leftover: &[u8], length: u64) -> R
 }
 
 async fn put(
-    socket: &mut TcpStream,
+    socket: &mut impl Stream,
     library: &Library,
     target: &str,
     leftover: &[u8],
@@ -212,7 +261,7 @@ async fn put(
 }
 
 async fn write_body_to_spool(
-    socket: &mut TcpStream,
+    socket: &mut impl Stream,
     spool: &mut Spool,
     leftover: &[u8],
     length: u64,
@@ -238,12 +287,12 @@ async fn write_body_to_spool(
     Ok(())
 }
 
-async fn created(socket: &mut TcpStream, sha256: &str) -> std::io::Result<()> {
+async fn created(socket: &mut impl Stream, sha256: &str) -> std::io::Result<()> {
     let sha256 = sha256.replace(['\r', '\n'], "");
     write_status(socket, 201, "Created", &[("X-Albumen-Sha256", &sha256)]).await
 }
 
-async fn deduped(socket: &mut TcpStream, sha256: &str) -> std::io::Result<()> {
+async fn deduped(socket: &mut impl Stream, sha256: &str) -> std::io::Result<()> {
     let sha256 = sha256.replace(['\r', '\n'], "");
     write_status(
         socket,
@@ -255,7 +304,7 @@ async fn deduped(socket: &mut TcpStream, sha256: &str) -> std::io::Result<()> {
 }
 
 async fn get(
-    socket: &mut TcpStream,
+    socket: &mut impl Stream,
     library: &Library,
     target: &str,
     send_body: bool,
@@ -281,10 +330,10 @@ async fn get(
     if send_body {
         tokio::io::copy(&mut file, socket).await?;
     }
-    Ok(())
+    socket.shutdown().await
 }
 
-async fn propfind(socket: &mut TcpStream, library: &Library) -> std::io::Result<()> {
+async fn propfind(socket: &mut impl Stream, library: &Library) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(library.root()) {
         Ok(entries) => entries,
         Err(err) => return write_status(socket, 500, &err.to_string(), &[]).await,
@@ -322,10 +371,10 @@ async fn propfind(socket: &mut TcpStream, library: &Library) -> std::io::Result<
     }
     write_chunk(socket, "</d:multistatus>").await?;
     socket.write_all(b"0\r\n\r\n").await?;
-    Ok(())
+    socket.shutdown().await
 }
 
-async fn write_chunk(socket: &mut TcpStream, data: &str) -> std::io::Result<()> {
+async fn write_chunk(socket: &mut impl Stream, data: &str) -> std::io::Result<()> {
     if data.is_empty() {
         return Ok(());
     }
@@ -356,8 +405,16 @@ fn authorized(header: Option<&str>, auth: &Auth) -> bool {
     let Some((user, password)) = text.split_once(':') else {
         return false;
     };
-    constant_eq(user.as_bytes(), auth.user.as_bytes())
-        && constant_eq(password.as_bytes(), auth.password.as_bytes())
+    if !constant_eq(user.as_bytes(), auth.user.as_bytes()) {
+        return false;
+    }
+    if constant_eq(password.as_bytes(), auth.password.as_bytes()) {
+        return true;
+    }
+    match &auth.pairing_token {
+        Some(token) if token.matches(password) => token.try_consume(),
+        _ => false,
+    }
 }
 
 fn constant_eq(left: &[u8], right: &[u8]) -> bool {
@@ -376,7 +433,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 async fn write_status(
-    socket: &mut TcpStream,
+    socket: &mut impl Stream,
     status: u16,
     reason: &str,
     extra: &[(&str, &str)],
@@ -391,7 +448,10 @@ async fn write_status(
         text.push_str("\r\n");
     }
     text.push_str("\r\n");
-    socket.write_all(text.as_bytes()).await
+    socket.write_all(text.as_bytes()).await?;
+    // A clean TLS close lets a pinned client finish the response. The library
+    // file is already committed when this is a 201.
+    socket.shutdown().await
 }
 
 fn expects_continue(head: &str) -> bool {

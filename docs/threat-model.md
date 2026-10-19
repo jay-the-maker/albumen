@@ -44,7 +44,7 @@ The published image mounts the library at `/library` read-only. CI runs `scripts
 | --- | --- | --- |
 | Read | Nothing from a photo archive. A dry-run does not open the library. | `--apply` or `--execute` reads the sockets it is listening on, and reads the spool it just wrote. |
 | Write | Nothing. The plan names `--to` and does not create it. The password is printed as `set` or `unset`, not as the secret. | `--apply` creates `--to` if needed and writes finished uploads through `copy_verify`. A mismatch deletes the destination just written. There is no delete of a stored original. Sidecar replacement writes a temp file in the library and renames it over the previous sidecar. |
-| Network | None. No socket is opened. | Listens on the `--webdav`, `--sftp`, and `--ftp` addresses that were passed. At least one is required. FTP is cleartext. SFTP host key is in memory. There is no outbound connection. |
+| Network | None. No socket is opened. | Listens on the `--webdav`, `--sftp`, and `--ftp` addresses that were passed. At least one is required. FTP is cleartext. SFTP host key is in memory. `--pair` serves WebDAV over TLS with a self-signed certificate generated on first run and pinned by SHA-256. The pairing QR holds a one-time token. There is no outbound connection. |
 
 `--to` is a destination library. It is not a `SourceRoot`. Do not point it at an archive that is the only copy. The dry-run identity test points `--to` at a fixture and requires that fixture to stay unchanged. `--apply` in that test listens on a different directory.
 
