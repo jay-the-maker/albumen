@@ -274,6 +274,7 @@ impl RcloneStore {
             sha256: digest,
             byte_len,
             mtime,
+            sha256_verify_ms: 0,
         })
     }
 

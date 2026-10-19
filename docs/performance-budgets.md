@@ -52,6 +52,10 @@ These are the product bars on a 380,000-item library. CI does not fail a job for
 
 1 MB is 1,000,000 bytes. 100 MB/s of 5 MB files is 20 items/s.
 
+## Camera RAW verify
+
+`albumen-receive` re-reads a stored file and SHA-256s those bytes before it reports the copy. CI uploads a synthetic 100 MB RAW-sized file (100,000,000 bytes, generated in the test, not a photograph and not committed) over WebDAV and over FTP. The clock is that re-read. It fails when the re-read takes more than 5 seconds. The source file's bytes and mtime stay as they were. The dev and test profiles compile the SHA-256 crates optimized so this clock is the hash, which is how a release binary already builds them.
+
 Warm metadata search still SHA-256s every file before it trusts the in-memory cache, and a cold search also runs ExifTool. A local run at 380,000 items is expected to miss the 500 ms bar until search stops re-reading every byte. That miss is the measurement. It is not a claim that today's code already hits the bar, and it is not a CI failure.
 
 ## What CI measures

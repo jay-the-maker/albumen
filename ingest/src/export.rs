@@ -84,6 +84,7 @@ impl ExportDest for DirectoryTree {
                         sha256: hash,
                         byte_len: len,
                         mtime: mtime_of(&dest)?,
+                        sha256_verify_ms: 0,
                     },
                     copied: false,
                 });

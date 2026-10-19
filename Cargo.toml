@@ -8,3 +8,25 @@ license = "Apache-2.0"
 publish = false
 rust-version = "1.94"
 repository = "https://github.com/jay-the-maker/albumen"
+
+# `cargo test` builds albumen-receive in the dev profile. An unoptimized
+# SHA-256 loop is a compiler artifact, not the re-read the camera budget
+# measures. These crates stay at opt-level 3 in dev and test so that clock
+# is the hash. Release already compiles them optimized.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
+
+[profile.test.package.digest]
+opt-level = 3
+
+[profile.test.package.block-buffer]
+opt-level = 3

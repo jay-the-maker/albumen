@@ -305,6 +305,7 @@ impl S3Store {
                 sha256: expected_hex,
                 byte_len: len,
                 mtime,
+                sha256_verify_ms: 0,
             })
         })
     }
@@ -429,6 +430,7 @@ impl ExportDest for S3Store {
                         sha256: hash,
                         byte_len: len,
                         mtime: mtime_of(source)?,
+                        sha256_verify_ms: 0,
                     },
                     copied: false,
                 });

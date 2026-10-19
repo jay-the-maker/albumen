@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::io::Write;
 
 use albumen_ingest::dest;
+use albumen_receive::camera_setup;
 use albumen_receive::pairing;
 use albumen_receive::secrets;
 use albumen_receive::service::{self, ServiceHost, ServiceSpec};
@@ -232,6 +233,10 @@ fn print_camera_settings(listening: &Listening, user: &str, paired: bool) {
         println!("  sftp user: {user}");
         println!("  sftp password: the password for this process");
     }
+    println!(
+        "{}",
+        camera_setup::format_steps_line(listening.webdav, listening.ftp, user)
+    );
 }
 
 fn print_plan(cli: &Cli) {
@@ -322,6 +327,10 @@ fn print_planned_camera_settings(cli: &Cli) {
     } else {
         println!("  ftp: off");
     }
+    println!(
+        "{}",
+        camera_setup::format_steps_line(cli.webdav, cli.ftp, &cli.user)
+    );
 }
 
 fn password_from_flag_or_env(password: Option<&str>) -> Result<String, String> {
