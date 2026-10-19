@@ -21,6 +21,7 @@ fun executeBackup(
     mismatchAttempts: Int = BackupSchedule.DEFAULT_MISMATCH_ATTEMPTS,
     isStopped: () -> Boolean = { false },
     nowMillis: () -> Long = { System.currentTimeMillis() },
+    memberId: String = "",
     pageAt: (offset: Int, limit: Int) -> List<RollItem> = { offset, limit ->
         CameraRoll.page(context.contentResolver, offset, limit)
     },
@@ -28,7 +29,7 @@ fun executeBackup(
         CameraRoll.spool(context.contentResolver, item, context.cacheDir)
     },
     uploaderFactory: (String, String, String) -> OriginalUploader = { endpointUrl, name, password ->
-        WebDavUploader(endpointUrl, name, password)
+        WebDavUploader(endpointUrl, name, password, memberId)
     },
     progress: ProgressStore = FileProgressStore(File(context.filesDir, BackupSchedule.PROGRESS_FILE)),
     permissionBlock: () -> String? = { CameraRoll.permissionBlock(context) },
@@ -46,6 +47,7 @@ fun executeBackup(
             mismatchAttempts = mismatchAttempts,
             isStopped = isStopped,
             nowMillis = nowMillis,
+            memberId = memberId,
             pageAt = pageAt,
             spoolItem = spoolItem,
             uploaderFactory = uploaderFactory,
@@ -73,6 +75,7 @@ private fun drive(
     mismatchAttempts: Int,
     isStopped: () -> Boolean,
     nowMillis: () -> Long,
+    memberId: String,
     pageAt: (offset: Int, limit: Int) -> List<RollItem>,
     spoolItem: (RollItem) -> Spool,
     uploaderFactory: (String, String, String) -> OriginalUploader,
@@ -125,6 +128,8 @@ private fun drive(
                 mismatchAttempts = mismatchAttempts,
                 report = report,
                 publish = publish,
+                endpoint = endpoint,
+                memberId = memberId,
             )
             if (!keepGoing) {
                 return
@@ -176,6 +181,8 @@ private fun uploadOne(
     mismatchAttempts: Int,
     report: BackupReport,
     publish: (BackupReport) -> Unit,
+    endpoint: String,
+    memberId: String,
 ): Boolean {
     if (item.displayName.isBlank()) {
         report.fail(
@@ -207,6 +214,17 @@ private fun uploadOne(
     if (progress.isVerified(key)) {
         report.skipped++
         return true
+    }
+    if (memberId.isNotEmpty()) {
+        try {
+            MemberNamespace.relativePath(endpoint, memberId, name)
+        } catch (thrown: Exception) {
+            report.block(
+                "Refusing a write of $name outside members/$memberId/: ${failureText(thrown)}. The camera roll was not changed.",
+            )
+            publish(report)
+            return false
+        }
     }
     val spool = try {
         spoolItem(item)

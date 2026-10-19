@@ -228,6 +228,38 @@ fn check_member_id(member: &str) -> Result<(), IngestError> {
     Ok(())
 }
 
+/// The hex member id, lowercase, when it is an Ed25519 public key.
+pub fn canonical_member_id(member: &str) -> Result<String, IngestError> {
+    check_member_id(member)?;
+    Ok(member.trim().to_ascii_lowercase())
+}
+
+/// `members/<member-id>` for one Ed25519 public key.
+pub fn member_namespace_prefix(member: &str) -> Result<String, IngestError> {
+    Ok(format!("members/{}", canonical_member_id(member)?))
+}
+
+/// A family library whose `members/<member>/devices` log exists.
+///
+/// Genesis and `family join` both write that log. A key that has not joined
+/// has no directory here.
+pub fn require_joined_member(library: &Path, member: &str) -> Result<String, IngestError> {
+    let member = canonical_member_id(member)?;
+    if !looks_like_genesis(&library.join("genesis.json")) {
+        return Err(family(format!(
+            "{} is not a family library",
+            library.display()
+        )));
+    }
+    let devices = library.join("members").join(&member).join("devices");
+    if !devices.is_dir() {
+        return Err(family(format!(
+            "member {member} has not joined this family library"
+        )));
+    }
+    Ok(member)
+}
+
 fn verifying_key(member: &str) -> Result<VerifyingKey, IngestError> {
     check_member_id(member)?;
     let decoded = decode_hex(member)?;

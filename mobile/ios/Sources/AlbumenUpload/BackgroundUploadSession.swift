@@ -36,12 +36,14 @@ public final class BackgroundUploadSession: NSObject, URLSessionDelegate, URLSes
         clientSha256: String,
         localIdentifier: String,
         mtimeSeconds: Int,
-        endpoint: URL
+        endpoint: URL,
+        memberId: String? = nil
     ) throws {
         let request = try BackgroundPut.request(
             endpoint: endpoint,
             filename: filename,
-            mtimeSeconds: mtimeSeconds
+            mtimeSeconds: mtimeSeconds,
+            memberId: memberId
         )
         let id = UUID().uuidString
         try PendingUploadStore.update(directory: directory) { pending in

@@ -27,17 +27,17 @@ object UploadCheck {
     fun verdict(clientSha256: String, status: Int, serverSha256: String?): UploadVerdict {
         val client = clientSha256.trim().lowercase()
         val server = serverSha256?.trim()?.lowercase().orEmpty()
+        if (status != 201 && status != 409) {
+            return UploadVerdict.Rejected(status)
+        }
         if (server.isEmpty()) {
             return UploadVerdict.MissingServerHash
         }
-        if (status == 201 || status == 409) {
-            return if (client == server) {
-                UploadVerdict.Verified(client)
-            } else {
-                UploadVerdict.Conflict(client, server)
-            }
+        return if (client == server) {
+            UploadVerdict.Verified(client)
+        } else {
+            UploadVerdict.Conflict(client, server)
         }
-        return UploadVerdict.Rejected(status)
     }
 }
 

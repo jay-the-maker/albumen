@@ -27,6 +27,7 @@ class HostActivity : ComponentActivity() {
     private var endpoint: String = ""
     private var user: String = ""
     private var password: String = ""
+    private var memberId: String = ""
     private var decisionMessage: String =
         "Requesting access to images, video, and location so originals, including GPS, can be copied."
 
@@ -39,7 +40,7 @@ class HostActivity : ComponentActivity() {
                 user = user,
                 password = password,
             ) { endpoint, user, password ->
-                CameraRollBackupWorker.enqueue(this, endpoint, user, password)
+                CameraRollBackupWorker.enqueue(this, endpoint, user, password, memberId = memberId)
             }
             decisionMessage = if (decision.enqueue) {
                 decision.message + "\n\n" + BackupSchedule.FIRST_RUN_MESSAGE
@@ -71,6 +72,7 @@ class HostActivity : ComponentActivity() {
         endpoint = intent.getStringExtra(EXTRA_ENDPOINT).orEmpty()
         user = intent.getStringExtra(EXTRA_USER).orEmpty()
         password = intent.getStringExtra(EXTRA_PASSWORD).orEmpty()
+        memberId = intent.getStringExtra(EXTRA_MEMBER).orEmpty()
         render()
         requestPermissions.launch(CameraRoll.requiredPermissions())
     }
@@ -97,6 +99,7 @@ class HostActivity : ComponentActivity() {
         const val EXTRA_ENDPOINT = "photos.albumen.host.ENDPOINT"
         const val EXTRA_USER = "photos.albumen.host.USER"
         const val EXTRA_PASSWORD = "photos.albumen.host.PASSWORD"
+        const val EXTRA_MEMBER = "photos.albumen.host.MEMBER"
         const val NOTIFICATION_DENIED =
             "Notification permission was denied. Backup failures stay on this screen."
     }

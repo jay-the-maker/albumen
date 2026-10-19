@@ -26,6 +26,9 @@ pub struct Settings {
     pub library: PathBuf,
     pub user: String,
     pub password: String,
+    /// Ed25519 public key of the joined member. When set, uploads are stored
+    /// only under `members/<member>/` in a family library.
+    pub member: Option<String>,
 }
 
 #[derive(Debug)]
@@ -47,7 +50,10 @@ pub async fn listen(
             "pass at least one of webdav, sftp, or ftp",
         ));
     }
-    let library = Arc::new(Library::open(&settings.library)?);
+    let library = Arc::new(match &settings.member {
+        Some(member) => Library::open_member_namespace(&settings.library, member)?,
+        None => Library::open(&settings.library)?,
+    });
     let auth = Arc::new(webdav::Auth {
         user: settings.user.clone(),
         password: settings.password.clone(),

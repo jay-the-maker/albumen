@@ -33,6 +33,10 @@ final class UploadCheckTests: XCTestCase {
             UploadCheck.verdict(clientSha256: "aa", status: 500, serverSha256: "aa"),
             .rejected(status: 500)
         )
+        XCTAssertEqual(
+            UploadCheck.verdict(clientSha256: "aa", status: 403, serverSha256: nil),
+            .rejected(status: 403)
+        )
         XCTAssertThrowsError(try UploadCheck.requireVerified(.missingServerHash))
     }
 

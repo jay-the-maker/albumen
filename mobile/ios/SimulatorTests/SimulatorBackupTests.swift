@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import CryptoKit
 import Darwin
 import Foundation
 import UserNotifications
@@ -87,6 +88,74 @@ final class SimulatorBackupTests: XCTestCase {
         )
         let marker = "SHA-256 mismatch for \(name). Sent \(client). Receiver reported \(serverHash)."
         try await assertSurfaced(directory: directory, status: status, marker: marker)
+    }
+
+    func testMemberBackupLeavesTheOtherMemberByteIdentical() async throws {
+        let directory = try makeDirectory()
+        let memberA = String(repeating: "ab", count: 32)
+        let memberB = String(repeating: "cd", count: 32)
+        let original = Data("member-b-original".utf8)
+        let sidecar = Data("<x:xmpmeta member-b/>".utf8)
+        let bDir = directory.appendingPathComponent("members/\(memberB)/objects", isDirectory: true)
+        try FileManager.default.createDirectory(at: bDir, withIntermediateDirectories: true)
+        let originalURL = bDir.appendingPathComponent("original.jpg")
+        let sidecarURL = bDir.appendingPathComponent("original.jpg.sidecar")
+        try original.write(to: originalURL)
+        try sidecar.write(to: sidecarURL)
+        let originalSha = try Sha256File.hex(originalURL)
+        let sidecarSha = try Sha256File.hex(sidecarURL)
+        let originalMtime = try FileManager.default.attributesOfItem(atPath: originalURL.path)[.modificationDate] as? Date
+        let sidecarMtime = try FileManager.default.attributesOfItem(atPath: sidecarURL.path)[.modificationDate] as? Date
+
+        let name = "phone.jpg"
+        let phone = Data("member-a-phone-backup".utf8)
+        let file = directory.appendingPathComponent(name)
+        try phone.write(to: file)
+        let server = try FamilyMemberReceiver(memberId: memberA, library: directory)
+        defer { server.stop() }
+        let status = await ForegroundUpload.uploadOriginal(
+            file: file,
+            filename: name,
+            localIdentifier: name,
+            mtimeSeconds: 1_700_000_000,
+            endpoint: URL(string: server.endpoint)!,
+            user: user,
+            accessGroup: nil,
+            directory: directory,
+            memberId: memberA
+        )
+        XCTAssertTrue(status.contains("Verified 1 this run."), status)
+        XCTAssertTrue(status.contains("Failures 0."), status)
+        XCTAssertEqual(server.paths, ["/members/\(memberA)/\(name)"])
+        let stored = directory.appendingPathComponent("members/\(memberA)/\(name)")
+        XCTAssertEqual(try Data(contentsOf: stored), phone)
+        XCTAssertEqual(try Sha256File.hex(originalURL), originalSha)
+        XCTAssertEqual(try Sha256File.hex(sidecarURL), sidecarSha)
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: originalURL.path)[.modificationDate] as? Date,
+            originalMtime
+        )
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(atPath: sidecarURL.path)[.modificationDate] as? Date,
+            sidecarMtime
+        )
+
+        let outside = await ForegroundUpload.uploadOriginal(
+            file: file,
+            filename: "outside.jpg",
+            localIdentifier: "outside.jpg",
+            mtimeSeconds: 1_700_000_000,
+            endpoint: URL(string: "http://127.0.0.1:9/members/\(memberB)/")!,
+            user: user,
+            accessGroup: nil,
+            directory: directory,
+            memberId: memberA
+        )
+        let marker = "Refusing a write of outside.jpg outside members/\(memberA)/"
+        try await assertSurfaced(directory: directory, status: outside, marker: marker)
+        XCTAssertEqual(server.paths, ["/members/\(memberA)/\(name)"])
+        XCTAssertEqual(try Sha256File.hex(originalURL), originalSha)
+        XCTAssertEqual(try Sha256File.hex(sidecarURL), sidecarSha)
     }
 
     func testReceiverDownSurfacesOnTheStatusAndTheNotification() async throws {
@@ -253,6 +322,291 @@ private final class NoticeCatcher: NSObject, UNUserNotificationCenterDelegate {
         bodies.append(notification.request.content.body)
         lock.unlock()
         completionHandler([])
+    }
+}
+
+/// Loopback family receiver. A PUT under `members/<member>/` is stored there.
+/// Any other path is HTTP 403 and is not written.
+private final class FamilyMemberReceiver {
+    let endpoint: String
+    private let listenFD: Int32
+    private let queue = DispatchQueue(label: "albumen-family-member-receiver")
+    private let memberId: String
+    private let library: URL
+    private let lock = NSLock()
+    private var seen: [String] = []
+
+    var paths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return seen
+    }
+
+    init(memberId: String, library: URL) throws {
+        self.memberId = memberId
+        self.library = library
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        if fd < 0 {
+            throw POSIXError(.ECONNREFUSED)
+        }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if bound != 0 || listen(fd, 4) != 0 {
+            close(fd)
+            throw POSIXError(.EADDRINUSE)
+        }
+        var got = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &got) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &len)
+            }
+        }
+        if named != 0 {
+            close(fd)
+            throw POSIXError(.EADDRINUSE)
+        }
+        listenFD = fd
+        endpoint = "http://127.0.0.1:\(UInt16(bigEndian: got.sin_port))/"
+        queue.async { [weak self] in
+            self?.serve()
+        }
+    }
+
+    func stop() {
+        close(listenFD)
+    }
+
+    private func serve() {
+        while true {
+            let client = accept(listenFD, nil, nil)
+            if client < 0 {
+                break
+            }
+            respond(client)
+            close(client)
+        }
+    }
+
+    private func respond(_ client: Int32) {
+        // URLSession's file upload sends `Expect: 100-continue` and withholds
+        // the body until this process replies. A missing or zero Content-Length
+        // on that first flight still has a body after 100 Continue. Hashing the
+        // empty read is the empty-string digest, which the phone then reports
+        // as a mismatch and stores as a 0-byte object.
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        let (header, leftover) = readHeaders(client)
+        let text = String(data: header, encoding: .isoLatin1) ?? ""
+        let request = text.split(separator: "\r\n").first.map(String.init)
+            ?? text.split(separator: "\n").first.map(String.init)
+            ?? ""
+        let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+        let declared = contentLength(text)
+        let chunked = headerValue(text, name: "transfer-encoding")?.lowercased().contains("chunked") ?? false
+        let expectsContinue = headerValue(text, name: "expect")?.lowercased().contains("100-continue") == true
+            || text.lowercased().contains("100-continue")
+        if expectsContinue && leftover.count < (declared ?? Int.max) {
+            writeAll(client, Data("HTTP/1.1 100 Continue\r\n\r\n".utf8))
+        }
+        let body = readBody(client, declared: declared, chunked: chunked, expectsContinue: expectsContinue, leftover: leftover)
+        let prefix = "/members/\(memberId)/"
+        let allowed = path.hasPrefix(prefix) && !path.contains("..")
+        if allowed {
+            let relative = String(path.dropFirst())
+            let dest = library.appendingPathComponent(relative)
+            try? FileManager.default.createDirectory(
+                at: dest.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? body.write(to: dest)
+            lock.lock()
+            seen.append(path)
+            lock.unlock()
+            let digest = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+            writeAll(
+                client,
+                Data("HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\nX-Albumen-Sha256: \(digest)\r\n\r\n".utf8)
+            )
+            return
+        }
+        writeAll(
+            client,
+            Data("HTTP/1.1 403 refusing a write outside members/\(memberId)/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+        )
+    }
+
+    /// Bytes before the header terminator, and any body bytes already in that read.
+    private func readHeaders(_ client: Int32) -> (Data, Data) {
+        var buf = Data()
+        let marker = Data([13, 10, 13, 10])
+        while buf.count < 64 * 1024 {
+            let chunk = readSome(client, max: 4096)
+            if chunk.isEmpty {
+                break
+            }
+            buf.append(chunk)
+            if let range = buf.range(of: marker) {
+                let header = buf.subdata(in: buf.startIndex..<range.lowerBound)
+                let leftover = buf.subdata(in: range.upperBound..<buf.endIndex)
+                return (header, leftover)
+            }
+        }
+        return (buf, Data())
+    }
+
+    private func readBody(
+        _ client: Int32,
+        declared: Int?,
+        chunked: Bool,
+        expectsContinue: Bool,
+        leftover: Data
+    ) -> Data {
+        if chunked {
+            return decodeChunks(readUntilPause(client, already: leftover))
+        }
+        if let declared, declared > 0 {
+            return readExact(client, count: declared, already: leftover)
+        }
+        // Explicit Content-Length: 0 with no Expect and no bytes already read.
+        if declared == 0, !expectsContinue, leftover.isEmpty {
+            return Data()
+        }
+        return readUntilPause(client, already: leftover)
+    }
+
+    private func readExact(_ client: Int32, count: Int, already: Data) -> Data {
+        var body = Data(already.prefix(count))
+        while body.count < count {
+            let chunk = readSome(client, max: count - body.count)
+            if chunk.isEmpty {
+                break
+            }
+            body.append(chunk)
+        }
+        return body
+    }
+
+    /// Read what the client still sends. A short read is followed by one more
+    /// wait so a TCP segment boundary is not treated as the end of the body.
+    private func readUntilPause(_ client: Int32, already: Data) -> Data {
+        var pause = timeval(tv_sec: 0, tv_usec: 400_000)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &pause, socklen_t(MemoryLayout<timeval>.size))
+        var body = already
+        while body.count < 8 * 1024 * 1024 {
+            let chunk = readSome(client, max: 8192)
+            if chunk.isEmpty {
+                break
+            }
+            body.append(chunk)
+            if chunk.count < 8192 {
+                let extra = readSome(client, max: 8192)
+                if extra.isEmpty {
+                    break
+                }
+                body.append(extra)
+            }
+        }
+        return body
+    }
+
+    private func readSome(_ client: Int32, max: Int) -> Data {
+        var buf = [UInt8](repeating: 0, count: max)
+        let n = buf.withUnsafeMutableBytes { raw -> Int in
+            guard let base = raw.baseAddress else {
+                return -1
+            }
+            return read(client, base, raw.count)
+        }
+        if n <= 0 {
+            return Data()
+        }
+        return Data(buf.prefix(n))
+    }
+
+    private func writeAll(_ client: Int32, _ bytes: Data) {
+        bytes.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else {
+                return
+            }
+            var sent = 0
+            while sent < raw.count {
+                let n = write(client, base.advanced(by: sent), raw.count - sent)
+                if n <= 0 {
+                    break
+                }
+                sent += n
+            }
+        }
+    }
+
+    private func contentLength(_ header: String) -> Int? {
+        guard let raw = headerValue(header, name: "content-length") else {
+            return nil
+        }
+        return Int(raw)
+    }
+
+    private func headerValue(_ header: String, name: String) -> String? {
+        let normalized = header.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        for line in normalized.split(separator: "\n", omittingEmptySubsequences: false) {
+            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else {
+                continue
+            }
+            let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if key == name {
+                return parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return nil
+    }
+
+    private func decodeChunks(_ raw: Data) -> Data {
+        var out = Data()
+        var index = raw.startIndex
+        while index < raw.endIndex {
+            guard let lineEnd = raw[index...].firstIndex(of: 10) else {
+                break
+            }
+            let line = raw[index..<lineEnd].filter { $0 != 13 }
+            let hex = String(bytes: line, encoding: .ascii)?
+                .split(separator: ";")
+                .first
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            guard let size = Int(hex, radix: 16) else {
+                break
+            }
+            var next = raw.index(after: lineEnd)
+            if size == 0 {
+                break
+            }
+            guard let end = raw.index(next, offsetBy: size, limitedBy: raw.endIndex) else {
+                out.append(raw[next..<raw.endIndex])
+                break
+            }
+            out.append(raw[next..<end])
+            next = end
+            if next < raw.endIndex, raw[next] == 13 {
+                next = raw.index(after: next)
+            }
+            if next < raw.endIndex, raw[next] == 10 {
+                next = raw.index(after: next)
+            }
+            index = next
+        }
+        return out
     }
 }
 

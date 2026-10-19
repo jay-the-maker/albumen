@@ -28,6 +28,9 @@ const TOMBSTONE_SUFFIX: &str = ".albumen-tombstone";
 pub struct Library {
     root: PathBuf,
     commit_lock: Mutex<()>,
+    /// When set, `root` is `members/<id>/` inside a family library.
+    /// A PUT whose directory is not `members/<id>` is refused before any library write.
+    member_id: Option<String>,
 }
 
 impl Library {
@@ -45,7 +48,44 @@ impl Library {
         Ok(Self {
             root,
             commit_lock: Mutex::new(()),
+            member_id: None,
         })
+    }
+
+    /// Open `members/<member>/` inside a family library.
+    ///
+    /// [`Library::open`] still refuses that library and anything inside it.
+    /// This entry is the phone backup for one joined member. The member id is
+    /// an Ed25519 public key, and `members/<member>/devices` must already exist.
+    pub fn open_member_namespace(library: impl Into<PathBuf>, member: &str) -> io::Result<Self> {
+        let library = library.into();
+        let member = albumen_ingest::family::require_joined_member(&library, member)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let root = library.join("members").join(&member);
+        dest::create_dir_all(&root).map_err(|err| io::Error::other(err.to_string()))?;
+        if !root.is_dir() {
+            return Err(io::Error::other(
+                "member namespace is not a directory".to_string(),
+            ));
+        }
+        Ok(Self {
+            root,
+            commit_lock: Mutex::new(()),
+            member_id: Some(member),
+        })
+    }
+
+    /// `Some` when this arrival would write outside the joined member's prefix.
+    /// A library opened with [`Library::open`] allows the paths it already allowed.
+    pub fn namespace_refusal(&self, arrival: &Arrival) -> Option<String> {
+        let member = self.member_id.as_deref()?;
+        let expected = format!("members/{member}");
+        if arrival.directory == expected {
+            return None;
+        }
+        Some(format!(
+            "refusing a write outside members/{member}/. The other member's originals stay in place."
+        ))
     }
 
     pub fn root(&self) -> &Path {
@@ -87,6 +127,9 @@ impl Library {
         arrival: &Arrival,
         protocol: MtimeProtocol,
     ) -> Result<Commit, String> {
+        if let Some(message) = self.namespace_refusal(arrival) {
+            return Err(message);
+        }
         let _guard = self
             .commit_lock
             .lock()

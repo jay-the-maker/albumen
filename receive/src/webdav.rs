@@ -186,6 +186,12 @@ async fn put(
         Ok(arrival) => arrival,
         Err(err) => return write_status(socket, 400, &err, &[]).await,
     };
+    if let Some(message) = library.namespace_refusal(&arrival) {
+        if let Err(err) = discard_body(socket, leftover, length).await {
+            return write_status(socket, 400, &err, &[]).await;
+        }
+        return write_status(socket, 403, &message, &[]).await;
+    }
     let mut spool = match Spool::create(&arrival.camera_filename) {
         Ok(spool) => spool,
         Err(err) => return write_status(socket, 400, &err, &[]).await,
