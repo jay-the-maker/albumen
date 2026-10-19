@@ -90,6 +90,10 @@ jobs:
         shell: bash
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: ffmpeg for the synthetic Live Photo
+        shell: bash
+        run: scripts/ensure-ffmpeg.sh
+
       - name: Round-trip originals through the local filesystem and MinIO
         shell: bash
         run: scripts/with-minio.sh cargo test --locked --all-targets
