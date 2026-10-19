@@ -144,10 +144,94 @@ fn open_rdonly(path: &Path) -> Result<File, IngestError> {
 
 fn destination_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError> {
     let resolved = resolve_dest(dest)?;
-    if resolved == root.canonical || resolved.starts_with(&root.canonical) {
+    if path_is_inside(&root.canonical, &resolved) {
         return Ok(true);
     }
     hardlink_aliases(root, dest)
+}
+
+/// `dest` is `root` or a path under it.
+///
+/// Windows canonical paths disagree about the `\\?\` prefix, letter case,
+/// and 8.3 short names (`RUNNER~1` and `runneradmin` are one directory).
+/// A string prefix is not enough. The same directory also matches on
+/// creation time, size, and attributes.
+fn path_is_inside(root: &Path, dest: &Path) -> bool {
+    if normalized_starts_with(dest, root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        dest.ancestors()
+            .any(|ancestor| same_directory(ancestor, root))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn root_is_under(root: &Path, dir: &Path) -> bool {
+    if normalized_starts_with(root, dir) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        root.ancestors()
+            .any(|ancestor| same_directory(ancestor, dir))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn normalized_starts_with(path: &Path, prefix: &Path) -> bool {
+    let path = normalize_path(path);
+    let prefix = normalize_path(prefix);
+    if path == prefix {
+        return true;
+    }
+    let separator = std::path::MAIN_SEPARATOR;
+    let mut prefix = prefix;
+    if !prefix.ends_with(separator) {
+        prefix.push(separator);
+    }
+    path.starts_with(&prefix)
+}
+
+fn normalize_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let stripped = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.into_owned()
+    };
+    #[cfg(windows)]
+    {
+        stripped.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        stripped
+    }
+}
+
+#[cfg(windows)]
+fn same_directory(left: &Path, right: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    if !left.is_dir() || !right.is_dir() {
+        return false;
+    }
+    use std::os::windows::fs::MetadataExt;
+    left.creation_time() == right.creation_time()
+        && left.last_write_time() == right.last_write_time()
+        && left.file_size() == right.file_size()
+        && left.file_attributes() == right.file_attributes()
 }
 
 fn resolve_dest(dest: &Path) -> Result<PathBuf, IngestError> {
@@ -249,7 +333,7 @@ fn dest_ids(root: &SourceRoot, dest: &Path) -> Result<Vec<(u64, u64)>, IngestErr
         let canon = cursor
             .canonicalize()
             .map_err(|err| IngestError::io(&cursor, err))?;
-        if root.canonical.starts_with(&canon) {
+        if root_is_under(&root.canonical, &canon) {
             break;
         }
         let meta = fs::symlink_metadata(&cursor).map_err(|err| IngestError::io(&cursor, err))?;
