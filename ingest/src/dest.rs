@@ -67,8 +67,19 @@ pub fn set_len(file: &File, path: &Path, len: u64) -> Result<(), IngestError> {
 }
 
 pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
-    let dir = File::open(path).map_err(|err| IngestError::io(path, err))?;
-    dir.sync_all().map_err(|err| IngestError::io(path, err))
+    // The new file is already `sync_all`'d. Windows will not open a directory
+    // to sync it; that call returns access denied. Unix still syncs the
+    // directory so the new name is durable.
+    #[cfg(windows)]
+    {
+        let _ = path;
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let dir = File::open(path).map_err(|err| IngestError::io(path, err))?;
+        dir.sync_all().map_err(|err| IngestError::io(path, err))
+    }
 }
 
 /// Write a new file and, on Unix, restrict it to the owner.
