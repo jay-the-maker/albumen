@@ -7,6 +7,8 @@
 //! not recorded at. `--measure` prints the run and does not compare.
 //! `--write-baseline` replaces the file. `--takeout` times a generated
 //! 100,000-member Takeout import and is not part of `--check`.
+//! `--throughput` imports 1,000 synthetic files of about 5 MB through
+//! `copy_verify` and compares that rate with a raw durable write.
 
 use std::env;
 use std::fs;
@@ -15,9 +17,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use albumen_bench::{
-    load_baseline, measure, measure_icloud, measure_takeout, regression_problems, scale_problems,
-    to_json, Report, DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS,
-    DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
+    load_baseline, measure, measure_icloud, measure_takeout, measure_throughput,
+    regression_problems, scale_problems, throughput_problems, to_json, Report, DEFAULT_COPY_BYTES,
+    DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS, DEFAULT_TAKEOUT_ITEMS, DEFAULT_THROUGHPUT_BYTES,
+    DEFAULT_THROUGHPUT_FILES, TAKEOUT_BUDGET_SECONDS, THROUGHPUT_RATIO_FLOOR,
 };
 
 fn main() -> ExitCode {
@@ -120,6 +123,44 @@ fn run() -> Result<(), String> {
                 ));
             }
         }
+        Mode::Throughput => {
+            let files = env_u64("ALBUMEN_THROUGHPUT_FILES", DEFAULT_THROUGHPUT_FILES)?;
+            let bytes = env_u64("ALBUMEN_THROUGHPUT_BYTES", DEFAULT_THROUGHPUT_BYTES)?;
+            let allow_small =
+                env::var("ALBUMEN_THROUGHPUT_ALLOW_SMALL").ok().as_deref() == Some("1");
+            if !allow_small
+                && (files < DEFAULT_THROUGHPUT_FILES || bytes < DEFAULT_THROUGHPUT_BYTES)
+            {
+                return Err(
+                    "the throughput gate uses 1000 files of 5000000 bytes. Set ALBUMEN_THROUGHPUT_ALLOW_SMALL=1 for a smaller smoke run."
+                        .to_string(),
+                );
+            }
+            let leg = env::var("ALBUMEN_THROUGHPUT_LEG")
+                .unwrap_or_else(|_| std::env::consts::OS.to_string());
+            let report = measure_throughput(&leg, files, bytes)?;
+            let text =
+                serde_json::to_string_pretty(&report.to_json()).map_err(|err| err.to_string())?;
+            println!("{text}");
+            io::stdout().flush().map_err(|err| err.to_string())?;
+            eprintln!(
+                "import-throughput leg={} files={} bytes_each={} import_mb_s={:.3} raw_mb_s={:.3} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={}",
+                report.leg,
+                report.files,
+                report.bytes_each,
+                report.import_mb_s,
+                report.raw_mb_s,
+                report.ratio,
+                THROUGHPUT_RATIO_FLOOR,
+                report.reconciled_percent(),
+                report.mismatched,
+                report.source_changed
+            );
+            let problems = throughput_problems(&report);
+            if !problems.is_empty() {
+                return Err(problems.join("\n"));
+            }
+        }
     }
     Ok(())
 }
@@ -131,6 +172,7 @@ enum Mode {
     Write,
     Takeout,
     Icloud,
+    Throughput,
 }
 
 struct Invocation {
@@ -149,6 +191,7 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
             "--write-baseline" => set_mode(&mut mode, Mode::Write)?,
             "--takeout" => set_mode(&mut mode, Mode::Takeout)?,
             "--icloud" => set_mode(&mut mode, Mode::Icloud)?,
+            "--throughput" => set_mode(&mut mode, Mode::Throughput)?,
             "--baseline" => {
                 index += 1;
                 let path = args
@@ -169,7 +212,7 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
 fn set_mode(slot: &mut Option<Mode>, mode: Mode) -> Result<(), String> {
     if slot.is_some() {
         return Err(
-            "pass only one of --check, --measure, --write-baseline, --takeout, or --icloud"
+            "pass only one of --check, --measure, --write-baseline, --takeout, --icloud, or --throughput"
                 .to_string(),
         );
     }

@@ -49,8 +49,9 @@ These are the product bars on a 380,000-item library. CI does not fail a job for
 | --- | --- |
 | Search, warm | p50 ≤ 500 ms and p95 ≤ 1.5 s |
 | Import | ≥ 100 MB/s on a local SSD, and ≥ 20 items/s for originals of about 5 MB |
+| Import vs raw write | Target ≥ 80% of a same-disk durable write for 1,000 files of about 5 MB |
 
-1 MB is 1,000,000 bytes. 100 MB/s of 5 MB files is 20 items/s.
+1 MB is 1,000,000 bytes. 100 MB/s of 5 MB files is 20 items/s. The 80% bar is import MB/s divided by a raw write that uses the same per-file `fsync` and directory `fsync`. It is measured below. The absolute 100 MB/s bar stays a product target. CI does not fail the ratio. Two runs on one disk moved the raw write enough to move the ratio, and the ratio itself is below 80% because the import hashes every byte twice.
 
 ## Camera RAW verify
 
@@ -103,6 +104,42 @@ Noise handling, applied to the five repeat ratios before the comparison:
 - Exactly 10 percent is inside the gate. The comparison is exact at thousandths.
 
 The committed ratios are the `ubuntu-24.04` measurement. A laptop uses `--measure`, which prints JSON and does not compare. `--write-baseline` replaces the file. Do not replace it to hide a real regression. Replace it when the relationship to the reference moved for a reason other than the code, or when a change is an intentional speed trade that still keeps every byte and tag.
+
+## Real-size import throughput
+
+`import throughput` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) generates 1,000 synthetic files of 5,000,000 bytes each and imports them with `copy_verify`. The bytes start with a JPEG SOI and APP0 marker and end with EOI. They are deterministic and they are not committed. Generation is not part of the import clock.
+
+The destination is a directory on the same runner. After the import, the harness removes that directory. It is a directory this process just created. The source directory stays. Each source is marked read-only before the import. Reconciliation is 100 percent only when `count_in` and `count_out` are both 1,000, `mismatched` is 0, and a second SHA-256 plus the length and mtime of every source still match the snapshot taken before `copy_verify`.
+
+The raw write creates the same number of new files, of the same size, with the same durability calls: `File::sync_all` on the file and `dest::sync_dir` on the directory after each file. It does not hash and it does not preserve a source mtime. 1 MB is 1,000,000 bytes. The ratio is import MB/s divided by that raw MB/s. The job fails when reconciliation is short of 100 percent. A ratio below 0.800 is printed and is not a failure. The runs below say why.
+
+```bash
+cargo run --release --locked -p albumen-bench -- --throughput
+```
+
+The command prints JSON. `ALBUMEN_THROUGHPUT_FILES` and `ALBUMEN_THROUGHPUT_BYTES` override the size. A value below the CI default is refused unless `ALBUMEN_THROUGHPUT_ALLOW_SMALL=1`. CI does not set that variable.
+
+The legs are `ubuntu-24.04`, `ubuntu-26.04`, `macos-14`, and `windows-2025`. Each leg prints `import-throughput` with its ratio. The job fails when reconciliation is short of 100 percent. It does not fail when the ratio is below 0.80.
+
+Two back-to-back runs on this machine's ext4 disk, 1,000 files of 5,000,000 bytes, both reconciled 1,000 of 1,000 with `source_changed` 0:
+
+| Run | Import MB/s | Raw MB/s | Ratio |
+| --- | --- | --- | --- |
+| 1 | 280.480 | 602.377 | 0.4656 |
+| 2 | 279.289 | 737.715 | 0.3786 |
+
+Import stayed near 280 MB/s. The raw write moved, and the ratio moved with it. Both ratios are below 0.80. `copy_verify` hashes the bytes while it copies them, hashes the destination again, and fsyncs the preserved mtime. The raw write does none of those. An 80% failure would be red on every runner, and a tight floor on the ratio would flake when the raw write is faster.
+
+Proposed gate, after each leg below has a recorded ratio: fail that leg when a later run is under 80% of the recorded ratio for that same leg. That leaves room for the raw-write swing above. It is not applied in this job. The CI log for each leg is the measurement to record next to this table. `windows-latest` is not a separate leg.
+
+The runner numbers are filled in from the pull-request job:
+
+| Leg | Import MB/s | Raw MB/s | Ratio | Reconciliation |
+| --- | --- | --- | --- | --- |
+| ubuntu-24.04 | pending | pending | pending | pending |
+| ubuntu-26.04 | pending | pending | pending | pending |
+| macos-14 | pending | pending | pending | pending |
+| windows-2025 | pending | pending | pending | pending |
 
 ## Local 380,000-item run
 

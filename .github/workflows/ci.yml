@@ -242,6 +242,53 @@ jobs:
       - name: Compare the scaled run with the stored baseline
         run: cargo run --release --locked -p albumen-bench -- --check
 
+  throughput:
+    name: import throughput (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: ubuntu-24.04
+          - os: ubuntu-26.04
+            label: ubuntu-26.04
+          - os: macos-14
+            label: macos-14
+          - os: windows-2025
+            label: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF checkout on Windows
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Import 1000 synthetic files and compare with a raw write
+        env:
+          ALBUMEN_THROUGHPUT_LEG: ${{ matrix.label }}
+        run: |
+          cargo run --release --locked -p albumen-bench -- --throughput | tee "${RUNNER_TEMP}/throughput.json"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### import throughput (${{ matrix.label }})"
+              echo
+              echo '```json'
+              cat "${RUNNER_TEMP}/throughput.json"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   sandbox:
     name: no unexpected egress
     runs-on: ubuntu-24.04
