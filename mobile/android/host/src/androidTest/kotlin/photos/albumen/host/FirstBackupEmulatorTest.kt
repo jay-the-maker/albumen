@@ -52,7 +52,9 @@ import java.util.concurrent.TimeUnit
  * [BackupSchedule.FIRST_BACKUP_TARGET_MINUTES]. A closed port and a wrong
  * `X-Albumen-Sha256` must show the same non-blank failure on the status
  * screen and in notification [BackupNotifier.NOTIFICATION_ID]. Those checks
- * block until the status file records the failure, then read the screen.
+ * block until the status file and the notification record the failure, then
+ * until a resume shows that failure on the screen. The first resume can still
+ * be the permission decision. The wait is bounded by the same deadline.
  */
 @RunWith(AndroidJUnit4::class)
 class FirstBackupEmulatorTest {
@@ -213,18 +215,31 @@ class FirstBackupEmulatorTest {
 
     /**
      * Wait until [BackupStatusStore] and notification [BackupNotifier.NOTIFICATION_ID]
-     * both carry [marker]. The wait wakes when the status file is renamed and when
-     * WorkManager reports a new state. A closed port can sit in the connect timeout
-     * for each attempt, so the bound covers that run. The activity is read after
-     * the write, because resuming it earlier only shows the permission decision.
+     * both carry [marker], then until the status screen does too. The file wait
+     * wakes when the status file is renamed and when WorkManager reports a new
+     * state. A closed port can sit in the connect timeout for each attempt, so
+     * the bound covers that run. The activity draws the stored status on resume.
+     * The resume that follows the permission grant can still show only
+     * [PermissionGate.GRANTED], so the screen is read again until the failure is
+     * on it or the deadline passes. [assertFailureSurfaced] still requires the
+     * failure line, a failure count above zero, and the same line in the notification.
      */
     private fun awaitFailure(context: Context, scenario: ActivityScenario<HostActivity>, marker: String): Surfaced {
         val deadline = SystemClock.elapsedRealtime() + FAILURE_WAIT_MS
         awaitPublished(context, marker, deadline)
-        val screen = screenText(scenario)
-        val notification = notificationText(context)
-        if (marker in screen && marker in notification && failureCount(screen) > 0 && failureCount(notification) > 0) {
-            return Surfaced(screen, notification)
+        var screen = ""
+        var notification = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            screen = screenText(scenario)
+            notification = notificationText(context)
+            if (marker in screen && marker in notification && failureCount(screen) > 0 && failureCount(notification) > 0) {
+                return Surfaced(screen, notification)
+            }
+            val slice = (deadline - SystemClock.elapsedRealtime()).coerceAtMost(SIGNAL_SLICE_MS)
+            if (slice <= 0) {
+                break
+            }
+            SystemClock.sleep(slice)
         }
         throw AssertionError(
             "failure was not surfaced. screen: $screen\nnotification: $notification\n" +
