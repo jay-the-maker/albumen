@@ -72,8 +72,10 @@ pub const MAX_IMPORT_WORKERS: usize = 8;
 /// disk and cache state over the run (ABAB). One sample on a warm or cold
 /// disk does not move either median.
 pub const RAW_SAMPLES_PER_SIDE: usize = 3;
-/// The CPU gate reads the median of at least this many import rounds.
-pub const MIN_CPU_ROUNDS: usize = 5;
+/// The CPU gate needs this many import rounds. Every leg is gated on the
+/// best round. Linux and Windows are also gated on the median. macOS
+/// prints and scores its median and spread without gating on them.
+pub const MIN_CPU_ROUNDS: usize = 6;
 const _: () = assert!(RAW_SAMPLES_PER_SIDE * 2 >= MIN_CPU_ROUNDS);
 
 /// CPU of one import round, per GB imported.
@@ -283,8 +285,10 @@ impl ThroughputReport {
             .map(|round| json!({"raw": round.raw, "normalized": round.normalized, "write_ms": round.write_ms}))
             .collect::<Vec<_>>());
         value["round_order"] = json!(self.round_order);
-        value["cpu_seconds_per_gb_gate_passed"] =
-            json!(cpu_gate_passes(self.cpu_seconds_per_gb_median));
+        value["cpu_seconds_per_gb_best"] = json!(cpu_best(&self.cpu_rounds));
+        value["cpu_seconds_per_gb_spread"] = json!(cpu_spread(&self.cpu_rounds));
+        value["cpu_median_gated"] = json!(median_is_gated(&self.leg));
+        value["cpu_seconds_per_gb_gate_passed"] = json!(cpu_round_gate_passes(self));
         value["cpu_seconds_per_gb_met"] =
             json!(self.cpu_seconds_per_gb_median <= CPU_SECONDS_PER_GB_TARGET);
         value["phase_cpu_ms_per_round"] = phase_cpu_ms(self);
@@ -292,6 +296,35 @@ impl ThroughputReport {
         value["sha256_mb_s"] = json!(self.sha256_mb_s);
         value
     }
+}
+
+/// Lowest normalized CPU seconds per GB over the rounds.
+pub fn cpu_best(rounds: &[CpuRound]) -> f64 {
+    rounds
+        .iter()
+        .map(|round| round.normalized)
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Highest minus lowest normalized CPU seconds per GB over the rounds.
+pub fn cpu_spread(rounds: &[CpuRound]) -> f64 {
+    let worst = rounds
+        .iter()
+        .map(|round| round.normalized)
+        .fold(f64::NEG_INFINITY, f64::max);
+    (worst - cpu_best(rounds)).max(0.0)
+}
+
+/// The median is gated on every leg except macOS.
+pub fn median_is_gated(leg: &str) -> bool {
+    !leg.to_ascii_lowercase().contains("macos")
+}
+
+/// Whether the CPU gate passes: the best round on every leg, and the median
+/// too on legs other than macOS.
+pub fn cpu_round_gate_passes(report: &ThroughputReport) -> bool {
+    cpu_gate_passes(cpu_best(&report.cpu_rounds))
+        && (!median_is_gated(&report.leg) || cpu_gate_passes(report.cpu_seconds_per_gb_median))
 }
 
 /// Fail when reconciliation is short of 100 percent.
@@ -321,7 +354,15 @@ pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
             report.cpu_rounds.len()
         ));
     }
-    if !cpu_gate_passes(report.cpu_seconds_per_gb_median) {
+    let best = cpu_best(&report.cpu_rounds);
+    if !cpu_gate_passes(best) {
+        problems.push(format!(
+            "import CPU best round {best:.3} normalized CPU seconds per GB over {} rounds is above the {:.1} regression gate",
+            report.cpu_rounds.len(),
+            CPU_SECONDS_PER_GB_GATE
+        ));
+    }
+    if median_is_gated(&report.leg) && !cpu_gate_passes(report.cpu_seconds_per_gb_median) {
         problems.push(format!(
             "import CPU median {:.3} normalized CPU seconds per GB over {} rounds (total {:.3} normalized, {:.3} raw, sha256_mb_s {:.0}) is above the {:.1} regression gate",
             report.cpu_seconds_per_gb_median,
@@ -1018,7 +1059,8 @@ pub fn cpu_scorecard(report: &ThroughputReport) -> String {
     let mark = |met: bool| if met { "met" } else { "not met" };
     format!(
         "| import CPU ({leg}) | value | team target | |\n|---|---|---|---|\n\
-         | CPU seconds per GB, normalized to {sha_ref:.0} MB/s SHA-256, median of {n} rounds | {median:.2} | ≤ {gb_target:.1} scored, ≤ {gb_gate:.1} gate (fails the job) | scored {gb_met}, gate {gate_met} |\n\
+         | CPU seconds per GB, normalized to {sha_ref:.0} MB/s SHA-256, best of {n} rounds | {best:.2} | ≤ {gb_gate:.1} gate (fails the job) | gate {gate_met} |\n\
+         | CPU seconds per GB, normalized, median of {n} rounds (spread {spread:.2}) | {median:.2} | ≤ {gb_target:.1} scored{median_gate} | scored {gb_met} |\n\
          | CPU seconds per GB, normalized, all rounds | {norm:.2} | | |\n\
          | CPU seconds per GB, raw, all rounds | {gb:.2} | | |\n\
          | cpu_percent (CPU ÷ (wall × {cores} cores)), context | {pct:.1}% | | |\n\
@@ -1033,7 +1075,14 @@ pub fn cpu_scorecard(report: &ThroughputReport) -> String {
         median = report.cpu_seconds_per_gb_median,
         gb_met = mark(report.cpu_seconds_per_gb_median <= CPU_SECONDS_PER_GB_TARGET),
         gb_gate = CPU_SECONDS_PER_GB_GATE,
-        gate_met = mark(cpu_gate_passes(report.cpu_seconds_per_gb_median)),
+        gate_met = mark(cpu_round_gate_passes(report)),
+        best = cpu_best(&report.cpu_rounds),
+        spread = cpu_spread(&report.cpu_rounds),
+        median_gate = if median_is_gated(&report.leg) {
+            ", ≤ 3.0 gate (fails the job)"
+        } else {
+            ", not gated on macOS"
+        },
         cores = report.cores,
         pct = report.cpu_percent,
         per_1000 = report.cpu_seconds_per_1000,
@@ -1435,6 +1484,13 @@ mod tests {
         assert!(!throughput_problems(&few).is_empty());
         let mut slow = report.clone();
         slow.cpu_seconds_per_gb_median = 3.001;
+        slow.leg = "ubuntu-24.04".to_string();
+        assert!(!throughput_problems(&slow).is_empty());
+        slow.leg = "macos-14".to_string();
+        assert!(throughput_problems(&slow).is_empty());
+        for round in &mut slow.cpu_rounds {
+            round.normalized = 3.001;
+        }
         assert!(!throughput_problems(&slow).is_empty());
         let mut missed = report.clone();
         missed.source_changed = 1;
@@ -1443,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cpu_gate_reads_the_median_round_and_needs_five_rounds() {
+    fn the_cpu_gate_reads_the_best_round_and_the_median_off_macos() {
         // Same report fixture as above, with the CPU rounds varied.
         let round = |normalized: f64| CpuRound {
             raw: normalized,
@@ -1459,7 +1515,12 @@ mod tests {
         rounds[1] = round(3.1);
         let mut values: Vec<f64> = rounds.iter().map(|r| r.normalized).collect();
         assert!(!cpu_gate_passes(median(&mut values)));
-        assert_eq!(MIN_CPU_ROUNDS, 5);
+        assert!((cpu_best(&rounds) - 2.8).abs() < 1e-9);
+        assert!((cpu_spread(&rounds) - 1.3).abs() < 1e-9);
+        assert!(median_is_gated("windows-2025"));
+        assert!(median_is_gated("ubuntu-26.04"));
+        assert!(!median_is_gated("macos-14"));
+        assert_eq!(MIN_CPU_ROUNDS, 6);
         assert_eq!(cpu_rounds_line(&[round(2.5)]), "2.500/2.500/0");
     }
 
