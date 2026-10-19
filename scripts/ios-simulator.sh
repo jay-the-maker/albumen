@@ -9,7 +9,7 @@ if ! command -v xcodebuild >/dev/null 2>&1; then
   echo "xcodebuild is required. The iOS simulator job runs on the macOS runner." >&2
   exit 1
 fi
-if ! command -v cargo >/dev/null 2>&1; then
+if [[ -z "${ALBUMEN_SOAK_ITEMS:-}" ]] && ! command -v cargo >/dev/null 2>&1; then
   echo "cargo is required to build albumen-receive." >&2
   exit 1
 fi
@@ -45,44 +45,50 @@ install_applesimutils() {
   tar -xzf "$archive" -C "$dest"
   printf '%s\n' "$bin"
 }
-cargo build --locked --release -p albumen-receive
-
-library=$(mktemp -d)
-log=$(mktemp)
-password=albumen-ci-not-a-secret
-ALBUMEN_RECEIVE_PASSWORD="$password" \
-  "$root/target/release/albumen-receive" \
-  --apply \
-  --to "$library" \
-  --user camera \
-  --webdav 127.0.0.1:18080 \
-  >"$log" 2>&1 &
-receiver_pid=$!
+scale=${ALBUMEN_SOAK_ITEMS:-}
+receiver_pid=""
 cleanup() {
-  if kill -0 "$receiver_pid" 2>/dev/null; then
+  if [[ -n "$receiver_pid" ]] && kill -0 "$receiver_pid" 2>/dev/null; then
     kill "$receiver_pid" 2>/dev/null || true
     wait "$receiver_pid" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
-ready=0
-for _ in $(seq 1 50); do
-  if grep -q "webdav http://127.0.0.1:18080" "$log"; then
-    ready=1
-    break
-  fi
-  if ! kill -0 "$receiver_pid" 2>/dev/null; then
-    echo "albumen-receive stopped before it listened" >&2
+if [[ -z "$scale" ]]; then
+  cargo build --locked --release -p albumen-receive
+  library=$(mktemp -d)
+  log=$(mktemp)
+  password=albumen-ci-not-a-secret
+  ALBUMEN_RECEIVE_PASSWORD="$password" \
+    "$root/target/release/albumen-receive" \
+    --apply \
+    --to "$library" \
+    --user camera \
+    --webdav 127.0.0.1:18080 \
+    >"$log" 2>&1 &
+  receiver_pid=$!
+fi
+
+if [[ -z "$scale" ]]; then
+  ready=0
+  for _ in $(seq 1 50); do
+    if grep -q "webdav http://127.0.0.1:18080" "$log"; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$receiver_pid" 2>/dev/null; then
+      echo "albumen-receive stopped before it listened" >&2
+      cat "$log" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    echo "albumen-receive did not listen on 127.0.0.1:18080" >&2
     cat "$log" >&2
     exit 1
   fi
-  sleep 0.2
-done
-if [[ "$ready" -ne 1 ]]; then
-  echo "albumen-receive did not listen on 127.0.0.1:18080" >&2
-  cat "$log" >&2
-  exit 1
 fi
 
 # A newer simulator runtime than this Xcode's SDK rejects simctl privacy.
@@ -154,11 +160,60 @@ if ! xcrun simctl privacy "$udid" grant notifications "$bundle"; then
   "$tool" --byId "$udid" --bundle "$bundle" --setPermissions "notifications=YES"
 fi
 
-xcodebuild test-without-building \
-  -project "$root/mobile/ios/Albumen.xcodeproj" \
-  -scheme AlbumenSimulator \
-  -destination "platform=iOS Simulator,id=$udid" \
-  -configuration Debug \
-  -derivedDataPath "$derived" \
-  -parallel-testing-enabled NO \
-  "${sign[@]}"
+xcrun simctl spawn "$udid" defaults delete "$bundle" albumenSoakArmed >/dev/null 2>&1 || true
+xcrun simctl spawn "$udid" defaults delete "$bundle" albumenSoakItems >/dev/null 2>&1 || true
+if [[ -n "$scale" ]]; then
+  data=$(xcrun simctl get_app_container "$udid" "$bundle" data)
+  mkdir -p "$data/tmp" "$data/Library/Caches"
+  plan=$(printf 'armed=yes\nitems=%s\nshard=%s\nshards=%s\nseed=%s\n' \
+    "$scale" "${ALBUMEN_SOAK_SHARD:-0}" "${ALBUMEN_SOAK_SHARDS:-1}" "${ALBUMEN_SOAK_SEED:-1}")
+  printf '%s' "$plan" >"$data/tmp/albumen-soak-plan.txt"
+  printf '%s' "$plan" >"$data/Library/Caches/albumen-soak-plan.txt"
+  xcrun simctl spawn "$udid" defaults write "$bundle" albumenSoakArmed -string yes
+  xcrun simctl spawn "$udid" defaults write "$bundle" albumenSoakItems -int "$scale"
+  xcrun simctl spawn "$udid" defaults write "$bundle" albumenSoakShard -int "${ALBUMEN_SOAK_SHARD:-0}"
+  xcrun simctl spawn "$udid" defaults write "$bundle" albumenSoakShards -int "${ALBUMEN_SOAK_SHARDS:-1}"
+  xcrun simctl spawn "$udid" defaults write "$bundle" albumenSoakSeed -string "${ALBUMEN_SOAK_SEED:-1}"
+fi
+
+set +e
+if [[ -n "$scale" ]]; then
+  xcodebuild test-without-building \
+    -project "$root/mobile/ios/Albumen.xcodeproj" \
+    -scheme AlbumenSimulator \
+    -destination "platform=iOS Simulator,id=$udid" \
+    -configuration Debug \
+    -derivedDataPath "$derived" \
+    -parallel-testing-enabled NO \
+    -only-testing:AlbumenSimulatorTests/SimulatorScaleSoakTests \
+    "${sign[@]}"
+else
+  xcodebuild test-without-building \
+    -project "$root/mobile/ios/Albumen.xcodeproj" \
+    -scheme AlbumenSimulator \
+    -destination "platform=iOS Simulator,id=$udid" \
+    -configuration Debug \
+    -derivedDataPath "$derived" \
+    -parallel-testing-enabled NO \
+    "${sign[@]}"
+fi
+status=$?
+set -e
+if [[ -n "$scale" ]]; then
+  data=$(xcrun simctl get_app_container "$udid" "$bundle" data)
+  shard="${ALBUMEN_SOAK_SHARD:-0}"
+  dest="$root/build/backup-scale-soak"
+  mkdir -p "$dest"
+  found=$(find "$data" -path '*backup-scale-soak/result.txt' -print -quit || true)
+  if [[ -n "$found" ]]; then
+    dir=$(dirname "$found")
+    cp "$dir/result.txt" "$dest/ios-shard-${shard}-result.txt"
+    cp "$dir/faults.log" "$dest/ios-shard-${shard}-faults.log"
+    cp "$dir/timeline.csv" "$dest/ios-shard-${shard}-timeline.csv"
+    cat "$dest/ios-shard-${shard}-result.txt"
+  elif [[ "$status" -eq 0 ]]; then
+    echo "scale soak did not write a result under $data" >&2
+    exit 1
+  fi
+fi
+exit "$status"

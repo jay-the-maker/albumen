@@ -20,6 +20,7 @@
 		B1000000000000000000000B /* AlbumenBackup in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000003 /* AlbumenBackup */; };
 		B1000000000000000000000C /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000004 /* AlbumenUpload */; };
 		E10000000000000000000004 /* SimulatorBackupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* SimulatorBackupTests.swift */; };
+		E1000000000000000000000A /* SimulatorScaleSoakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000000000000000000000B /* SimulatorScaleSoakTests.swift */; };
 		E10000000000000000000005 /* SyntheticGpsJpeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* SyntheticGpsJpeg.swift */; };
 		E10000000000000000000006 /* AlbumenUpload in Frameworks */ = {isa = PBXBuildFile; productRef = E10000000000000000000007 /* AlbumenUpload */; };
 		B20000000000000000000001 /* SimulatorHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* SimulatorHostApp.swift */; };
@@ -70,6 +71,7 @@
 		F1000000000000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F1000000000000000000000C /* BackgroundUpload.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BackgroundUpload.entitlements; sourceTree = "<group>"; };
 		E10000000000000000000001 /* SimulatorBackupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorBackupTests.swift; sourceTree = "<group>"; };
+		E1000000000000000000000B /* SimulatorScaleSoakTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorScaleSoakTests.swift; sourceTree = "<group>"; };
 		E10000000000000000000002 /* SyntheticGpsJpeg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticGpsJpeg.swift; sourceTree = "<group>"; };
 		E10000000000000000000003 /* AlbumenSimulatorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AlbumenSimulatorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F20000000000000000000001 /* SimulatorHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorHostApp.swift; sourceTree = "<group>"; };
@@ -161,6 +163,7 @@
 			isa = PBXGroup;
 			children = (
 				E10000000000000000000001 /* SimulatorBackupTests.swift */,
+				E1000000000000000000000B /* SimulatorScaleSoakTests.swift */,
 				E10000000000000000000002 /* SyntheticGpsJpeg.swift */,
 			);
 			path = SimulatorTests;
@@ -335,6 +338,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E10000000000000000000004 /* SimulatorBackupTests.swift in Sources */,
+				E1000000000000000000000A /* SimulatorScaleSoakTests.swift in Sources */,
 				E10000000000000000000005 /* SyntheticGpsJpeg.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

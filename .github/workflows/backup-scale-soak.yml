@@ -1,0 +1,149 @@
+name: backup scale soak
+
+# Nightly and manual runs cover 10,000 synthetic items. One GitHub-hosted
+# runner does not finish emulator or simulator boot plus a faulted PUT for
+# every one of those items inside the job timeout, so the run is 10 shards
+# of 1,000. A pull request runs 8 items on one shard of each platform.
+# The bytes are generated in the test. No camera roll and no family library
+# is opened.
+
+on:
+  workflow_dispatch:
+    inputs:
+      items:
+        description: Synthetic items across all shards
+        default: "10000"
+        required: false
+      shards:
+        description: Parallel shards. Each runner takes items/shards.
+        default: "10"
+        required: false
+      seed:
+        description: RNG seed. Empty uses the GitHub run id.
+        default: ""
+        required: false
+  schedule:
+    - cron: "17 8 * * *"
+  pull_request:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  plan:
+    name: plan shards
+    runs-on: ubuntu-24.04
+    outputs:
+      items: ${{ steps.plan.outputs.items }}
+      shards: ${{ steps.plan.outputs.shards }}
+      seed: ${{ steps.plan.outputs.seed }}
+      per_shard: ${{ steps.plan.outputs.per_shard }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      smoke: ${{ steps.plan.outputs.smoke }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: plan
+        env:
+          ALBUMEN_SOAK_ITEMS_INPUT: ${{ github.event.inputs.items }}
+          ALBUMEN_SOAK_SHARDS_INPUT: ${{ github.event.inputs.shards }}
+          ALBUMEN_SOAK_SEED_INPUT: ${{ github.event.inputs.seed }}
+        run: scripts/backup-scale-soak-plan.sh
+
+  android:
+    name: android emulator shard ${{ matrix.shard }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Java for the Android SDK
+        run: |
+          if ! command -v java >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y openjdk-17-jdk-headless unzip
+          fi
+          java -version
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Seeded soak on an API 30 emulator
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 30
+          target: aosp_atd
+          arch: x86_64
+          script: |
+            export ALBUMEN_SOAK_ITEMS='${{ needs.plan.outputs.per_shard }}'
+            export ALBUMEN_SOAK_SHARD='${{ matrix.shard }}'
+            export ALBUMEN_SOAK_SHARDS='${{ needs.plan.outputs.shards }}'
+            export ALBUMEN_SOAK_SEED='${{ needs.plan.outputs.seed }}'
+            scripts/android-scale-soak.sh
+
+      - name: Upload shard result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-scale-soak-android-shard-${{ matrix.shard }}
+          path: build/backup-scale-soak/android-shard-${{ matrix.shard }}-*
+          if-no-files-found: error
+
+  ios:
+    name: ios simulator shard ${{ matrix.shard }}
+    needs: plan
+    runs-on: macos-14
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Seeded soak on the iOS Simulator
+        env:
+          ALBUMEN_SOAK_ITEMS: ${{ needs.plan.outputs.per_shard }}
+          ALBUMEN_SOAK_SHARD: ${{ matrix.shard }}
+          ALBUMEN_SOAK_SHARDS: ${{ needs.plan.outputs.shards }}
+          ALBUMEN_SOAK_SEED: ${{ needs.plan.outputs.seed }}
+        run: scripts/ios-simulator.sh
+
+      - name: Upload shard result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-scale-soak-ios-shard-${{ matrix.shard }}
+          path: build/backup-scale-soak/ios-shard-${{ matrix.shard }}-*
+          if-no-files-found: error
+
+  summary:
+    name: soak summary
+    needs: [plan, android, ios]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backup-scale-soak-*
+          path: build/backup-scale-soak
+          merge-multiple: true
+
+      - name: Report verified percent and time to 99.9%
+        env:
+          ALBUMEN_SOAK_SMOKE: ${{ needs.plan.outputs.smoke }}
+          ALBUMEN_SOAK_ITEMS: ${{ needs.plan.outputs.items }}
+          ALBUMEN_SOAK_SHARDS: ${{ needs.plan.outputs.shards }}
+        run: python3 scripts/backup-scale-soak-summary.py build/backup-scale-soak

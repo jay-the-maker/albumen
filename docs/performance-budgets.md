@@ -39,6 +39,8 @@ CI does not measure these parts of the 24-hour target:
 - A true `SIGKILL`. The kill cycle closes the socket and sets the in-process stop flag. A process that is already gone cannot publish; the following cycle is what verifies the item or names it.
 - A radio drop beyond a closed TCP socket. Receiver down is connection refused on a closed port. Network drop is that socket closing during the body.
 
+[`.github/workflows/backup-scale-soak.yml`](../.github/workflows/backup-scale-soak.yml) is the longer stand-in. A pull request runs 8 synthetic items on one emulator shard and one simulator shard, seed 1. The nightly run is 10,000 synthetic items as 10 shards of 1,000, because one runner's 90 minute limit does not hold image boot plus a faulted upload of all 10,000. Each shard logs its seed and the fault for every item. Shards run in parallel. `time_to_99_9_ms` is that shard's clock from the start of the shard until 99.9 percent of its items are verified. The job summary reports the slowest of those clocks. The bytes are not photographs. The camera roll and any other member's namespace stay closed. What a 24 hour run on a real phone would still have to measure is the protocol in [test-ladder.md](test-ladder.md). That protocol is waiting on approval and does not run.
+
 ## Budgets for the library
 
 These are the product bars on a 380,000-item library. CI does not fail a job for missing the absolute number. CI fails a regression of the scaled run, described below.
