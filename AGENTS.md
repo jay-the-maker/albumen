@@ -74,7 +74,9 @@ A 380,000-item run is local only: `ALBUMEN_BENCH_ITEMS=380000 cargo run --releas
 ## Never delete
 
 - Do not add a CLI move, a receiver delete, or an MCP tool named delete, remove, unlink, move, or quarantine.
-- `copy_verify_quarantine` is an explicit per-run opt-in. The CLI and the default MCP server do not call it, and source scans assert those crates do not name it. Leave that scan green.
+- `copy_verify_quarantine` cannot target a source. It returns an error and does not copy or rename. The CLI and the MCP server do not call it, and source scans assert those crates do not name it. Leave that scan green.
+- A source is opened read-only. Production writes go through `ingest/src/dest.rs`. `scripts/check-dest-writes.py` fails the build otherwise. A destination inside a source is refused. There is no override.
+- `export`, `upload`, and `albumen-receive` write only with `--apply` or `--execute`. Scan does not take that flag. The ladder is [docs/test-ladder.md](docs/test-ladder.md). The per-binary reach is [docs/threat-model.md](docs/threat-model.md).
 - `BlobStore::delete` rolls back a destination this process just wrote when verification fails. It is not a user-facing delete.
 - Do not `remove_file` a sidecar to replace it. Write a temp file in the same directory, fsync, rename over the old sidecar, and fsync the directory.
 - The first `source_mtime` is write-once at commit. A later conflicting time is appended. It does not replace the first.
@@ -91,4 +93,4 @@ A 380,000-item run is local only: `ALBUMEN_BENCH_ITEMS=380000 cargo run --releas
 
 You are a contributor. Read [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs `Signed-off-by`. Keep a pull request to one concern. The pull request body checks the philosophy box, checks `Sane defaults`, `No account required`, and `No nags`, and explains how the change upholds [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). The `philosophy-ack` workflow fails unless those boxes are checked, the explanation is at least 20 characters and is not the template placeholder, and every commit in the pull request has `Signed-off-by`.
 
-Do not copy Immich, Ente, or other AGPL photo-library source into this Apache-2.0 tree. MinIO is an external CI process and is not vendored. Do not commit real photos, real filenames, real checksums, or real GPS. Do not change branch protection. The only registry publish is `.github/workflows/publish-mcp.yml` on a `v*` tag. Do not publish [server.json](server.json) by hand, and do not submit the server to Glama, Smithery, PulseMCP, or mcp.so.
+This tree is Apache-2.0 and contains Albumen's own code. AGPL photo-library source, including Immich and Ente, stays in those projects. MinIO is an external CI process and stays outside the tree. Do not commit real photos, real filenames, real checksums, or real GPS. Do not change branch protection. The only registry publish is `.github/workflows/publish-mcp.yml` on a `v*` tag. Do not publish [server.json](server.json) by hand, and do not submit the server to Glama, Smithery, PulseMCP, or mcp.so.

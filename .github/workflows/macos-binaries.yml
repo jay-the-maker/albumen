@@ -12,6 +12,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   macos-arm64:
@@ -25,19 +27,43 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.2
 
-      - name: Build release binaries
-        run: cargo build --release --locked -p albumen -p albumen-mcp
+      - uses: sigstore/cosign-installer@v3.8.2
 
-      - name: Package albumen and albumen-mcp
+      - name: Build release binaries
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/albumen"
+          export CARGO_INCREMENTAL=0
+          export CARGO_PROFILE_RELEASE_INCREMENTAL=false
+          export CARGO_PROFILE_RELEASE_DEBUG=false
+          export CARGO_PROFILE_RELEASE_STRIP=symbols
+          cargo build --release --locked -p albumen -p albumen-mcp -p albumen-receive
+
+      - name: Package albumen, albumen-mcp, and albumen-receive
         run: |
           stage="$(mktemp -d)"
-          cp target/release/albumen target/release/albumen-mcp "$stage/"
+          cp target/release/albumen target/release/albumen-mcp target/release/albumen-receive "$stage/"
           (
             cd "$stage"
-            shasum -a 256 albumen albumen-mcp > SHA256SUMS
-            tar -czf "$GITHUB_WORKSPACE/albumen-macos-arm64.tar.gz" albumen albumen-mcp SHA256SUMS
+            shasum -a 256 albumen albumen-mcp albumen-receive > SHA256SUMS
+            tar -czf "$GITHUB_WORKSPACE/albumen-macos-arm64.tar.gz" albumen albumen-mcp albumen-receive SHA256SUMS
+            cp albumen albumen-mcp albumen-receive "$GITHUB_WORKSPACE/"
           )
           shasum -a 256 albumen-macos-arm64.tar.gz > albumen-macos-arm64.tar.gz.sha256
+
+      - name: Sign the binaries and the tarball
+        run: |
+          for file in albumen albumen-mcp albumen-receive albumen-macos-arm64.tar.gz; do
+            cosign sign-blob --yes --bundle "${file}.bundle" "$file"
+          done
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            albumen
+            albumen-mcp
+            albumen-receive
+            albumen-macos-arm64.tar.gz
 
       - name: Upload to the GitHub release
         env:
@@ -47,5 +73,9 @@ jobs:
           gh release upload "$TAG" \
             albumen-macos-arm64.tar.gz \
             albumen-macos-arm64.tar.gz.sha256 \
+            albumen.bundle \
+            albumen-mcp.bundle \
+            albumen-receive.bundle \
+            albumen-macos-arm64.tar.gz.bundle \
             --repo "${{ github.repository }}" \
             --clobber

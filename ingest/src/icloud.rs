@@ -12,7 +12,8 @@
 //! never written. A capture timestamp read from a sidecar is reported there
 //! and is never written into an original.
 
-use std::fs::{self, File, OpenOptions};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,6 +24,7 @@ use tar::Archive;
 use zip::ZipArchive;
 
 use crate::checksum::{sha256_file, sha256_reader, to_hex};
+use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
 use crate::local::{copy_verify_file, copy_verify_reader};
@@ -42,11 +44,137 @@ struct Counters {
     count_in: u64,
     count_out: u64,
     mismatched: u64,
+    unmatched: u64,
 }
 
 struct ReportFile {
     file: BufWriter<File>,
     path: PathBuf,
+}
+
+/// List what [`import_icloud`] would copy. Creates nothing.
+pub fn plan_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudPlan, IngestError> {
+    let source_meta = fs::symlink_metadata(from).map_err(|err| IngestError::io(from, err))?;
+    if source_meta.file_type().is_symlink() {
+        return Err(IngestError::Symlink(from.to_path_buf()));
+    }
+    let source_root = if source_meta.is_file() {
+        from.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(from)
+    } else {
+        from
+    };
+    refuse_layout(source_root, to, report)?;
+    let names = if source_meta.is_file() {
+        archive_plan_names(from)?
+    } else if is_download_dir(from)? {
+        download_plan_names(from)?
+    } else {
+        tree_plan_names(from)?
+    };
+    let index = name_index(&names);
+    let mut unmatched = Vec::new();
+    let mut live_photos = Vec::new();
+    for member in &names {
+        if sidecar_unmatched(
+            member,
+            sidecar_partner_stem(member).as_deref(),
+            from,
+            false,
+            Some(&index),
+        ) {
+            unmatched.push(member.clone());
+        }
+        if let Some(stem) = live_photo_stem(member) {
+            if live_pair_present(from, member, stem, false, Some(&index)) {
+                live_photos.push(stem.to_string());
+            }
+        }
+    }
+    unmatched.sort();
+    unmatched.dedup();
+    live_photos.sort();
+    live_photos.dedup();
+    Ok(IcloudPlan {
+        files: names.len() as u64,
+        unmatched,
+        live_photos,
+    })
+}
+
+/// Counts and names from a dry-run. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IcloudPlan {
+    pub files: u64,
+    pub unmatched: Vec<String>,
+    pub live_photos: Vec<String>,
+}
+
+fn archive_plan_names(path: &Path) -> Result<Vec<String>, IngestError> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        tgz_member_names(path)
+    } else if name.ends_with(".zip") {
+        zip_member_names(path)
+    } else {
+        Err(IngestError::store(
+            "icloud",
+            name,
+            "a file source must be a .zip, .tgz, or .tar.gz download",
+        ))
+    }
+}
+
+fn download_plan_names(root: &Path) -> Result<Vec<String>, IngestError> {
+    let mut files = Vec::new();
+    collect_download(root, "", &mut files)?;
+    let mut names = Vec::new();
+    for (relative, path) in files {
+        if is_archive_name(&path) {
+            let mut members = archive_plan_names(&path)?;
+            names.append(&mut members);
+        } else {
+            names.push(relative);
+        }
+    }
+    Ok(names)
+}
+
+fn tree_plan_names(root: &Path) -> Result<Vec<String>, IngestError> {
+    let mut names = Vec::new();
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), IngestError> {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))? {
+            let entry = entry.map_err(|err| IngestError::io(dir, err))?;
+            entries.push(entry.file_name());
+        }
+        entries.sort();
+        for name in entries {
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let path = dir.join(name);
+            let relative = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                walk(&path, &relative, out)?;
+            } else {
+                out.push(relative);
+            }
+        }
+        Ok(())
+    }
+    walk(root, "", &mut names)?;
+    Ok(names)
 }
 
 /// Copy an iCloud Photos download, export, or Photos library into `to`.
@@ -73,10 +201,10 @@ pub fn import_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudRepo
         from
     };
     refuse_layout(source_root, to, report)?;
-    fs::create_dir_all(to).map_err(|err| IngestError::io(to, err))?;
+    dest::create_dir_all(to)?;
     if let Some(parent) = report.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| IngestError::io(parent, err))?;
+            dest::create_dir_all(parent)?;
         }
     }
 
@@ -152,6 +280,12 @@ pub fn import_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudRepo
         return Err(IngestError::NotAFile(from.to_path_buf()));
     }
 
+    if fatal.is_none() {
+        if let Err(err) = restore_icloud_sidecars(to, &mut report_file, &mut counters) {
+            fatal = Some(err);
+        }
+    }
+
     if counters.count_in == 0 && fatal.is_none() {
         counters.mismatched = counters.mismatched.saturating_add(1);
         let _ = report_file.line(&json!({
@@ -165,6 +299,7 @@ pub fn import_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudRepo
         "count_in": counters.count_in,
         "count_out": counters.count_out,
         "mismatched": counters.mismatched,
+        "unmatched": counters.unmatched,
         "sources_unchanged": sources_unchanged,
     }))?;
     report_file.finish()?;
@@ -283,6 +418,7 @@ fn import_download(
                 report,
                 counters,
                 on_disk: true,
+                names: None,
             }
             .place_file(&path, &relative)?;
         }
@@ -392,8 +528,19 @@ fn export_library_metadata(
             favorite,
             caption,
             albums,
+            capture_time,
+            latitude,
+            longitude,
         } => {
-            let bytes = metadata_json(&relative, favorite, caption.as_deref(), &albums)?;
+            let bytes = metadata_json(
+                &relative,
+                favorite,
+                caption.as_deref(),
+                &albums,
+                capture_time.as_deref(),
+                latitude,
+                longitude,
+            )?;
             let member = format!("{relative}.albumen.json");
             let mtime = crate::mtime::mtime_of(&root.join(&relative))?;
             Session {
@@ -403,6 +550,7 @@ fn export_library_metadata(
                 report,
                 counters,
                 on_disk: false,
+                names: None,
             }
             .place_reader(&mut std::io::Cursor::new(bytes), &member, Some(mtime))
         }
@@ -414,6 +562,9 @@ fn metadata_json(
     favorite: bool,
     caption: Option<&str>,
     albums: &[String],
+    capture_time: Option<&str>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
 ) -> Result<Vec<u8>, IngestError> {
     let mut map = serde_json::Map::new();
     if !albums.is_empty() {
@@ -424,6 +575,13 @@ fn metadata_json(
     }
     if favorite {
         map.insert("favorite".to_string(), json!(true));
+    }
+    if let Some(capture_time) = capture_time {
+        map.insert("captureTime".to_string(), json!(capture_time));
+    }
+    if let (Some(latitude), Some(longitude)) = (latitude, longitude) {
+        map.insert("latitude".to_string(), json!(latitude));
+        map.insert("longitude".to_string(), json!(longitude));
     }
     map.insert("partner".to_string(), json!(partner));
     let mut bytes = serde_json::to_vec(&serde_json::Value::Object(map))
@@ -462,6 +620,7 @@ fn import_zip(
     report: &mut ReportFile,
     counters: &mut Counters,
 ) -> Result<(), IngestError> {
+    let listed = name_index(&zip_member_names(path)?);
     let file = open_read_only(path)?;
     let mut archive = ZipArchive::new(file).map_err(|err| {
         IngestError::store("icloud", file_name_str(path).unwrap_or_default(), err)
@@ -520,6 +679,7 @@ fn import_zip(
             report,
             counters,
             on_disk: false,
+            names: Some(&listed),
         }
         .place_reader(entry, &member_name, mtime)?;
     }
@@ -532,6 +692,7 @@ fn import_tgz(
     report: &mut ReportFile,
     counters: &mut Counters,
 ) -> Result<(), IngestError> {
+    let listed = name_index(&tgz_member_names(path)?);
     let file = open_read_only(path)?;
     let mut archive = Archive::new(GzDecoder::new(file));
     let archive_name = file_name_str(path)?;
@@ -589,6 +750,7 @@ fn import_tgz(
             report,
             counters,
             on_disk: false,
+            names: Some(&listed),
         }
         .place_reader(&mut entry, &member_name, mtime)?;
     }
@@ -719,6 +881,7 @@ fn walk_tree(
                 report,
                 counters,
                 on_disk: true,
+                names: None,
             }
             .place_file(&path, &relative)?;
         }
@@ -797,6 +960,12 @@ struct Session<'a> {
     report: &'a mut ReportFile,
     counters: &'a mut Counters,
     on_disk: bool,
+    names: Option<&'a NameIndex>,
+}
+
+struct NameIndex {
+    pairs: HashSet<String>,
+    media: HashSet<String>,
 }
 
 struct Filed<'a> {
@@ -1066,11 +1235,24 @@ impl Session<'_> {
             "status": note.status,
         });
         if let Some(stem) = live_photo_stem(note.member) {
-            line["live_photo_stem"] = json!(stem);
+            if live_pair_present(self.label, note.member, stem, self.on_disk, self.names) {
+                line["live_photo_stem"] = json!(stem);
+            }
         }
         if kind == "sidecar" {
-            line["partner_stem"] = json!(sidecar_partner_stem(note.member));
+            let partner = sidecar_partner_stem(note.member);
+            line["partner_stem"] = json!(partner);
             line["capture_time"] = json!(note.capture_time);
+            if sidecar_unmatched(
+                note.member,
+                partner.as_deref(),
+                self.label,
+                self.on_disk,
+                self.names,
+            ) {
+                line["unmatched"] = json!(true);
+                self.counters.unmatched = self.counters.unmatched.saturating_add(1);
+            }
         }
         if !note.on_disk {
             line["on_disk"] = json!(false);
@@ -1139,6 +1321,175 @@ fn is_media_ext(ext: &str) -> bool {
         "cr3", "nef", "arw", "raf", "orf", "rw2", "raw", "mov", "mp4", "m4v",
     ];
     EXT.iter().any(|item| ext.eq_ignore_ascii_case(item))
+}
+
+fn name_index(members: &[String]) -> NameIndex {
+    let mut stills: HashSet<String> = HashSet::new();
+    let mut videos: HashSet<String> = HashSet::new();
+    let mut media: HashSet<String> = HashSet::new();
+    for member in members {
+        let Some(stem) = live_photo_stem(member) else {
+            continue;
+        };
+        let name = member.rsplit('/').next().unwrap_or(member);
+        let Some((_, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        let directory = member.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        let key = format!("{directory}\n{}", stem.to_ascii_lowercase());
+        media.insert(key.clone());
+        if is_video_ext(ext) {
+            videos.insert(key);
+        } else {
+            stills.insert(key);
+        }
+    }
+    let pairs = stills.intersection(&videos).cloned().collect();
+    NameIndex { pairs, media }
+}
+
+fn zip_member_names(path: &Path) -> Result<Vec<String>, IngestError> {
+    let file = open_read_only(path)?;
+    let mut archive = ZipArchive::new(file).map_err(|err| {
+        IngestError::store("icloud", file_name_str(path).unwrap_or_default(), err)
+    })?;
+    let mut names = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|err| {
+            IngestError::store("icloud", file_name_str(path).unwrap_or_default(), err)
+        })?;
+        if entry.is_dir() || !entry.is_file() {
+            continue;
+        }
+        if let Ok(name) = entry.name() {
+            names.push(name.into_owned());
+        }
+    }
+    Ok(names)
+}
+
+fn tgz_member_names(path: &Path) -> Result<Vec<String>, IngestError> {
+    let file = open_read_only(path)?;
+    let mut archive = Archive::new(GzDecoder::new(file));
+    let mut names = Vec::new();
+    let entries = archive
+        .entries()
+        .map_err(|err| IngestError::io(path, err))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| IngestError::io(path, err))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(&entry.path_bytes()) {
+            if !name.contains('\\') {
+                names.push(name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn live_pair_present(
+    root: &Path,
+    member: &str,
+    stem: &str,
+    on_disk: bool,
+    names: Option<&NameIndex>,
+) -> bool {
+    let directory = member.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let key = format!("{directory}\n{}", stem.to_ascii_lowercase());
+    if let Some(names) = names {
+        return names.pairs.contains(&key);
+    }
+    if !on_disk {
+        return false;
+    }
+    sibling_has(root, member, stem, true)
+}
+
+fn sidecar_unmatched(
+    member: &str,
+    partner: Option<&str>,
+    root: &Path,
+    on_disk: bool,
+    names: Option<&NameIndex>,
+) -> bool {
+    let lower = member.to_ascii_lowercase();
+    if lower.ends_with(".csv") || lower.ends_with(".albumen.json") {
+        return false;
+    }
+    let Some(partner) = partner else {
+        return false;
+    };
+    let directory = member.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let key = format!("{directory}\n{}", partner.to_ascii_lowercase());
+    if let Some(names) = names {
+        return !names.media.contains(&key);
+    }
+    if !on_disk {
+        return false;
+    }
+    !sibling_has(root, member, partner, false)
+}
+
+fn sibling_has(root: &Path, member: &str, stem: &str, opposite_kind: bool) -> bool {
+    let source = root.join(member);
+    let Some(parent) = source.parent() else {
+        return false;
+    };
+    let source_video = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(is_video_ext);
+    let Ok(entries) = fs::read_dir(parent) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name
+            == source
+                .file_name()
+                .and_then(|item| item.to_str())
+                .unwrap_or("")
+        {
+            continue;
+        }
+        let Some((other, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !other.eq_ignore_ascii_case(stem) {
+            continue;
+        }
+        if opposite_kind {
+            if source_video && is_still_ext(ext) || !source_video && is_video_ext(ext) {
+                return true;
+            }
+        } else if is_still_ext(ext) || is_video_ext(ext) || is_raw_ext(ext) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_still_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "heic" | "heif" | "hif" | "png" | "tif" | "tiff" | "avif" | "webp"
+    )
+}
+
+fn is_video_ext(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "mov" | "mp4" | "m4v")
+}
+
+fn is_raw_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2" | "raw"
+    )
 }
 
 fn live_photo_stem(member: &str) -> Option<&str> {
@@ -1318,11 +1669,244 @@ fn meta_len(path: &Path) -> Result<u64, IngestError> {
 }
 
 fn open_read_only(path: &Path) -> Result<File, IngestError> {
-    OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(path)
-        .map_err(|err| IngestError::io(path, err))
+    let root = crate::source::SourceRoot::open(crate::source::parent_dir(path))?;
+    root.open_read(path)
+}
+
+fn restore_icloud_sidecars(
+    dest_root: &Path,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+) -> Result<(), IngestError> {
+    if !dest_root.exists() {
+        return Ok(());
+    }
+    let mut files = Vec::new();
+    collect_dest_files(dest_root, "", &mut files)?;
+    for (relative, path) in files {
+        let lower = relative.to_ascii_lowercase();
+        let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+        if file_name == "photo details.csv" {
+            restore_photo_details_csv(dest_root, &path, report, counters)?;
+            continue;
+        }
+        if !(lower.ends_with(".xmp") || lower.ends_with(".aae")) {
+            continue;
+        }
+        let Some(capture) = scan_capture_time(&path)? else {
+            continue;
+        };
+        let Some(media) = relative
+            .strip_suffix(".xmp")
+            .or_else(|| relative.strip_suffix(".XMP"))
+            .or_else(|| relative.strip_suffix(".aae"))
+            .or_else(|| relative.strip_suffix(".AAE"))
+        else {
+            continue;
+        };
+        let sidecar_rel = format!("{media}.albumen.json");
+        if dest_root.join(&sidecar_rel).exists() {
+            continue;
+        }
+        let bytes = metadata_json(media, false, None, &[], Some(&capture), None, None)?;
+        let mtime = crate::mtime::mtime_of(&path)?;
+        place_restored_sidecar(dest_root, &sidecar_rel, &bytes, mtime, report, counters)?;
+    }
+    Ok(())
+}
+
+fn restore_photo_details_csv(
+    dest_root: &Path,
+    csv_path: &Path,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+) -> Result<(), IngestError> {
+    let text = std::fs::read_to_string(csv_path).map_err(|err| IngestError::io(csv_path, err))?;
+    let mut lines = text.lines();
+    let Some(header) = lines.next() else {
+        return Ok(());
+    };
+    let headers = split_csv(header);
+    let index = |name: &str| {
+        headers
+            .iter()
+            .position(|item| item.eq_ignore_ascii_case(name))
+    };
+    let name_at = index("imgName")
+        .or_else(|| index("filename"))
+        .or_else(|| index("photo"));
+    let date_at = index("dateTaken")
+        .or_else(|| index("date"))
+        .or_else(|| index("photoTakenTime"));
+    let lat_at = index("latitude");
+    let lon_at = index("longitude");
+    let Some(name_at) = name_at else {
+        return Ok(());
+    };
+    if date_at.is_none() && (lat_at.is_none() || lon_at.is_none()) {
+        return Ok(());
+    }
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    let mut files = Vec::new();
+    collect_dest_files(dest_root, "", &mut files)?;
+    for (relative, _) in &files {
+        if let Some(file_name) = relative.rsplit('/').next() {
+            by_name
+                .entry(file_name.to_ascii_lowercase())
+                .or_default()
+                .push(relative.clone());
+        }
+    }
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = split_csv(line);
+        let Some(file_name) = fields.get(name_at).map(|item| item.trim()) else {
+            continue;
+        };
+        if file_name.is_empty() {
+            continue;
+        }
+        let capture = date_at
+            .and_then(|at| fields.get(at))
+            .map(|item| item.trim().to_string());
+        let latitude = lat_at
+            .and_then(|at| fields.get(at))
+            .and_then(|item| item.trim().parse::<f64>().ok());
+        let longitude = lon_at
+            .and_then(|at| fields.get(at))
+            .and_then(|item| item.trim().parse::<f64>().ok());
+        let gps = match (latitude, longitude) {
+            (Some(lat), Some(lon)) if !(lat == 0.0 && lon == 0.0) => Some((lat, lon)),
+            _ => None,
+        };
+        let capture = capture.filter(|text| !text.is_empty());
+        if capture.is_none() && gps.is_none() {
+            continue;
+        }
+        let matches = by_name
+            .get(&file_name.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        if matches.len() != 1 {
+            counters.unmatched = counters.unmatched.saturating_add(1);
+            report.line(&json!({
+                "kind": "sidecar",
+                "member": file_name,
+                "destination": "",
+                "sha256": "",
+                "bytes": 0,
+                "status": "mismatch",
+                "unmatched": true,
+                "detail": "Photo Details row did not match exactly one copied file",
+            }))?;
+            counters.mismatched = counters.mismatched.saturating_add(1);
+            continue;
+        }
+        let media = &matches[0];
+        let sidecar_rel = format!("{media}.albumen.json");
+        if dest_root.join(&sidecar_rel).exists() {
+            continue;
+        }
+        let bytes = metadata_json(
+            media,
+            false,
+            None,
+            &[],
+            capture.as_deref(),
+            gps.map(|(lat, _)| lat),
+            gps.map(|(_, lon)| lon),
+        )?;
+        let mtime = crate::mtime::mtime_of(csv_path)?;
+        place_restored_sidecar(dest_root, &sidecar_rel, &bytes, mtime, report, counters)?;
+    }
+    Ok(())
+}
+
+fn place_restored_sidecar(
+    dest_root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    mtime: SystemTime,
+    report: &mut ReportFile,
+    counters: &mut Counters,
+) -> Result<(), IngestError> {
+    let dest = dest_root.join(relative);
+    let mut reader = std::io::Cursor::new(bytes);
+    match copy_verify_reader(&mut reader, dest_root, &dest, mtime) {
+        Ok(object) => report.line(&json!({
+            "kind": "albumen-sidecar",
+            "member": relative,
+            "destination": relative,
+            "sha256": object.sha256,
+            "bytes": object.byte_len,
+            "status": "stored",
+            "on_disk": false,
+            "detail": "capture time and GPS restored into an Albumen sidecar; original bytes were not modified",
+        })),
+        Err(err) => {
+            counters.mismatched = counters.mismatched.saturating_add(1);
+            report.line(&json!({
+                "kind": "albumen-sidecar",
+                "member": relative,
+                "destination": relative,
+                "sha256": "",
+                "bytes": 0,
+                "status": "mismatch",
+                "on_disk": false,
+                "detail": err.to_string(),
+            }))
+        }
+    }
+}
+
+fn collect_dest_files(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<(), IngestError> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))? {
+        let entry = entry.map_err(|err| IngestError::io(dir, err))?;
+        names.push(entry.file_name());
+    }
+    names.sort();
+    for name in names {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let path = dir.join(name);
+        let relative = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            collect_dest_files(&path, &relative, out)?;
+        } else if meta.is_file() {
+            out.push((relative, path));
+        }
+    }
+    Ok(())
+}
+
+fn split_csv(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                fields.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    fields.push(current);
+    fields
 }
 
 fn refuse_layout(source_root: &Path, to: &Path, report: &Path) -> Result<(), IngestError> {
@@ -1398,11 +1982,7 @@ fn normalize_path(path: &Path) -> Result<PathBuf, IngestError> {
 
 impl ReportFile {
     fn create(path: &Path) -> Result<Self, IngestError> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|err| IngestError::io(path, err))?;
+        let file = dest::open_new(path)?;
         Ok(Self {
             file: BufWriter::new(file),
             path: path.to_path_buf(),
@@ -1856,6 +2436,64 @@ mod tests {
             fs::read(to.join("originals/0/IMG_0001.HEIC.albumen.json")).unwrap(),
             fs::read(to.join("originals/0/IMG_0001.HEIC.albumen.json")).unwrap()
         );
+    }
+
+    #[test]
+    fn photos_library_capture_time_and_gps_land_in_the_sidecar() {
+        let tmp = Tmp::new();
+        let from = tmp.path().join("Photos Library.photoslibrary");
+        let heic = b"synthetic-gps-heic-original";
+        write_stamped(&from.join("originals/0/IMG_0009.HEIC"), heic);
+        write_stamped(
+            &from.join("originals/0/IMG_0009.MOV"),
+            b"synthetic-live-mov",
+        );
+        let db_path = from.join("database/Photos.sqlite");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "
+            CREATE TABLE ZASSET (
+                Z_PK INTEGER PRIMARY KEY,
+                ZFILENAME TEXT,
+                ZDIRECTORY TEXT,
+                ZFAVORITE INTEGER,
+                ZDATECREATED REAL,
+                ZLATITUDE REAL,
+                ZLONGITUDE REAL
+            );
+            INSERT INTO ZASSET (Z_PK, ZFILENAME, ZDIRECTORY, ZFAVORITE, ZDATECREATED, ZLATITUDE, ZLONGITUDE)
+            VALUES (1, 'IMG_0009.HEIC', '0', 0, 610000000, 37.5, -122.25);
+            ",
+        )
+        .unwrap();
+        drop(db);
+        let before = fs::read(from.join("originals/0/IMG_0009.HEIC")).unwrap();
+        let to = tmp.path().join("library");
+        let report = tmp.path().join("report.jsonl");
+        let plan = plan_icloud(&from, &to, &report).unwrap();
+        assert!(!to.exists());
+        assert!(plan.live_photos.iter().any(|stem| stem == "IMG_0009"));
+        let outcome = import_icloud(&from, &to, &report).unwrap();
+        assert_eq!(outcome.count_in, outcome.count_out);
+        assert_eq!(
+            fs::read(from.join("originals/0/IMG_0009.HEIC")).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(to.join("originals/0/IMG_0009.HEIC")).unwrap(),
+            heic
+        );
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &fs::read(to.join("originals/0/IMG_0009.HEIC.albumen.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["latitude"], 37.5);
+        assert_eq!(sidecar["longitude"], -122.25);
+        assert!(sidecar["captureTime"].as_str().unwrap().ends_with('Z'));
+        let report_text = fs::read_to_string(&report).unwrap();
+        assert!(report_text.contains("\"live_photo_stem\":\"IMG_0009\""));
+        assert!(!heic.windows(4).any(|window| window == b"37.5"));
     }
 
     fn write_zip_part(path: &Path, files: &[(&str, &[u8])]) {

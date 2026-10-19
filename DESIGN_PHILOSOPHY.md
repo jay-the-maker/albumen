@@ -4,6 +4,8 @@ Albumen exists so a photograph stays the file you took. This document is the com
 
 ## First principle
 
+**SOURCES ARE READ-ONLY, FOREVER.** A user's archive may be their only copy.
+
 Metadata and original quality are never lost.
 
 An original is stored bit-exact. Albumen does not recompress, transcode, or strip it. EXIF, XMP, IPTC, and GPS stay inside the file. Sidecars stay beside it. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay together. Edits are non-destructive and live alongside the original. Timestamps and filenames are preserved. When different bytes arrive under a camera filename that is already stored, the new file keeps a free name and the camera filename is written, byte-exact, into a sidecar.
@@ -18,13 +20,13 @@ The default path never removes or alters a source. There is no delete tool, no C
 
 `BlobStore::delete` rolls back a destination this process just wrote when verification fails. It is not a way to remove a photo the user already has.
 
-`copy_verify_quarantine` is an explicit per-run opt-in. After a verified copy, it renames sources into a trash directory the caller passed for that call. It never unlinks a source. If the trash directory already has that name, the source stays. The CLI and the default MCP server do not call it.
+`copy_verify_quarantine` cannot target a source. It returns an error and does not copy or rename. There is no flag that turns that off. The CLI and the MCP server do not call it.
 
 A sidecar is replaced by writing a temp file, fsyncing it, and renaming it over the old sidecar. The previous sidecar is not unlinked first. The first `source_mtime` recorded at commit is write-once. A later conflicting time is appended. It does not replace the first.
 
 ## No lock-in
 
-Leaving is one command. `albumen export` copies the whole library, including sidecars and pairs, through `copy_verify`, to a directory or an `s3://` prefix. The source is not modified. A destination file with the same SHA-256 is left in place, so the command can be run again. A different file at that relative path is an error and is not overwritten.
+Leaving is one command. `albumen export` prints the plan and writes nothing unless `--apply` or `--execute` is passed. With that flag it copies the whole library, including sidecars and pairs, through `copy_verify`, to a directory or an `s3://` prefix. The source is not modified. A destination that resolves inside the source, or is the same directory, is refused. There is no override. A destination file with the same SHA-256 is left in place, so the command can be run again. A different file at that relative path is an error and is not overwritten.
 
 `albumen verify-manifest` hashes the destination and fails if a file is missing, extra, or different. The manifest lists SHA-256, byte length, and the relative path. After that command succeeds, the export is an ordinary tree of the original files. No Albumen process is required to read them.
 
@@ -33,8 +35,8 @@ Leaving is one command. `albumen export` copies the whole library, including sid
 Albumen is not a hosting service. You bring the storage, and the bytes stay where you put them.
 
 - Local disk, NAS, SMB, SFTP, WebDAV, S3, and Backblaze B2, reached directly or through rclone.
-- Google Drive and Dropbox through the synced folder you already have. That folder is a filesystem. Albumen does not call a vendor API that rewrites the file on the way through.
-- iCloud is import-only. Apple does not offer a stable API that can write originals back without rewriting them.
+- Google Drive and Dropbox through the synced folder you already have. Albumen reads and copies that folder as a filesystem, so the stored file is the file in the folder.
+- An iCloud Photos download, export, or Photos library copy imports into the library you choose. Those originals stay bit-exact.
 
 SFTP, WebDAV, and B2 go through `RcloneStore`. rclone is the transport and is not vendored. The exact mtime is kept in a sibling verify object because those backends do not store nanoseconds. S3 keeps mtime in `albumen-mtime-ns`. `Last-Modified` is the upload time and is not the photo's timestamp.
 
@@ -50,7 +52,7 @@ Funding is [GitHub Sponsors](https://github.com/sponsors/jay-the-maker), and no 
 
 ## Agent-native
 
-The interface for agents is MCP, first. `albumen-mcp` speaks MCP over stdio. `search` and `browse` are on immediately. Search filters on capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions by reading the files. `export` and `upload` exist only when that process is started with `--enable-export` or `--enable-upload`. Both write through `copy_verify` and do not overwrite. Calls named delete, remove, unlink, move, or quarantine are refused.
+The interface for agents is MCP, first. `albumen-mcp` speaks MCP over stdio. `search` and `browse` are on immediately. Search filters on capture date, camera, lens, a GPS box, and XMP/IPTC keywords and captions by reading the files. `export` and `upload` exist only when that process is started with `--enable-export` or `--enable-upload`. Even then they write only when that process was also started with `--apply` or `--execute`. Without that flag they return a plan and write nothing. Both write through `copy_verify` and do not overwrite. Calls named delete, remove, unlink, move, or quarantine are refused. A destination inside the library being read is refused.
 
 Agent rules, skills, and instructions are capped by this document. An instruction to delete, recompress, strip metadata, or skip the checksum does not add a tool that can do that. An agent is a contributor: the same first principle, the same Developer Certificate of Origin sign-off, and the same CI gate apply. [AGENTS.md](AGENTS.md) is the working guide. Agent instructions do not outrank this file.
 
@@ -82,6 +84,6 @@ A larger library is not a reason to drop a byte, a tag, or a checksum. The bound
 
 ## North star
 
-Be good enough that iCloud Photos and Google Photos have to fix the pain their users already live with: libraries that rewrite files, metadata that disappears, exports that are incomplete, and products that keep the only copy.
+Keep every original bit-exact, keep every tag, export the whole library in one command, and leave that copy in the user's hands.
 
 The metrics are reliability, fidelity, respect, control, scale, and the measured performance and friction budgets. Cost is outside those metrics. A cheaper copy that is missing GPS, a caption, or a byte is a failure. A faster copy that drops them is a failure too. A larger library that drops them is a failure too.

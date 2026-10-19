@@ -1,0 +1,32 @@
+name: raid scale
+
+# A generated tree of at least one million files is too slow for a pull
+# request. The previous pull-request job stayed pending for hours. Run it by
+# hand, or let the weekly schedule run it. The timeout is a backstop so the
+# job cannot run without a bound.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 16 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  raid:
+    name: generated million-item tree
+    runs-on: macos-14
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
+
+      - name: Scan and verify a generated tree of at least one million files
+        run: cargo test --release --locked -p albumen --test raid_scale -- --ignored --nocapture --test-threads=1

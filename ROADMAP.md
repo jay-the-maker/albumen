@@ -2,15 +2,21 @@
 
 **First principle: metadata and original quality are never lost.**
 
-Albumen is early. This list is the work that is not in the tree yet. The ingest crate, the fixture gate, and the charter are what exist today. Nothing here is a date.
+Albumen is early. This list is the work that is not in the tree yet, plus the importers that close the gap between a read-only archive and a storage backend. Nothing here is a date.
 
-## Google Takeout
+## Safety and read-only sources
 
-Shipped as `albumen import-takeout`. Split zip and tgz parts are streamed read-only, each original is `copy_verify`'d, and Takeout JSON stays byte-for-byte beside the original. See [docs/importers/takeout.md](docs/importers/takeout.md).
+Shipped. A source is opened read-only. Scan, import, and export read through that root. A destination that resolves inside a source, or is the same path, is refused. There is no override. Export, Takeout import, and iCloud import write nothing unless `--apply` or `--execute` is passed. See [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md), [docs/test-ladder.md](docs/test-ladder.md), and [docs/threat-model.md](docs/threat-model.md).
 
-## iCloud Photos
+## Google Takeout and iCloud export
 
-Shipped as `albumen import-icloud`. A multi-part download (zip parts plus Photo Details CSVs), a Photos export, or a copied Photos library is read-only. Originals, edited versions, Live Photo pairs, and AAE/XMP sidecars are `copy_verify`'d. CSVs stay byte-for-byte. Album, favorite, and caption metadata is a sidecar export from `Photos.sqlite` opened `mode=ro&immutable=1`. See [docs/importers/icloud.md](docs/importers/icloud.md).
+This is the gap after the safety work and before the storage backends. Both importers are in the tree.
+
+`albumen import-takeout` reads split zip and tgz parts, or an extracted Takeout folder, read-only. Each file is `copy_verify`'d. Takeout JSON, including truncated names, `(1)` suffixes, and `.supplemental-metadata.json`, stays byte-for-byte beside the photo it describes. Capture time and GPS are restored into a new `.albumen.json` sidecar. The original bytes are not modified. A still and a video that share a stem are reported as a Motion Photo pair. The JSONL report lists every unmatched file. Nothing is dropped because of its extension. The default is a dry-run. See [docs/importers/takeout.md](docs/importers/takeout.md).
+
+`albumen import-icloud` reads a multi-part download (zip parts plus Photo Details CSVs), a Photos export, or a copied Photos library, read-only. Originals, edited versions, Live Photo pairs, and AAE/XMP sidecars are `copy_verify`'d. CSVs stay byte-for-byte. Album, favorite, caption, capture time, and GPS metadata is a sidecar export. `Photos.sqlite` is opened `mode=ro&immutable=1`. The report lists every unmatched sidecar. The default is a dry-run. See [docs/importers/icloud.md](docs/importers/icloud.md).
+
+Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
 
 ## Export everything
 
@@ -40,6 +46,6 @@ Storage adapters beyond the local directory and the S3 API that exist now:
 
 - rclone for SMB. SFTP, WebDAV, and Backblaze B2 already go through `RcloneStore`: the adapter calls `copy_verify`, and rclone is the transport. CI serves SFTP and WebDAV with rclone and uses MinIO as the B2 stand-in.
 - Camera-to-cloud: `albumen-receive` accepts WebDAV, SFTP, and FTP and stores each file with `copy_verify`. S3 upload from a camera, and tethered USB import, are still open. Described in [docs/architecture.md](docs/architecture.md).
-- Synced Google Drive and Dropbox folders stay a `LocalStore` root. No vendor API that rewrites the file on the way through.
+- Synced Google Drive and Dropbox folders stay a `LocalStore` root. Albumen reads and copies that folder as a filesystem, so the stored file is the file in the folder.
 
 Each connector refuses to overwrite, preserves the filename and mtime, and reports done only after the SHA-256 check.

@@ -4,7 +4,8 @@
 //!
 //! Search and browse are always offered. Export and upload are offered only
 //! when the matching flag is set for this process, and both go through
-//! `copy_verify`. There is no delete tool.
+//! `copy_verify`. They return a plan and write nothing unless `--apply` or
+//! `--execute` is set. There is no delete tool.
 
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -18,7 +19,7 @@ use serde_json::{json, Value};
 #[derive(Debug, Parser)]
 #[command(
     name = "albumen-mcp",
-    about = "MCP server for an Albumen library. Read-only unless write flags are set. No delete tool."
+    about = "MCP server for an Albumen library. Read-only unless write flags are set. Writes also require --apply or --execute. No delete tool."
 )]
 struct Cli {
     /// Library directory. Files here are not modified by search, browse, or export.
@@ -30,11 +31,22 @@ struct Cli {
     /// Offer the upload tool. Off unless this flag is present.
     #[arg(long)]
     enable_upload: bool,
+    /// Let export and upload write. Without this or `--execute`, those tools return a plan.
+    #[arg(long)]
+    apply: bool,
+    /// Same as `--apply`.
+    #[arg(long)]
+    execute: bool,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let library = match Library::new(cli.library, cli.enable_export, cli.enable_upload) {
+    let library = match Library::new(
+        cli.library,
+        cli.enable_export,
+        cli.enable_upload,
+        cli.apply || cli.execute,
+    ) {
         Ok(library) => library,
         Err(err) => {
             eprintln!("albumen-mcp: {err}");

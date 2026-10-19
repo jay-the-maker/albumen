@@ -104,4 +104,6 @@ The command prints JSON. `seconds` is the import time. `reconciled` is true only
 
 A pull request does not run this. It is too long for the ingest matrix. [`.github/workflows/takeout-scale.yml`](../.github/workflows/takeout-scale.yml) runs it on `workflow_dispatch` and on a weekly schedule.
 
+The same budget covers an iCloud export of 100,000 generated files. `--icloud` times `import_icloud` on a directory of tiny still/video pairs. Generation is not included. The workflow runs that command in a second job. `ALBUMEN_TAKEOUT_ITEMS` overrides the count for either command.
+
 A local run of the default command, on this machine's ext4 filesystem, imported 100,000 members in 27.992 seconds. `count_in` and `count_out` were 100000 and `mismatched` was 0, so reconciliation was 100 percent. That is inside the 4 hour budget. The JSON field was `seconds`: 27.992430546.

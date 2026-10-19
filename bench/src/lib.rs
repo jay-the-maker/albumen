@@ -43,7 +43,7 @@ pub const NOISE_SPREAD: f64 = 0.25;
 pub const REGRESSION: f64 = 0.10;
 
 pub use takeout_scale::{
-    measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
+    measure_icloud, measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
 };
 
 pub const DEFAULT_SEARCH_ITEMS: u64 = 128;
@@ -269,7 +269,7 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
         items_s.push(items);
         copy_ratio.push(ratio(mb, plain)?);
 
-        let library_handle = Library::new(library.clone(), false, false)?;
+        let library_handle = Library::new(library.clone(), false, false, false)?;
         let (value, ms) = timed(|| library_handle.call("search", &search_args));
         assert_hit(&value?, "cold search")?;
         cold.push(ms);

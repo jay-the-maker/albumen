@@ -2,16 +2,17 @@
 
 //! Read-only library scan.
 //!
-//! `scan_tree` walks a directory, hashes each file, and appends one JSON
-//! object per file to a manifest that must live outside the source. It does
-//! not open a source path for write and it does not change a source timestamp.
-//! On Linux it opens files with `O_RDONLY` and `O_NOATIME` when the kernel
-//! allows that flag, and otherwise opens them with `O_RDONLY`. If the size or
-//! mtime changes while a file is read, the manifest line records `drift` with
-//! the before and after values. The source file is left as it is.
+//! `scan_tree` walks a directory through [`crate::source::SourceRoot`], hashes
+//! each file, and appends one JSON object per file to a manifest that must
+//! live outside the source. Source files are opened `O_RDONLY` only, and on
+//! Linux with `O_NOATIME` when the kernel allows that flag. It does not change
+//! a source timestamp. If the size or mtime changes while a file is read, the
+//! manifest line records `drift` with the before and after values. The source
+//! file is left as it is. The manifest is a destination file and is written by
+//! the destination module.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,12 +26,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::checksum::{sha256_reader, to_hex};
+use crate::dest;
 use crate::discover::companion_names;
 use crate::error::IngestError;
 use crate::mtime::to_unix_nanos_string;
-
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::OpenOptionsExt;
+use crate::source::SourceRoot;
 
 /// Files and bytes committed by one `scan_tree` call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,13 +126,11 @@ pub fn scan_tree(source: &Path, manifest: &Path) -> Result<ScanStats, IngestErro
             "source is not a directory",
         ));
     }
-    let source = source
-        .canonicalize()
-        .map_err(|err| IngestError::io(source, err))?;
-    refuse_manifest_inside(&source, manifest)?;
+    let source = SourceRoot::open(source)?;
+    source.refuse_destination(manifest)?;
     if let Some(parent) = manifest.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| IngestError::io(parent, err))?;
+            dest::create_dir_all(parent)?;
         }
     }
     require_exiftool()?;
@@ -220,9 +218,7 @@ pub fn verify_scan_manifest(
             "source is not a directory",
         ));
     }
-    let source = source
-        .canonicalize()
-        .map_err(|err| IngestError::io(source, err))?;
+    let source = SourceRoot::open(source)?;
     let file = File::open(manifest).map_err(|err| IngestError::io(manifest, err))?;
     let (tx, rx) = sync_channel::<Result<Option<String>, IngestError>>(8);
     let drifts = thread::scope(|scope| {
@@ -251,7 +247,7 @@ pub fn verify_scan_manifest(
 }
 
 fn worker_loop(
-    source: &Path,
+    source: &SourceRoot,
     jobs: Arc<Mutex<Receiver<Job>>>,
     done: std::sync::mpsc::SyncSender<Result<Hashed, IngestError>>,
     cancel: &AtomicBool,
@@ -277,9 +273,9 @@ fn worker_loop(
     }
 }
 
-fn hash_one(root: &Path, job: &Job) -> Result<Hashed, IngestError> {
-    let path = root.join(relative_path(&job.relative));
-    let file = open_readonly(&path)?;
+fn hash_one(root: &SourceRoot, job: &Job) -> Result<Hashed, IngestError> {
+    let path = root.canonical().join(relative_path(&job.relative));
+    let file = root.open_read(&path)?;
     let before = observe_file(&path, &file)?;
     mid_scan_touch(&path);
     let sha = to_hex(&sha256_reader(file, &path)?);
@@ -299,17 +295,13 @@ fn hash_one(root: &Path, job: &Job) -> Result<Hashed, IngestError> {
 }
 
 fn write_ordered(
-    source: &Path,
+    source: &SourceRoot,
     manifest: &Path,
     done: Receiver<Result<Hashed, IngestError>>,
     already: u64,
     cancel: &AtomicBool,
 ) -> Result<ScanStats, IngestError> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(manifest)
-        .map_err(|err| IngestError::io(manifest, err))?;
+    let mut file = dest::open_append(manifest)?;
     let mut next = 0u64;
     let mut pending: BTreeMap<u64, Hashed> = BTreeMap::new();
     let mut batch = Vec::new();
@@ -360,7 +352,7 @@ fn write_ordered(
 }
 
 fn flush_batch(
-    source: &Path,
+    source: &SourceRoot,
     file: &mut File,
     manifest: &Path,
     batch: &mut Vec<Hashed>,
@@ -368,14 +360,14 @@ fn flush_batch(
     let paths: Vec<String> = batch.iter().map(|item| item.relative.clone()).collect();
     let metadata = read_metadata(source, &paths)?;
     for item in batch.iter_mut() {
-        let path = source.join(relative_path(&item.relative));
+        let path = source.canonical().join(relative_path(&item.relative));
         let after = observe_path(&path)?;
         extend_drift(item, after);
     }
     if metadata.len() != batch.len() {
         return Err(IngestError::store(
             "exiftool",
-            source.display().to_string(),
+            source.canonical().display().to_string(),
             format!(
                 "exiftool returned {} records for {} files",
                 metadata.len(),
@@ -418,7 +410,7 @@ fn note_progress(files: u64, bytes: u64, last: &mut Instant, force: bool) {
 }
 
 fn compare_manifest(
-    source: &Path,
+    source: &SourceRoot,
     manifest_path: &Path,
     file: File,
     rx: Receiver<Result<Option<String>, IngestError>>,
@@ -497,12 +489,12 @@ fn next_disk_path(
 }
 
 fn compare_file(
-    source: &Path,
+    source: &SourceRoot,
     line: &ScanLine,
     on_drift: &mut dyn FnMut(&ScanDrift),
 ) -> Result<u64, IngestError> {
-    let path = source.join(relative_path(&line.path));
-    let file = open_readonly(&path)?;
+    let path = source.canonical().join(relative_path(&line.path));
+    let file = source.open_read(&path)?;
     let before = observe_file(&path, &file)?;
     let sha = to_hex(&sha256_reader(file, &path)?);
     let after = observe_path(&path)?;
@@ -585,72 +577,11 @@ fn read_scan_line<R: BufRead>(
         })
 }
 
-fn refuse_manifest_inside(source: &Path, manifest: &Path) -> Result<(), IngestError> {
-    let resolved = resolve_manifest(manifest)?;
-    if resolved.starts_with(source) {
-        return Err(IngestError::ManifestInsideSource {
-            manifest: resolved.display().to_string(),
-            source_tree: source.display().to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn resolve_manifest(manifest: &Path) -> Result<PathBuf, IngestError> {
-    let manifest = if manifest.is_absolute() {
-        manifest.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|err| IngestError::io(manifest, err))?
-            .join(manifest)
-    };
-    let mut missing = Vec::new();
-    let mut cursor = manifest;
-    loop {
-        if cursor.exists() {
-            let mut resolved = cursor
-                .canonicalize()
-                .map_err(|err| IngestError::io(&cursor, err))?;
-            for part in missing.iter().rev() {
-                resolved.push(part);
-            }
-            return Ok(resolved);
-        }
-        let Some(name) = cursor.file_name() else {
-            return Err(IngestError::store(
-                "scan",
-                cursor.display().to_string(),
-                "could not resolve the manifest path",
-            ));
-        };
-        missing.push(name.to_os_string());
-        let Some(parent) = cursor.parent() else {
-            return Err(IngestError::store(
-                "scan",
-                cursor.display().to_string(),
-                "could not resolve the manifest path",
-            ));
-        };
-        if parent.as_os_str().is_empty() {
-            return Err(IngestError::store(
-                "scan",
-                cursor.display().to_string(),
-                "could not resolve the manifest path",
-            ));
-        }
-        cursor = parent.to_path_buf();
-    }
-}
-
 fn prepare_resume(manifest: &Path) -> Result<(Option<String>, u64), IngestError> {
     if !manifest.exists() {
         return Ok((None, 0));
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(manifest)
-        .map_err(|err| IngestError::io(manifest, err))?;
+    let mut file = dest::open_read_write(manifest)?;
     let mut len = file
         .metadata()
         .map_err(|err| IngestError::io(manifest, err))?
@@ -671,8 +602,7 @@ fn prepare_resume(manifest: &Path) -> Result<(Option<String>, u64), IngestError>
             .map_err(|err| IngestError::io(manifest, err))?;
         let Some(last_nl) = buf.iter().rposition(|byte| *byte == b'\n') else {
             if start == 0 {
-                file.set_len(0)
-                    .map_err(|err| IngestError::io(manifest, err))?;
+                dest::set_len(&file, manifest, 0)?;
                 file.sync_all()
                     .map_err(|err| IngestError::io(manifest, err))?;
                 return Ok((None, 0));
@@ -693,8 +623,7 @@ fn prepare_resume(manifest: &Path) -> Result<(Option<String>, u64), IngestError>
         }
         if complete_end != buf.len() {
             let new_len = start + complete_end as u64;
-            file.set_len(new_len)
-                .map_err(|err| IngestError::io(manifest, err))?;
+            dest::set_len(&file, manifest, new_len)?;
             file.sync_all()
                 .map_err(|err| IngestError::io(manifest, err))?;
             len = new_len;
@@ -745,9 +674,12 @@ fn require_exiftool() -> Result<(), IngestError> {
     }
 }
 
-fn read_metadata(root: &Path, relative_paths: &[String]) -> Result<Vec<KeyMetadata>, IngestError> {
+fn read_metadata(
+    root: &SourceRoot,
+    relative_paths: &[String],
+) -> Result<Vec<KeyMetadata>, IngestError> {
     let output = Command::new("exiftool")
-        .current_dir(root)
+        .current_dir(root.canonical())
         .arg("-json")
         .arg("-n")
         .arg("-s")
@@ -758,31 +690,29 @@ fn read_metadata(root: &Path, relative_paths: &[String]) -> Result<Vec<KeyMetada
         .map_err(|err| {
             IngestError::store(
                 "exiftool",
-                root.display().to_string(),
+                root.canonical().display().to_string(),
                 format!("exiftool is required to record key metadata: {err}"),
             )
         })?;
-    if !output.status.success() {
-        return Err(IngestError::store(
-            "exiftool",
-            root.display().to_string(),
-            format!(
-                "exiftool failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
-    }
-    let items: Vec<Map<String, Value>> = serde_json::from_slice(&output.stdout).map_err(|err| {
-        IngestError::store(
-            "exiftool",
-            root.display().to_string(),
-            format!("exiftool json: {err}"),
-        )
-    })?;
+    // ExifTool exits 1 for an empty file or a file of zeros, and still prints
+    // one JSON object per path. A complete array is a successful read.
+    let items = match serde_json::from_slice::<Vec<Map<String, Value>>>(&output.stdout) {
+        Ok(items) if items.len() == relative_paths.len() => items,
+        _ => {
+            return Err(IngestError::store(
+                "exiftool",
+                root.canonical().display().to_string(),
+                format!(
+                    "exiftool failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            ));
+        }
+    };
     if items.len() != relative_paths.len() {
         return Err(IngestError::store(
             "exiftool",
-            root.display().to_string(),
+            root.canonical().display().to_string(),
             format!(
                 "exiftool returned {} records for {} files",
                 items.len(),
@@ -931,24 +861,6 @@ fn scan_workers() -> usize {
         .unwrap_or(2)
 }
 
-fn open_readonly(path: &Path) -> Result<File, IngestError> {
-    #[cfg(target_os = "linux")]
-    {
-        const O_NOATIME: i32 = 0o1000000;
-        if let Ok(file) = OpenOptions::new()
-            .read(true)
-            .custom_flags(O_NOATIME)
-            .open(path)
-        {
-            return Ok(file);
-        }
-    }
-    OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|err| IngestError::io(path, err))
-}
-
 fn observe_file(path: &Path, file: &File) -> Result<ObservedStat, IngestError> {
     let meta = file.metadata().map_err(|err| IngestError::io(path, err))?;
     observed(path, &meta)
@@ -1045,33 +957,28 @@ enum WalkStop {
 }
 
 fn walk_readonly(
-    root: &Path,
+    root: &SourceRoot,
     after: Option<&str>,
     visit: &mut dyn FnMut(&str) -> WalkStop,
 ) -> Result<(), IngestError> {
-    if !root.exists() {
-        return Ok(());
-    }
-    match walk_dir(root, "", after, visit)? {
+    match walk_dir(root, root.canonical(), "", after, visit)? {
         WalkStop::Continue | WalkStop::Stop => Ok(()),
     }
 }
 
 fn walk_dir(
+    root: &SourceRoot,
     dir: &Path,
     prefix: &str,
     after: Option<&str>,
     visit: &mut dyn FnMut(&str) -> WalkStop,
 ) -> Result<WalkStop, IngestError> {
     let mut entries = Vec::new();
-    let read = fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))?;
+    let read = root.read_dir(dir)?;
     for entry in read {
         let entry = entry.map_err(|err| IngestError::io(dir, err))?;
         let path = entry.path();
-        let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
-        if meta.file_type().is_symlink() {
-            return Err(IngestError::Symlink(path));
-        }
+        let meta = root.metadata_nofollow(&path)?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             return Err(IngestError::NonUtf8Filename { path });
@@ -1097,7 +1004,7 @@ fn walk_dir(
                     continue;
                 }
             }
-            if walk_dir(&child, &relative, after, visit)? == WalkStop::Stop {
+            if walk_dir(root, &child, &relative, after, visit)? == WalkStop::Stop {
                 return Ok(WalkStop::Stop);
             }
         } else if let Some(after) = after {
@@ -1145,6 +1052,7 @@ fn cmp_walk(
 mod tests {
     use super::*;
     use crate::test_support::{write_file, Tmp};
+    use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1236,7 +1144,8 @@ mod tests {
                 };
                 let meta = fs::symlink_metadata(&path).unwrap();
                 let sha = if meta.is_file() {
-                    let file = open_readonly(&path).unwrap();
+                    let opened = SourceRoot::open(root).unwrap();
+                    let file = opened.open_read(&path).unwrap();
                     to_hex(&sha256_reader(file, &path).unwrap())
                 } else {
                     String::new()
@@ -1291,7 +1200,7 @@ mod tests {
         let manifest = source.join("nested").join("out.jsonl");
         let err = scan_tree(&source, &manifest).unwrap_err();
         assert!(
-            matches!(err, IngestError::ManifestInsideSource { .. }),
+            matches!(err, IngestError::DestinationInsideSource { .. }),
             "{err}"
         );
         assert!(!source.join("nested").exists());
@@ -1407,6 +1316,19 @@ mod tests {
             .collect();
         assert_eq!(paths, vec!["a.txt".to_string(), "b.txt".to_string()]);
         assert_eq!(capture(&source, &rels), before);
+    }
+
+    #[test]
+    fn scan_records_an_empty_file() {
+        let tmp = Tmp::new();
+        let source = tmp.path().join("library");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("empty.jpg"), b"").unwrap();
+        let manifest = tmp.path().join("scan.jsonl");
+        let stats = scan_tree(&source, &manifest).unwrap();
+        assert_eq!(stats.files, 1);
+        assert_eq!(stats.bytes, 0);
+        verify_scan_manifest(&manifest, &source, &mut |_| ()).unwrap();
     }
 
     #[test]

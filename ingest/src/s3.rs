@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::{self, File, OpenOptions};
+use crate::dest;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -151,7 +152,7 @@ impl BlobStore for S3Store {
 
     fn get_verified(&self, filename: &str, dest_dir: &Path) -> Result<VerifiedObject, IngestError> {
         check_filename(filename)?;
-        fs::create_dir_all(dest_dir).map_err(|err| IngestError::io(dest_dir, err))?;
+        dest::create_dir_all(dest_dir)?;
         let dest = dest_dir.join(filename);
         if dest.exists() {
             return Err(IngestError::AlreadyExists {
@@ -189,11 +190,7 @@ impl BlobStore for S3Store {
                 path: dest.clone(),
                 armed: true,
             };
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&dest)
-                .map_err(|err| IngestError::io(&dest, err))?;
+            let mut output = dest::open_new(&dest)?;
             let mut body = object.body;
             while let Some(chunk) = body.next().await {
                 let chunk = chunk.map_err(|err| IngestError::store("get body", filename, err))?;
@@ -287,12 +284,12 @@ impl S3Store {
             let actual = match sha256_file(&downloaded) {
                 Ok(hash) => hash,
                 Err(err) => {
-                    let _ = fs::remove_file(&downloaded);
+                    let _ = dest::remove_file(&downloaded);
                     self.delete_object(&key).await?;
                     return Err(err);
                 }
             };
-            let _ = fs::remove_file(&downloaded);
+            let _ = dest::remove_file(&downloaded);
             if actual != expected {
                 let removed = self.delete_object(&key).await.is_ok();
                 return Err(IngestError::checksum_mismatch(
@@ -341,18 +338,18 @@ impl S3Store {
         let hash = match sha256_file(&downloaded) {
             Ok(hash) => hash,
             Err(err) => {
-                let _ = fs::remove_file(&downloaded);
+                let _ = dest::remove_file(&downloaded);
                 return Err(err);
             }
         };
         let len = match fs::metadata(&downloaded) {
             Ok(meta) => meta.len(),
             Err(err) => {
-                let _ = fs::remove_file(&downloaded);
+                let _ = dest::remove_file(&downloaded);
                 return Err(IngestError::io(&downloaded, err));
             }
         };
-        let _ = fs::remove_file(&downloaded);
+        let _ = dest::remove_file(&downloaded);
         Ok(Some((to_hex(&hash), len)))
     }
 
@@ -396,7 +393,7 @@ impl S3Store {
             .send()
             .await
             .map_err(|err| IngestError::store("read-back", filename, err))?;
-        let mut output = File::create(&path).map_err(|err| IngestError::io(&path, err))?;
+        let mut output = dest::create_file(&path)?;
         let mut body = object.body;
         let result = async {
             while let Some(chunk) = body.next().await {
@@ -412,7 +409,7 @@ impl S3Store {
         }
         .await;
         if let Err(err) = result {
-            let _ = fs::remove_file(&path);
+            let _ = dest::remove_file(&path);
             return Err(err);
         }
         Ok(path)
@@ -585,7 +582,7 @@ struct TempFile {
 impl Drop for TempFile {
     fn drop(&mut self) {
         if self.armed {
-            let _ = fs::remove_file(&self.path);
+            let _ = dest::remove_file(&self.path);
         }
     }
 }

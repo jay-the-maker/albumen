@@ -42,6 +42,11 @@ pub trait ExportDest {
     fn list(&self) -> Result<Vec<String>, IngestError>;
     /// Remove a destination this export just created. Not for sources.
     fn remove_placed(&self, relative: &str) -> Result<(), IngestError>;
+
+    /// Local directory this destination writes into, when it has one.
+    fn local_root(&self) -> Option<&Path> {
+        None
+    }
 }
 
 /// A directory that mirrors the library's relative paths.
@@ -71,7 +76,7 @@ impl ExportDest for DirectoryTree {
         require_same_filename(source, relative)?;
         if dest.is_file() {
             let (hash, len) = hash_file(&dest)?;
-            let (source_hash, source_len) = hash_file(source)?;
+            let (source_hash, source_len) = hash_through_source(source)?;
             if hash == source_hash && len == source_len {
                 return Ok(Placed {
                     object: VerifiedObject {
@@ -130,11 +135,19 @@ impl ExportDest for DirectoryTree {
 
     fn remove_placed(&self, relative: &str) -> Result<(), IngestError> {
         let dest = self.full(relative)?;
-        match fs::remove_file(&dest) {
+        match crate::dest::remove_file(&dest) {
             Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(IngestError::io(dest, err)),
+            Err(IngestError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(err),
         }
+    }
+
+    fn local_root(&self) -> Option<&Path> {
+        Some(&self.root)
     }
 }
 
@@ -144,6 +157,10 @@ impl ExportDest for DirectoryTree {
 pub fn export_tree(root: &Path, dest: &dyn ExportDest) -> Result<Vec<ManifestEntry>, IngestError> {
     if !root.is_dir() {
         return Err(IngestError::NotAFile(root.to_path_buf()));
+    }
+    let source = crate::source::SourceRoot::open(root)?;
+    if let Some(dest_root) = dest.local_root() {
+        source.refuse_destination(dest_root)?;
     }
     let mut files = Vec::new();
     walk_sorted(root, None, &mut |relative| {
@@ -279,7 +296,7 @@ pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), Inge
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
     let parent = parent.unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|err| IngestError::io(parent, err))?;
+    crate::dest::create_dir_all(parent)?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -290,20 +307,31 @@ pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), Inge
     ));
     let text = format_manifest(entries);
     let write_result = (|| {
-        let mut file = File::create(&tmp).map_err(|err| IngestError::io(&tmp, err))?;
+        let mut file = crate::dest::create_file(&tmp)?;
         file.write_all(text.as_bytes())
             .map_err(|err| IngestError::io(&tmp, err))?;
         file.sync_all().map_err(|err| IngestError::io(&tmp, err))?;
-        fs::rename(&tmp, path).map_err(|err| IngestError::io(path, err))?;
+        crate::dest::rename(&tmp, path)?;
         File::open(parent)
             .and_then(|dir| dir.sync_all())
             .map_err(|err| IngestError::io(parent, err))?;
         Ok(())
     })();
     if write_result.is_err() {
-        let _ = fs::remove_file(&tmp);
+        crate::dest::remove_file_best_effort(&tmp);
     }
     write_result
+}
+
+fn hash_through_source(path: &Path) -> Result<(String, u64), IngestError> {
+    let root = crate::source::SourceRoot::open(crate::source::parent_dir(path))?;
+    let file = root.open_read(path)?;
+    let len = file
+        .metadata()
+        .map_err(|err| IngestError::io(path, err))?
+        .len();
+    let hash = crate::checksum::sha256_reader(file, path)?;
+    Ok((to_hex(&hash), len))
 }
 
 fn hash_file(path: &Path) -> Result<(String, u64), IngestError> {
@@ -408,26 +436,25 @@ pub fn walk_sorted(
     if !root.exists() {
         return Ok(());
     }
-    match walk_dir(root, "", after, visit)? {
+    let source = crate::source::SourceRoot::open(root)?;
+    match walk_dir(&source, root, "", after, visit)? {
         WalkControl::Continue | WalkControl::Stop => Ok(()),
     }
 }
 
 fn walk_dir(
+    source: &crate::source::SourceRoot,
     dir: &Path,
     prefix: &str,
     after: Option<&str>,
     visit: &mut dyn FnMut(&str) -> WalkControl,
 ) -> Result<WalkControl, IngestError> {
     let mut entries = Vec::new();
-    let read = fs::read_dir(dir).map_err(|err| IngestError::io(dir, err))?;
+    let read = source.read_dir(dir)?;
     for entry in read {
         let entry = entry.map_err(|err| IngestError::io(dir, err))?;
         let path = entry.path();
-        let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
-        if meta.file_type().is_symlink() {
-            return Err(IngestError::Symlink(path));
-        }
+        let meta = source.metadata_nofollow(&path)?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             return Err(IngestError::NonUtf8Filename { path });
@@ -453,7 +480,7 @@ fn walk_dir(
                     continue;
                 }
             }
-            if walk_dir(&child, &relative, after, visit)? == WalkControl::Stop {
+            if walk_dir(source, &child, &relative, after, visit)? == WalkControl::Stop {
                 return Ok(WalkControl::Stop);
             }
         } else {
@@ -538,17 +565,11 @@ fn plan_assets(
         if !remaining.contains(&path) {
             continue;
         }
-        let meta = fs::symlink_metadata(&path).map_err(|err| IngestError::io(&path, err))?;
-        if meta.file_type().is_symlink() {
-            return Err(IngestError::Symlink(path));
-        }
+        let source_root = crate::source::SourceRoot::open(root)?;
+        let _meta = source_root.metadata_nofollow(&path)?;
         let asset = discover(&path)?;
         for file in asset.files() {
-            let file_meta =
-                fs::symlink_metadata(&file.path).map_err(|err| IngestError::io(&file.path, err))?;
-            if file_meta.file_type().is_symlink() {
-                return Err(IngestError::Symlink(file.path.clone()));
-            }
+            let _file_meta = source_root.metadata_nofollow(&file.path)?;
             if !file.path.starts_with(root) {
                 return Err(IngestError::store(
                     "export",

@@ -64,7 +64,7 @@ fn import_takeout_reconciles_a_synthetic_split_download() {
     let library = root.path().join("library");
     let report = root.path().join("report.jsonl");
     let output = albumen()
-        .arg("import-takeout")
+        .args(["import-takeout", "--apply"])
         .arg("--from")
         .arg(&from)
         .arg("--to")
@@ -129,7 +129,7 @@ fn import_takeout_derive_xmp_leaves_the_original() {
     let library = root.path().join("library");
     let report = root.path().join("report.jsonl");
     let output = albumen()
-        .args(["import-takeout", "--derive-xmp", "--from"])
+        .args(["import-takeout", "--apply", "--derive-xmp", "--from"])
         .arg(&archive)
         .arg("--to")
         .arg(&library)
@@ -171,7 +171,7 @@ fn import_takeout_exits_nonzero_on_a_mismatch() {
     fs::write(&dest, b"already-there").unwrap();
     let report = root.path().join("report.jsonl");
     let output = albumen()
-        .arg("import-takeout")
+        .args(["import-takeout", "--apply"])
         .arg("--from")
         .arg(&archive)
         .arg("--to")
@@ -191,4 +191,36 @@ fn import_takeout_exits_nonzero_on_a_mismatch() {
         .to_string();
     assert!(summary.contains("\"count_in\":1"), "{summary}");
     assert!(summary.contains("\"count_out\":0"), "{summary}");
+}
+
+#[test]
+fn import_takeout_dry_run_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let incoming = root.path().join("incoming");
+    fs::create_dir(&incoming).unwrap();
+    let archive = incoming.join("takeout.zip");
+    write_zip(&archive, &[("Takeout/IMG_0001.jpg", b"synthetic-dry-run")]);
+    let before = fs::read(&archive).unwrap();
+    let library = root.path().join("library");
+    let report = root.path().join("report.jsonl");
+    let output = albumen()
+        .args(["import-takeout", "--from"])
+        .arg(&archive)
+        .arg("--to")
+        .arg(&library)
+        .arg("--report")
+        .arg(&report)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("dry-run"), "{text}");
+    assert!(text.contains("unmatched-file:"), "{text}");
+    assert!(!library.exists(), "{text}");
+    assert!(!report.exists(), "{text}");
+    assert_eq!(fs::read(&archive).unwrap(), before);
 }

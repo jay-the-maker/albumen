@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod checksum;
+pub mod dest;
 mod discover;
 mod error;
 mod export;
@@ -20,6 +21,7 @@ mod photos_library;
 mod rclone;
 mod s3;
 mod scan;
+mod source;
 mod store;
 mod takeout;
 
@@ -30,16 +32,17 @@ pub use export::{
     export_tree, format_manifest, parse_manifest, verify_tree, walk_sorted, write_manifest,
     DirectoryTree, ExportDest, ManifestEntry, Placed, WalkControl,
 };
-pub use icloud::{import_icloud, IcloudReport};
+pub use icloud::{import_icloud, plan_icloud, IcloudPlan, IcloudReport};
 pub use local::{copy_verify_file, LocalStore};
 pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};
 pub use scan::{scan_tree, verify_scan_manifest, ScanDrift, ScanStats};
+pub use source::SourceRoot;
 pub use store::{
     copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,
     VerifiedObject,
 };
-pub use takeout::{import_takeout, import_takeout_with, TakeoutReport};
+pub use takeout::{import_takeout, import_takeout_with, plan_takeout, TakeoutPlan, TakeoutReport};
 
 #[cfg(test)]
 mod test_support {

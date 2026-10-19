@@ -4,9 +4,9 @@ Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.i
 
 The commitment is [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). Read it before changing this repository.
 
-**First principle: metadata and original quality are never lost.**
+**First principle: metadata and original quality are never lost. Sources are read-only, forever.** A user's archive may be their only copy.
 
-Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy is checked with SHA-256 and fails loudly on mismatch. The default path never removes or alters a source.
+Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy is checked with SHA-256 and fails loudly on mismatch. The default path never removes or alters a source. Scan, export, and upload read a source only through a read-only open. A destination inside that source is refused, and there is no override.
 
 Albumen is an open-source photo library with the feel of classic iPhoto, built to keep working when the library is hundreds of thousands of items and multiple terabytes. You bring the storage. Agents can read the library; they do not get tools that delete or rewrite originals.
 
@@ -20,7 +20,7 @@ Albumen is not a hosting service. Storage stays where you put it:
 
 - Local disk, NAS, SMB, SFTP, WebDAV, S3, and Backblaze B2, reached directly or through rclone.
 - Google Drive and Dropbox through the synced folder you already have. Albumen treats that folder as a filesystem.
-- iCloud is import-only. Apple does not offer a stable API that can write originals back without rewriting them.
+- An iCloud Photos download, export, or Photos library copy imports into the library you choose, with those originals kept bit-exact.
 
 Clients:
 
@@ -40,8 +40,10 @@ cd albumen
 cargo build --release --locked
 export PATH="$(scripts/install-exiftool.sh):$PATH"
 ./target/release/albumen-mcp --library ./library
-./target/release/albumen export --from ./library --to /backup/library
+./target/release/albumen export --from ./library --to /backup/library --apply
 ```
+
+`albumen export` and `albumen-receive` print a plan and write nothing until `--apply` or `--execute`. `albumen scan` only reads. The safety ladder, the per-binary threat model, and how to check a release are in [docs/test-ladder.md](docs/test-ladder.md), [docs/threat-model.md](docs/threat-model.md), and [docs/release-verify.md](docs/release-verify.md).
 
 That build produces `albumen-mcp`, `albumen`, and `albumen-receive`.
 
@@ -65,7 +67,7 @@ That mount is read-only. A writable directory for opt-in export or upload is a s
 5. Read the destination back, compute SHA-256, and compare. On mismatch, delete the destination copy and return an error that names both hashes. The source is left as it was.
 6. If a later file in the asset fails, delete the destination copies this call wrote. Sources stay.
 
-`copy_verify` is the only default path. There is no move in the CLI. `copy_verify_quarantine` is an explicit per-run opt-in: after the copy verifies, it renames sources into a trash directory you pass in for that call. It never unlinks a source. If the trash directory already has that name, the source stays. Nothing in the default API or the CLI calls it.
+`copy_verify` is the only default path. There is no move in the CLI. `copy_verify_quarantine` cannot target a source: it returns an error and does not copy or rename. There is no flag that turns that off. Nothing in the CLI or the MCP server calls it.
 
 ```rust
 use albumen_ingest::{copy_verify, discover, LocalStore};
@@ -94,20 +96,20 @@ The manifest lists SHA-256, byte length, and the relative path. `verify-manifest
 
 ## Google Takeout
 
-`albumen import-takeout` streams a Google Takeout download of `.zip` and `.tgz` parts. The archives are opened read-only and are not extracted in place. Each file is `copy_verify`'d. Takeout JSON is kept byte-for-byte next to its original. `photoTakenTime` stays in that sidecar and is not written into the original. The command writes a reconciliation report and exits non-zero unless the count in equals the count out and every SHA-256 matches.
+`albumen import-takeout` reads a Google Takeout download of `.zip` and `.tgz` parts, or an extracted folder, read-only. Each file is `copy_verify`'d. Takeout JSON is kept byte-for-byte next to its original. Capture time and GPS are restored into a new `.albumen.json` sidecar and are not written into the original. The reconciliation report names every unmatched file. Without `--apply` or `--execute` the command prints a plan and writes nothing. With `--apply` it exits non-zero unless the count in equals the count out and every SHA-256 matches.
 
 ```bash
-albumen import-takeout --from ~/Downloads/takeout --to ~/library --report ~/takeout-report.jsonl
+albumen import-takeout --from ~/Downloads/takeout --to ~/library --report ~/takeout-report.jsonl --apply
 ```
 
 The design note is [docs/importers/takeout.md](docs/importers/takeout.md).
 
 ## iCloud Photos
 
-`albumen import-icloud` copies an iCloud Photos download, a Photos export, or a copy of a Photos library. A download may be several zip parts plus Photo Details CSVs. The source is opened read-only. Originals and edited versions stay bit-exact. Live Photo pairs and AAE/XMP sidecars are kept, and the CSVs are copied byte-for-byte. Album, favorite, and caption metadata from a Photos library is exported beside the original. The database is opened in SQLite read-only immutable mode and is not modified. A capture time read from a sidecar stays in the reconciliation report and is not written into an original. The command exits non-zero unless the count in equals the count out and every SHA-256 matches.
+`albumen import-icloud` copies an iCloud Photos download, a Photos export, or a copy of a Photos library. A download may be several zip parts plus Photo Details CSVs. The source is opened read-only. Originals and edited versions stay bit-exact. Live Photo pairs and AAE/XMP sidecars are kept, and the CSVs are copied byte-for-byte. Album, favorite, caption, capture time, and GPS are exported beside the original. The database is opened in SQLite read-only immutable mode and is not modified. Without `--apply` or `--execute` the command prints a plan and writes nothing. With `--apply` it exits non-zero unless the count in equals the count out and every SHA-256 matches.
 
 ```bash
-albumen import-icloud --from ~/Pictures/Photos\ Library.photoslibrary --to ~/library --report ~/icloud-report.jsonl
+albumen import-icloud --from ~/Pictures/Photos\ Library.photoslibrary --to ~/library --report ~/icloud-report.jsonl --apply
 ```
 
 The design note is [docs/importers/icloud.md](docs/importers/icloud.md).
@@ -161,9 +163,9 @@ Details are in [docs/architecture.md](docs/architecture.md). What is not built y
 
 Albumen will be funded through GitHub Sponsors (profile pending), and no other platforms.
 
-## Not Immich, and not Ente
+## Apache-2.0 code in this tree
 
-Immich and Ente are useful and they are AGPL. Albumen may share ideas. It does not copy their code, or the code of other AGPL photo libraries. MinIO, used only as a CI process, is also AGPL and is not vendored.
+Albumen is Apache-2.0. Immich and Ente are useful AGPL photo libraries, and Albumen may share ideas with them. The code in this tree is Albumen's own. MinIO runs as a CI process and stays outside the tree.
 
 ## License
 
