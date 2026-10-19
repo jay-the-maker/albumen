@@ -40,7 +40,7 @@ cargo build --locked -p albumen -p albumen-mcp -p albumen-receive
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/src" "$work/library" "$work/out" "$work/trace" "$work/logs" "$work/status"
+mkdir -p "$work/src" "$work/library" "$work/destination" "$work/out" "$work/trace" "$work/logs" "$work/status"
 printf 'jpeg-bytes' > "$work/src/IMG.jpg"
 cp "$work/src/IMG.jpg" "$work/library/IMG.jpg"
 
@@ -168,7 +168,7 @@ run_case import-icloud "" "" 0 \\
 run_case platform-dirs "" "" 0 \\
   "\${base_env[@]}" "\$albumen" platform-dirs
 run_case mcp-dry "" "" 0 \\
-  "\${base_env[@]}" "\$mcp" --library "$work/library" --enable-export --enable-upload \\
+  "\${base_env[@]}" "\$mcp" --library "$work/library" --destination "$work/destination" --enable-export --enable-upload \\
   < "$work/mcp-dry.bin"
 run_case receive-plan "" "" 0 \\
   "\${base_env[@]}" "\$receive" --to "$work/out/camera" --user camera --webdav 127.0.0.1:18080
@@ -185,7 +185,7 @@ run_case mcp-s3 "127.0.0.1:19000" "" 0 \\
   ALBUMEN_S3_BUCKET=library \\
   ALBUMEN_S3_ACCESS_KEY=albumen \\
   ALBUMEN_S3_SECRET_KEY=albumen-ci-not-a-secret \\
-  "\$mcp" --library "$work/library" --enable-export --apply \\
+  "\$mcp" --library "$work/library" --destination "$work/destination" --enable-export --apply \\
   < "$work/mcp-s3.bin"
 run_case receive-listen "" "18080" 124 \\
   "\${base_env[@]}" ALBUMEN_RECEIVE_PASSWORD=receiver-secret \\
