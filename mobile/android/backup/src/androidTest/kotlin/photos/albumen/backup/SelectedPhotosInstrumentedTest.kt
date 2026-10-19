@@ -59,7 +59,7 @@ class SelectedPhotosInstrumentedTest {
         }.use { server ->
             val reports = mutableListOf<String>()
             val disposition = pass(context, server, resolver, cache, emptyList(), reports)
-            assertEquals(BackupDisposition.FAILURE, disposition)
+            assertEquals(reports.joinToString("\n"), BackupDisposition.FAILURE, disposition)
             assertTrue(reports.last().contains("Allow all"))
             assertEquals(0, server.bodies.size)
         }
@@ -70,11 +70,12 @@ class SelectedPhotosInstrumentedTest {
         assertNull(CameraRoll.permissionBlock(context))
 
         val jpeg = SyntheticGpsJpeg.bytes()
-        val name = "albumen-selected-${UUID.randomUUID()}.jpg"
+        val name = "AlbumenSelected${System.currentTimeMillis()}.jpg"
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/AlbumenSynthetic")
+            put(MediaStore.Images.Media.DATE_MODIFIED, 1_700_000_000L)
         }
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
         assertNotNull(uri)
@@ -87,7 +88,7 @@ class SelectedPhotosInstrumentedTest {
         }.use { server ->
             val reports = mutableListOf<String>()
             val disposition = pass(context, server, resolver, cache, listOf(found), reports)
-            assertEquals(BackupDisposition.SUCCESS, disposition)
+            assertEquals(reports.joinToString("\n"), BackupDisposition.SUCCESS, disposition)
             assertTrue(reports.last().contains("Verified 1 this run."))
             assertTrue(reports.last().contains("Failures 0."))
             val received = server.bodies.single()
