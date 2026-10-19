@@ -72,6 +72,8 @@ An edited file keeps `-edited` in its own name (`IMG_0001-edited.jpg`). Its JSON
 
 The JSON bytes are copied as they appear in the archive. They are not parsed and written back out. A JSON file that is not a paired name, such as `metadata.json` or `user-generated-memory-titles.json`, is still copied byte-for-byte and listed in the report with `partner` null. Other Takeout files, such as an HTML index, are copied the same way. An extension allow-list would drop a file, so there is not one.
 
+After the copy, `discover` treats that JSON as a sidecar of the original. A later scan or export of the photo carries `IMG_0001.jpg.json` and `IMG_0001.jpg.supplemental-metadata.json`, including a name Takeout shortened to 51 UTF-16 units. The edited file's JSON stays with the edited file.
+
 ### Derived XMP
 
 `--derive-xmp` is off by default. When it is on, Albumen reads the stored JSON and writes a new XMP file beside the partner (`IMG_0001.jpg.xmp`). An unpaired JSON gets `{filename}.xmp`. The XMP carries `title`, `description`, `photoTakenTime` as `exif:DateTimeOriginal` in UTC, and `geoData` when latitude and longitude are not both zero. `creationTime` is not copied into the XMP.

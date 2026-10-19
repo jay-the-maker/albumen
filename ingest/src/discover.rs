@@ -12,7 +12,7 @@ use crate::source::SourceRoot;
 pub enum Role {
     /// The file the caller pointed at.
     Primary,
-    /// XMP or Apple AAE sidecar.
+    /// XMP, Apple AAE, or Takeout JSON sidecar.
     Sidecar,
     /// RAW+JPEG or Live Photo companion with the same stem.
     Pair,
@@ -149,11 +149,14 @@ fn pair_extensions(class: Class) -> Vec<&'static str> {
 
 /// Discover sidecars and known pairs that sit beside `primary`.
 ///
-/// Sidecars are `{stem}.xmp`, `{filename}.xmp`, and the same patterns for
-/// Apple `.aae` edit sidecars, in either case. Pairs are same-stem files in
-/// the same directory: a still with a RAW, or a still with a video (Live
-/// Photo). Android motion photos are a single file; copying that file
-/// bit-exactly keeps the embedded video.
+/// Sidecars are `{stem}.xmp`, `{filename}.xmp`, the same patterns for Apple
+/// `.aae` edit sidecars, and the Takeout JSON names for that file, in either
+/// case. A Takeout JSON is `{filename}.json` or
+/// `{filename}.supplemental-metadata.json`, shortened to Takeout's 51-unit
+/// name when the full name would be longer. Pairs are same-stem files in the
+/// same directory: a still with a RAW, or a still with a video (Live Photo).
+/// Android motion photos are a single file; copying that file bit-exactly
+/// keeps the embedded video.
 pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
     let parent = match primary.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -307,9 +310,86 @@ fn sidecar_candidates(file_name: &str, stem: &str) -> Vec<String> {
         format!("{file_name}.aae"),
         format!("{file_name}.AAE"),
     ];
+    names.extend(takeout_json_sidecar_names(file_name));
     names.sort();
     names.dedup();
     names
+}
+
+/// UTF-16 code units kept before `.json`. Takeout's longest JSON name is 51
+/// units, and the five units of `.json` are never cut. A `(N)` duplicate
+/// marker is appended after this cut, so a numbered name can pass 51.
+const TAKEOUT_JSON_STEM_UNITS: usize = 46;
+const TAKEOUT_SUPPLEMENTAL_SUFFIX: &str = ".supplemental-metadata";
+
+/// Supplemental and legacy JSON names Takeout would write beside `media`.
+///
+/// The supplemental form is `{name}.supplemental-metadata`, cut to 46 UTF-16
+/// code units, then `.json`. A `(N)` before the media extension is removed
+/// from that stem and written after the cut. The legacy form is the same cut
+/// of `{name}` alone. `-edited` stays in the media name, so an edited file
+/// pairs with its own JSON.
+pub(crate) fn takeout_json_sidecar_names(media: &str) -> [String; 2] {
+    let (core, duplicate) = split_takeout_duplicate_marker(media);
+    [
+        takeout_json_name(&core, TAKEOUT_SUPPLEMENTAL_SUFFIX, &duplicate),
+        takeout_json_name(&core, "", &duplicate),
+    ]
+}
+
+fn takeout_json_name(core: &str, supplemental: &str, duplicate: &str) -> String {
+    let mut middle = String::with_capacity(core.len() + supplemental.len());
+    middle.push_str(core);
+    middle.push_str(supplemental);
+    let clipped = clip_utf16(&middle, TAKEOUT_JSON_STEM_UNITS);
+    let mut name = String::with_capacity(clipped.len() + duplicate.len() + 5);
+    name.push_str(&clipped);
+    name.push_str(duplicate);
+    name.push_str(".json");
+    name
+}
+
+fn clip_utf16(value: &str, units: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in value.chars() {
+        let width = ch.len_utf16();
+        if used + width > units {
+            break;
+        }
+        out.push(ch);
+        used += width;
+    }
+    out
+}
+
+/// `(N)` immediately before the last extension, as in `IMG_1234(1).jpg`.
+/// Returns the name with that marker moved out, and the marker `(N)`.
+fn split_takeout_duplicate_marker(media: &str) -> (String, String) {
+    let (stem, extension) = match media.rfind('.') {
+        Some(dot) if dot > 0 && !media[dot + 1..].is_empty() => (&media[..dot], &media[dot..]),
+        _ => (media, ""),
+    };
+    if let Some(open) = trailing_paren_number(stem) {
+        let duplicate = &stem[open..];
+        let core_stem = &stem[..open];
+        if !core_stem.is_empty() {
+            return (format!("{core_stem}{extension}"), duplicate.to_string());
+        }
+    }
+    (media.to_string(), String::new())
+}
+
+fn trailing_paren_number(stem: &str) -> Option<usize> {
+    if !stem.ends_with(')') {
+        return None;
+    }
+    let open = stem.rfind('(')?;
+    let inner = &stem[open + 1..stem.len() - 1];
+    if inner.is_empty() || !inner.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(open)
 }
 
 fn extension_lower(path: &Path) -> String {
@@ -463,5 +543,63 @@ mod tests {
     fn rejects_path_components_in_names() {
         let err = check_filename("../secret.jpg").unwrap_err();
         assert!(matches!(err, IngestError::UnsafeFilename { .. }));
+    }
+
+    #[test]
+    fn discovers_takeout_json_beside_the_original() {
+        let tmp = Tmp::new();
+        let dir = tmp.path();
+        touch(dir, "IMG_0001.jpg");
+        touch(dir, "IMG_0001.jpg.json");
+        touch(dir, "IMG_0001.jpg.supplemental-metadata.json");
+        touch(dir, "IMG_0001-edited.jpg");
+        touch(dir, "IMG_0001-edited.jpg.supplemental-metadata.json");
+        let long = format!("{}.jpg", "n".repeat(43));
+        assert_eq!(long.chars().count(), 47);
+        let truncated = takeout_json_sidecar_names(&long)[0].clone();
+        assert_ne!(truncated, format!("{long}.json"));
+        assert!(truncated.ends_with(".json"));
+        touch(dir, &long);
+        touch(dir, &truncated);
+
+        let plain = discover(&dir.join("IMG_0001.jpg")).unwrap();
+        let plain_sidecars: Vec<_> = plain
+            .files()
+            .iter()
+            .filter(|file| file.role == Role::Sidecar)
+            .map(|file| file.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            plain_sidecars,
+            vec![
+                "IMG_0001.jpg.json".to_string(),
+                "IMG_0001.jpg.supplemental-metadata.json".to_string(),
+            ]
+        );
+
+        let edited = discover(&dir.join("IMG_0001-edited.jpg")).unwrap();
+        let edited_names: Vec<_> = edited
+            .files()
+            .iter()
+            .skip(1)
+            .map(|file| file.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            edited_names,
+            vec!["IMG_0001-edited.jpg.supplemental-metadata.json".to_string()]
+        );
+
+        let clipped = discover(&dir.join(&long)).unwrap();
+        assert_eq!(clipped.files().len(), 2);
+        assert_eq!(clipped.files()[1].role, Role::Sidecar);
+        assert_eq!(
+            clipped.files()[1]
+                .path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            truncated
+        );
     }
 }
