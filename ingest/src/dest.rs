@@ -198,6 +198,14 @@ fn sync_dir_windows(path: &Path) -> Result<(), IngestError> {
     // `opened` adds `\\?\` when the directory needs the extended path.
     // `MOVEFILE_WRITE_THROUGH` names the directory twice and does not replace it.
     let directory = opened(path);
+    // Experiment (Performance, Windows): when both calls already failed for
+    // this directory in this process, they fail the same way again, so skip
+    // the two failing calls and the repeated warning. The result recorded is
+    // still `Warned`, exactly what the two calls would have produced.
+    if known_unflushable(&directory) {
+        note_dir_sync(DirSyncKind::Warned);
+        return Ok(());
+    }
     match flush_dir(&directory) {
         Ok(()) => {
             note_dir_sync(DirSyncKind::Flush);
@@ -214,9 +222,32 @@ fn sync_dir_windows(path: &Path) -> Result<(), IngestError> {
             }
             Err(move_err) => {
                 warn_dir(path, &flush_err, &move_err);
+                remember_unflushable(&directory);
                 Ok(())
             }
         },
+    }
+}
+
+#[cfg(windows)]
+fn unflushable() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+#[cfg(windows)]
+fn known_unflushable(directory: &Path) -> bool {
+    unflushable()
+        .lock()
+        .map(|set| set.contains(directory))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn remember_unflushable(directory: &Path) {
+    if let Ok(mut set) = unflushable().lock() {
+        set.insert(directory.to_path_buf());
     }
 }
 
