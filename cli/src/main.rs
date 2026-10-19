@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use albumen_ingest::{
-    export_tree, import_icloud, import_takeout, parse_manifest, scan_tree, verify_scan_manifest,
-    verify_tree, write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config,
-    S3Store,
+    export_tree, import_icloud, import_takeout_with, parse_manifest, scan_tree,
+    verify_scan_manifest, verify_tree, write_manifest, DirectoryTree, ExportDest, IngestError,
+    ManifestEntry, S3Config, S3Store,
 };
 use clap::{Parser, Subcommand};
 
@@ -75,6 +75,11 @@ enum Command {
         /// JSONL reconciliation report, outside the archives and the library.
         #[arg(long)]
         report: PathBuf,
+        /// Write a new XMP file rendered from each Takeout JSON.
+        ///
+        /// Off by default. The original's bytes and mtime are not changed.
+        #[arg(long)]
+        derive_xmp: bool,
     },
     /// Copy an iCloud Photos download, export, or Photos library.
     ///
@@ -142,8 +147,13 @@ fn run() -> Result<(), IngestError> {
             );
             Ok(())
         }
-        Command::ImportTakeout { from, to, report } => {
-            let outcome = import_takeout(&from, &to, &report)?;
+        Command::ImportTakeout {
+            from,
+            to,
+            report,
+            derive_xmp,
+        } => {
+            let outcome = import_takeout_with(&from, &to, &report, derive_xmp)?;
             println!(
                 "imported {} files ({} in) to {}",
                 outcome.count_out,
