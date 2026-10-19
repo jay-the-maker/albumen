@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Make ffmpeg available for the synthetic Live Photo generator.
 # The bytes that generator produces are hashed in the same run, so this does
-# not pin a binary. ExifTool stays the pinned metadata reader.
+# not need one exact binary. On Windows it pins one build by SHA-256 so a
+# package feed outage does not fail CI. ExifTool stays the pinned metadata
+# reader.
 set -euo pipefail
 
 has_encoder() {
@@ -22,32 +24,27 @@ case "$os" in
     brew install ffmpeg
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    # Chocolatey can exit 0 when the community feed returns 503 and no
-    # ffmpeg.exe was written. Retry until the binary is actually there.
-    bin=""
-    attempt=1
-    while [[ "$attempt" -le 5 ]]; do
-      choco install ffmpeg -y --no-progress || true
-      for candidate in \
-        /c/ProgramData/chocolatey/lib/ffmpeg/tools/ffmpeg/bin \
-        /c/ProgramData/chocolatey/bin
-      do
-        if [[ -x "$candidate/ffmpeg.exe" || -x "$candidate/ffmpeg" ]]; then
-          bin="$candidate"
-          break
-        fi
-      done
-      if [[ -n "$bin" ]]; then
-        break
-      fi
-      echo "ffmpeg install did not produce ffmpeg.exe (attempt ${attempt})" >&2
-      if [[ "$attempt" -eq 5 ]]; then
-        exit 1
-      fi
-      sleep $((attempt * 10))
-      attempt=$((attempt + 1))
-    done
-    # The Chocolatey shim is not a reliable PATH entry for the next step.
+    # One pinned Gyan.dev essentials build from its GitHub release (the same
+    # build the Chocolatey package fetches), checked against its SHA-256.
+    # The Chocolatey community feed returned 503s often enough to fail CI.
+    version="9.0.2"
+    sha256="60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba"
+    name="ffmpeg-${version}-essentials_build"
+    url="https://github.com/GyanD/codexffmpeg/releases/download/${version}/${name}.zip"
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}/albumen"
+    zip="${cache}/${name}.zip"
+    bin="${cache}/${name}/bin"
+    mkdir -p "$cache"
+    if [[ ! -f "$zip" ]] || ! echo "${sha256}  ${zip}" | sha256sum -c - >/dev/null 2>&1; then
+      curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "${zip}.partial" "$url"
+      echo "${sha256}  ${zip}.partial" | sha256sum -c - >&2
+      mv "${zip}.partial" "$zip"
+    fi
+    echo "${sha256}  ${zip}" | sha256sum -c - >&2
+    if [[ ! -x "${bin}/ffmpeg.exe" ]]; then
+      rm -rf "${cache:?}/${name}"
+      unzip -q "$zip" -d "$cache"
+    fi
     # Publish the directory that contains ffmpeg.exe as a Windows path.
     export PATH="${bin}:${PATH}"
     if [[ -n "${GITHUB_PATH:-}" ]]; then
