@@ -1053,8 +1053,45 @@ mod tests {
     use super::*;
     use crate::test_support::{write_file, Tmp};
     use std::fs;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn meta_mode(meta: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.mode()
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            meta.file_attributes()
+        }
+    }
+
+    fn apply_mode(path: &Path, mode: u32) {
+        let mut perms = fs::symlink_metadata(path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(mode);
+        }
+        #[cfg(windows)]
+        {
+            perms.set_readonly(mode & 1 != 0);
+        }
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn locked_mode(mode: u32) -> u32 {
+        #[cfg(unix)]
+        {
+            mode & !0o222
+        }
+        #[cfg(windows)]
+        {
+            mode | 1
+        }
+    }
 
     struct ModeGuard {
         saved: Vec<(PathBuf, u32)>,
@@ -1063,12 +1100,9 @@ mod tests {
     impl Drop for ModeGuard {
         fn drop(&mut self) {
             for (path, mode) in self.saved.iter().rev() {
-                let Ok(meta) = fs::symlink_metadata(path) else {
-                    continue;
-                };
-                let mut perms = meta.permissions();
-                perms.set_mode(*mode);
-                let _ = fs::set_permissions(path, perms);
+                if fs::symlink_metadata(path).is_ok() {
+                    apply_mode(path, *mode);
+                }
             }
         }
     }
@@ -1078,7 +1112,7 @@ mod tests {
         let mut stack = vec![root.to_path_buf()];
         while let Some(path) = stack.pop() {
             let meta = fs::symlink_metadata(&path).unwrap();
-            saved.push((path.clone(), meta.mode()));
+            saved.push((path.clone(), meta_mode(&meta)));
             if meta.is_dir() {
                 for entry in fs::read_dir(&path).unwrap() {
                     stack.push(entry.unwrap().path());
@@ -1086,9 +1120,7 @@ mod tests {
             }
         }
         for (path, mode) in &saved {
-            let mut perms = fs::symlink_metadata(path).unwrap().permissions();
-            perms.set_mode(mode & !0o222);
-            fs::set_permissions(path, perms).unwrap();
+            apply_mode(path, locked_mode(*mode));
         }
         ModeGuard { saved }
     }
@@ -1156,7 +1188,7 @@ mod tests {
                     len: meta.len(),
                     sha,
                     mtime: meta.modified().unwrap(),
-                    mode: meta.mode(),
+                    mode: meta_mode(&meta),
                 }
             })
             .collect()
@@ -1273,7 +1305,7 @@ mod tests {
         assert_eq!(stats.files, 1);
         assert_eq!(fs::read(&path).unwrap(), b"alphabet");
         let left = fs::symlink_metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(left, new_mtime);
+        assert!(crate::mtime::mtime_matches(new_mtime, left));
         let line: ScanLine = serde_json::from_str(
             fs::read_to_string(&manifest)
                 .unwrap()
@@ -1284,9 +1316,15 @@ mod tests {
         .unwrap();
         let drift = line.drift.expect("manifest records drift");
         assert_eq!(drift.before.bytes, b"alpha".len() as u64);
-        assert_eq!(drift.before.mtime_ns, to_unix_nanos_string(mtime));
+        assert!(crate::mtime::mtime_matches(
+            mtime,
+            crate::mtime::from_unix_nanos_string(&drift.before.mtime_ns, "a.txt").unwrap()
+        ));
         assert_eq!(drift.after.bytes, b"alphabet".len() as u64);
-        assert_eq!(drift.after.mtime_ns, to_unix_nanos_string(new_mtime));
+        assert!(crate::mtime::mtime_matches(
+            new_mtime,
+            crate::mtime::from_unix_nanos_string(&drift.after.mtime_ns, "a.txt").unwrap()
+        ));
         assert_eq!(line.bytes, drift.before.bytes);
         assert_eq!(line.mtime_ns, drift.before.mtime_ns);
     }
@@ -1343,9 +1381,7 @@ mod tests {
             let _guard = lock_tree(&source);
             scan_tree(&source, &manifest).unwrap();
         }
-        let mut perms = fs::metadata(source.join("a.txt")).unwrap().permissions();
-        perms.set_mode(0o644);
-        fs::set_permissions(source.join("a.txt"), perms).unwrap();
+        apply_mode(&source.join("a.txt"), 0o644);
         fs::write(source.join("a.txt"), b"alphb").unwrap();
         let mut seen = Vec::new();
         let err = verify_scan_manifest(&manifest, &source, &mut |drift| seen.push(drift.clone()))

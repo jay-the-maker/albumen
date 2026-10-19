@@ -20,4 +20,6 @@ serde_json = "1"
 [dev-dependencies]
 albumen-ingest = { path = "../ingest" }
 tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
 xattr = "1"

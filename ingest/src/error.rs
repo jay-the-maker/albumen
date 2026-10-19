@@ -43,6 +43,22 @@ pub enum IngestError {
     },
 
     #[error(
+        "case-insensitive name collision for {filename}: destination already has {existing} at {destination}"
+    )]
+    CaseCollision {
+        filename: String,
+        existing: String,
+        destination: String,
+    },
+
+    #[error("alternate data stream {name} on {filename}: {message}")]
+    AlternateStream {
+        filename: String,
+        name: String,
+        message: String,
+    },
+
+    #[error(
         "filename was not preserved: source name is {source_name:?}, requested name is {requested:?}"
     )]
     FilenameMismatch {

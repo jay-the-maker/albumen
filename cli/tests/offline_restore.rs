@@ -19,6 +19,14 @@ fn run(root: &Path, preload: Option<&Path>, args: &[&str]) -> (bool, String) {
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
     cmd.env("PATH", path);
     cmd.env("TMPDIR", root);
+    cmd.env("TMP", root);
+    cmd.env("TEMP", root);
+    if let Ok(value) = std::env::var("SYSTEMROOT") {
+        cmd.env("SYSTEMROOT", value);
+    }
+    if let Ok(value) = std::env::var("WINDIR") {
+        cmd.env("WINDIR", value);
+    }
     for (key, value) in [
         ("http_proxy", "http://127.0.0.1:9"),
         ("https_proxy", "http://127.0.0.1:9"),

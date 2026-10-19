@@ -2258,7 +2258,10 @@ mod tests {
         fs::create_dir(&from).unwrap();
         let outside = tmp.path().join("outside.HEIC");
         fs::write(&outside, b"outside").unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, from.join("link.HEIC")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside, from.join("link.HEIC")).unwrap();
         write_stamped(&from.join("IMG_0001.HEIC"), b"kept");
         let to = tmp.path().join("library");
         let err = import_icloud(&from, &to, &tmp.path().join("report.jsonl")).unwrap_err();

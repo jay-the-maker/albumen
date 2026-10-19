@@ -1,9 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn meta_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.mode()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
+    }
+}
+
+fn locked_mode(mode: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        mode & !0o222
+    }
+    #[cfg(windows)]
+    {
+        mode | 1
+    }
+}
+
+fn apply_mode(path: &Path, mode: u32) {
+    let mut perms = fs::symlink_metadata(path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(mode);
+    }
+    #[cfg(windows)]
+    {
+        perms.set_readonly(mode & 1 != 0);
+    }
+    let _ = fs::set_permissions(path, perms);
+}
 
 fn albumen() -> Command {
     Command::new(env!("CARGO_BIN_EXE_albumen"))
@@ -18,10 +55,8 @@ impl ModeGuard {
         let saved = paths
             .iter()
             .map(|path| {
-                let mode = fs::symlink_metadata(path).unwrap().mode();
-                let mut perms = fs::symlink_metadata(path).unwrap().permissions();
-                perms.set_mode(mode & !0o222);
-                fs::set_permissions(path, perms).unwrap();
+                let mode = meta_mode(&fs::symlink_metadata(path).unwrap());
+                apply_mode(path, locked_mode(mode));
                 (path.clone(), mode)
             })
             .collect();
@@ -32,12 +67,10 @@ impl ModeGuard {
 impl Drop for ModeGuard {
     fn drop(&mut self) {
         for (path, mode) in self.saved.iter().rev() {
-            let Ok(meta) = fs::symlink_metadata(path) else {
+            if fs::symlink_metadata(path).is_err() {
                 continue;
-            };
-            let mut perms = meta.permissions();
-            perms.set_mode(*mode);
-            let _ = fs::set_permissions(path, perms);
+            }
+            apply_mode(path, *mode);
         }
     }
 }
@@ -81,7 +114,11 @@ fn scan_refuses_a_manifest_inside_the_source_and_leaves_bytes() {
     assert!(output.status.success(), "{text}");
     assert_eq!(fs::read(&file).unwrap(), b"alpha");
     assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), mtime);
-    assert_eq!(fs::metadata(&file).unwrap().mode() & 0o222, 0);
+    let mode = meta_mode(&fs::metadata(&file).unwrap());
+    #[cfg(unix)]
+    assert_eq!(mode & 0o222, 0);
+    #[cfg(windows)]
+    assert_eq!(mode & 1, 1);
     let manifest_text = fs::read_to_string(&manifest).unwrap();
     assert!(
         manifest_text.contains("\"path\":\"sub/a.txt\""),

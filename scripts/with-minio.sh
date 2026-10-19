@@ -3,9 +3,9 @@
 # MinIO is AGPL and is not part of Albumen. This downloads a released binary
 # and runs it as a separate process. The credentials are disposable test values.
 #
-# Docker is not used. Linux amd64 and macOS arm64 have pinned binaries. Any
-# other OS prints that and runs the command with ALBUMEN_S3_UNAVAILABLE=1 so
-# the suite stays on the local filesystem.
+# Docker is not used. Linux amd64, macOS arm64, and Windows amd64 have pinned
+# binaries. Any other OS prints that and runs the command with
+# ALBUMEN_S3_UNAVAILABLE=1 so the suite stays on the local filesystem.
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
@@ -47,6 +47,10 @@ case "${OS_NAME}-${ARCH_NAME}" in
   Darwin-arm64)
     ASSET="minio.darwin-arm64.${RELEASE}"
     SHA256="7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4"
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    ASSET="minio.windows-amd64.${RELEASE}.exe"
+    SHA256="af709e6ba68488404e85acdd22a3030d0f5e56a108d4b27d744f18ceb50861b4"
     ;;
   *)
     echo "Docker is not used. No pinned MinIO binary for ${OS_NAME}-${ARCH_NAME}. S3 will not run; the suite is local filesystem only." >&2
@@ -117,7 +121,10 @@ export ALBUMEN_S3_REGION="${ALBUMEN_S3_REGION:-us-east-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RCLONE_DIR="$("${SCRIPT_DIR}/install-rclone.sh")"
 export PATH="${RCLONE_DIR}:${PATH}"
-export ALBUMEN_RCLONE="${RCLONE_DIR}/rclone"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) export ALBUMEN_RCLONE="${RCLONE_DIR}/rclone.exe" ;;
+  *) export ALBUMEN_RCLONE="${RCLONE_DIR}/rclone" ;;
+esac
 
 set +e
 "$@"

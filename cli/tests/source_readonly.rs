@@ -3,7 +3,6 @@
 //! Every `albumen` command leaves a source tree byte-for-byte identical.
 
 use std::fs::{self, File, OpenOptions};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,11 +17,76 @@ struct Entry {
     xattr: Vec<u8>,
 }
 
+#[cfg(unix)]
 fn xattr_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "albumen.trial"
     } else {
         "user.albumen-trial"
+    }
+}
+
+fn meta_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.mode()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
+    }
+}
+
+fn locked_mode(mode: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        mode & !0o222
+    }
+    #[cfg(windows)]
+    {
+        mode | 1
+    }
+}
+
+fn apply_mode(path: &Path, mode: u32) {
+    let mut perms = fs::symlink_metadata(path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(mode);
+    }
+    #[cfg(windows)]
+    {
+        perms.set_readonly(mode & 1 != 0);
+    }
+    fs::set_permissions(path, perms).unwrap();
+}
+
+fn mark_extra(path: &Path, bytes: &[u8]) {
+    #[cfg(unix)]
+    {
+        xattr::set(path, xattr_name(), bytes).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(":albumen");
+        fs::write(name, bytes).unwrap();
+    }
+}
+
+fn read_extra(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        xattr::get(path, xattr_name()).unwrap().unwrap_or_default()
+    }
+    #[cfg(windows)]
+    {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(":albumen");
+        fs::read(name).unwrap_or_default()
     }
 }
 
@@ -42,7 +106,7 @@ fn stamp(path: &Path, bytes: &[u8], mtime: SystemTime) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, bytes).unwrap();
-    xattr::set(path, xattr_name(), b"trial").unwrap();
+    mark_extra(path, b"trial");
     OpenOptions::new()
         .write(true)
         .open(path)
@@ -54,8 +118,8 @@ fn stamp(path: &Path, bytes: &[u8], mtime: SystemTime) {
 fn plant(root: &Path) {
     let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789);
     fs::create_dir_all(root.join("trip")).unwrap();
-    xattr::set(root, xattr_name(), b"root").unwrap();
-    xattr::set(root.join("trip"), xattr_name(), b"trip").unwrap();
+    mark_extra(root, b"root");
+    mark_extra(&root.join("trip"), b"trip");
     stamp(&root.join("a.txt"), b"alpha", mtime);
     stamp(&root.join("trip/IMG.jpg"), b"jpeg-bytes", mtime);
     stamp(&root.join("trip/IMG.xmp"), b"<xmp/>", mtime);
@@ -76,8 +140,8 @@ fn capture(root: &Path) -> Vec<Entry> {
             is_dir: meta.is_dir(),
             bytes,
             mtime: meta.modified().unwrap(),
-            mode: meta.mode(),
-            xattr: xattr::get(path, xattr_name()).unwrap().unwrap_or_default(),
+            mode: meta_mode(&meta),
+            xattr: read_extra(path),
         });
     }
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) {
@@ -118,10 +182,8 @@ fn lock_writes(root: &Path) {
         paths.push(path);
     }
     for path in paths {
-        let mode = fs::symlink_metadata(&path).unwrap().mode() & !0o222;
-        let mut perms = fs::symlink_metadata(&path).unwrap().permissions();
-        perms.set_mode(mode);
-        fs::set_permissions(&path, perms).unwrap();
+        let mode = locked_mode(meta_mode(&fs::symlink_metadata(&path).unwrap()));
+        apply_mode(&path, mode);
     }
 }
 
@@ -278,7 +340,10 @@ fn symlink_destination_into_the_source_is_refused() {
     let (tmp, root) = prepare(false);
     let before = capture(&root);
     let link = tmp.path().join("link");
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&root, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&root, &link).unwrap();
     let (ok, text) = run(&[
         "export",
         "--from",

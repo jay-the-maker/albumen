@@ -6,6 +6,8 @@
 //! A hide or a failed receipt writes a tombstone and leaves the original.
 
 mod ftp;
+pub mod secrets;
+pub mod service;
 mod sftp;
 mod store;
 mod webdav;

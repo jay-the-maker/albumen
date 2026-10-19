@@ -42,6 +42,10 @@ case "${OS_NAME}-${ARCH_NAME}" in
     TRIPLE="osx-arm64"
     SHA256="610ab7d48615135dfc60b763858b11a426a0d3d1160c1bb76fb0ae6011b02edd"
     ;;
+  MINGW*|MSYS*|CYGWIN*)
+    TRIPLE="windows-amd64"
+    SHA256="8a9db2bad1dc79a65b3348fd857069598e2aab7cf4d118b77b1df23055aff818"
+    ;;
   *)
     echo "Docker is not used. No pinned rclone binary for ${OS_NAME}-${ARCH_NAME}." >&2
     exit 0
@@ -63,12 +67,17 @@ fi
 
 check_sha256 "$SHA256" "$ZIP"
 
-if [[ ! -x "${ROOT}/rclone" ]] || [[ "$("${ROOT}/rclone" version 2>/dev/null | awk 'NR==1{print $2}')" != "$VERSION" ]]; then
+RCLONE_BIN="${ROOT}/rclone"
+case "${OS_NAME}" in
+  MINGW*|MSYS*|CYGWIN*) RCLONE_BIN="${ROOT}/rclone.exe" ;;
+esac
+
+if [[ ! -x "${RCLONE_BIN}" ]] || [[ "$("${RCLONE_BIN}" version 2>/dev/null | awk 'NR==1{print $2}')" != "$VERSION" ]]; then
   rm -rf "$ROOT"
   unzip -q "$ZIP" -d "$CACHE"
 fi
 
-chmod +x "${ROOT}/rclone"
+chmod +x "${RCLONE_BIN}"
 if [[ "$OS_NAME" == "Darwin" ]]; then
   xattr -dr com.apple.quarantine "$ROOT" 2>/dev/null || true
 fi

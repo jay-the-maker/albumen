@@ -8,7 +8,7 @@ Safety comes before a scan of a machine that holds the only copy. Each rung has 
 
 Entry: a pull request, or a local `cargo test` of this tree.
 
-What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, and `macos-14`. The corpus is the CC0 fixtures. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
+What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, `macos-14`, and `windows-latest`. The corpus is the CC0 fixtures. The Windows leg also covers paths longer than 260 characters, case-insensitive name collisions, reserved device names, NTFS alternate data streams, and 100 ns modification times. The in-process scale tests, including the million-item page test that does not create a million inodes, run on every leg. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
 
 `scripts/check-dest-writes.py` fails the job if production code creates, writes, renames, or removes a file outside `ingest/src/dest.rs`. The bench harness is not part of that scan. It writes synthetic timing files and does not open a user archive.
 
@@ -63,3 +63,13 @@ albumen verify-manifest \
 ```
 
 Exit: the copy's bytes, mtime, and xattrs match the snapshot taken before the scan. macOS may update atime. The live volume was not the path that was scanned.
+
+## Rung 5 — Windows sandbox
+
+Entry: rungs 1–4 are green. This rung runs on a Windows machine. It is not a GitHub-hosted job.
+
+Use Windows Sandbox, or a container with the network off. Windows Sandbox is a disposable desktop. The configuration [scripts/windows-sandbox.wsb](../scripts/windows-sandbox.wsb) sets `<Networking>Disable</Networking>` and maps a copied folder read-only. `scripts/windows-sandbox.ps1` copies `fixtures/` (or `-Corpus`) into a fresh directory and writes that configuration next to the copy. It does not mount the original path.
+
+Inside the sandbox, run `albumen scan` and `albumen verify-manifest` against the mapped copy. The manifest is written outside the mapped folder. Compare the copy's bytes, modification time, and alternate data streams with the snapshot taken before the scan. A container with `--network none` is the same rung when Windows Sandbox is not available.
+
+Exit: the script prints `rung 5 exit: source copy unchanged`. The live library was not the path that was scanned.

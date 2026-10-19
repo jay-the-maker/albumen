@@ -863,8 +863,20 @@ mod tests {
         arm_fail_before_sidecar_rename, disambiguated, Arrival, Library, MtimeProtocol, Record,
         Spool,
     };
-    use std::os::unix::fs::MetadataExt;
     use std::time::UNIX_EPOCH;
+
+    fn file_index(meta: &std::fs::Metadata) -> u64 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino()
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            meta.file_index().unwrap_or(0)
+        }
+    }
 
     #[test]
     fn arrival_keeps_the_camera_filename_and_directory() {
@@ -1001,7 +1013,7 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("injected failure"), "{err}");
         let photo = root.path().join("IMG_0001.JPG");
-        let inode = std::fs::metadata(&photo).unwrap().ino();
+        let inode = file_index(&std::fs::metadata(&photo).unwrap());
         assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
         let tombstone =
             std::fs::read_to_string(root.path().join("IMG_0001.JPG.albumen-tombstone")).unwrap();
@@ -1012,7 +1024,7 @@ mod tests {
         );
 
         library.hide("IMG_0001.JPG").unwrap();
-        assert_eq!(std::fs::metadata(&photo).unwrap().ino(), inode);
+        assert_eq!(file_index(&std::fs::metadata(&photo).unwrap()), inode);
         assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
         let hidden =
             std::fs::read_to_string(root.path().join("IMG_0001.JPG.albumen-tombstone")).unwrap();

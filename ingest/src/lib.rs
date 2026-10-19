@@ -18,6 +18,7 @@ mod icloud;
 mod local;
 mod mtime;
 mod photos_library;
+mod platform;
 mod rclone;
 mod s3;
 mod scan;
@@ -34,6 +35,7 @@ pub use export::{
 };
 pub use icloud::{import_icloud, plan_icloud, IcloudPlan, IcloudReport};
 pub use local::{copy_verify_file, LocalStore};
+pub use platform::platform_dirs;
 pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};
 pub use scan::{scan_tree, verify_scan_manifest, ScanDrift, ScanStats};

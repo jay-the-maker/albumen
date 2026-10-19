@@ -10,8 +10,10 @@ pub(crate) fn set_mtime(path: &Path, mtime: SystemTime) -> Result<(), IngestErro
     crate::dest::set_mtime(path, mtime)
 }
 
+pub(crate) use crate::platform::mtime_matches;
+
 pub(crate) fn mtime_of(path: &Path) -> Result<SystemTime, IngestError> {
-    std::fs::metadata(path)
+    std::fs::metadata(crate::platform::io_path(path))
         .and_then(|meta| meta.modified())
         .map_err(|err| IngestError::io(path, err))
 }

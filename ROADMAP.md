@@ -18,6 +18,18 @@ This is the gap after the safety work and before the storage backends. Both impo
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
 
+## Windows and Linux, with macOS
+
+Linux, Windows, and macOS are first-class for the ingest tools. The round-trip suite, the read-only source snapshot, and the in-process scale tests run on `ubuntu-24.04`, `ubuntu-26.04`, `windows-latest`, and `macos-14`.
+
+Windows opens paths longer than 260 characters, reserved device names, and trailing dots or spaces with the `\\?\` prefix. A destination that already has another spelling of the same name is reported. Named NTFS alternate data streams are copied with the file. Modification time is kept to the 100 ns tick NTFS stores.
+
+`albumen platform-dirs` prints the config and data directories and creates nothing. Linux uses XDG, macOS uses `~/Library/Application Support`, and Windows uses the roaming Known Folder. Pass those paths to another command when you want them.
+
+`albumen-receive --keyring` reads the camera password from the Keychain, Windows Credential Manager, or the Secret Service. `--keyring-set` stores it. The password is not printed. `--print-service` prints a launchd plist, a systemd user unit, or a Task Scheduler definition. `--service-dir` with `--apply` writes that file and does not start the service. The definition names `ALBUMEN_RECEIVE_PASSWORD` and does not contain the password.
+
+The test ladder runs on all three. The Windows sandbox rung is [docs/test-ladder.md](docs/test-ladder.md). Details are in [docs/platforms.md](docs/platforms.md).
+
 ## Export everything
 
 Shipped as `albumen export` and `albumen verify-manifest`. The command copy-verifies the library, sidecars, and pairs to a directory or `s3://` prefix, writes a SHA-256 manifest, and can be run again without overwriting. See the README.

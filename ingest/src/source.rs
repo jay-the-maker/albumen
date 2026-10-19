@@ -57,12 +57,13 @@ impl SourceRoot {
     /// List a directory inside this root. Symlinks are not followed.
     pub fn read_dir(&self, path: &Path) -> Result<fs::ReadDir, IngestError> {
         self.ensure_inside(path)?;
-        fs::read_dir(path).map_err(|err| IngestError::io(path, err))
+        fs::read_dir(crate::platform::io_path(path)).map_err(|err| IngestError::io(path, err))
     }
 
     /// Stat `path` without following a symlink. A symlink is an error.
     pub fn metadata_nofollow(&self, path: &Path) -> Result<fs::Metadata, IngestError> {
-        let meta = fs::symlink_metadata(path).map_err(|err| IngestError::io(path, err))?;
+        let meta = fs::symlink_metadata(crate::platform::io_path(path))
+            .map_err(|err| IngestError::io(path, err))?;
         if meta.file_type().is_symlink() {
             return Err(IngestError::Symlink(path.to_path_buf()));
         }
@@ -72,7 +73,7 @@ impl SourceRoot {
 
     /// Stat a probed sibling. Missing paths and symlinks are `None`.
     pub fn probe(&self, path: &Path) -> Result<Option<fs::Metadata>, IngestError> {
-        match fs::symlink_metadata(path) {
+        match fs::symlink_metadata(crate::platform::io_path(path)) {
             Ok(meta) if meta.file_type().is_symlink() => Ok(None),
             Ok(meta) => {
                 self.ensure_inside(path)?;
@@ -123,13 +124,14 @@ pub fn parent_dir(path: &Path) -> &Path {
 }
 
 fn open_rdonly(path: &Path) -> Result<File, IngestError> {
+    let opened = crate::platform::io_path(path);
     #[cfg(target_os = "linux")]
     {
         const O_NOATIME: i32 = 0o1000000;
         match OpenOptions::new()
             .read(true)
             .custom_flags(O_NOATIME)
-            .open(path)
+            .open(&opened)
         {
             Ok(file) => return Ok(file),
             Err(err) if err.raw_os_error() == Some(1) => {}
@@ -138,7 +140,7 @@ fn open_rdonly(path: &Path) -> Result<File, IngestError> {
     }
     OpenOptions::new()
         .read(true)
-        .open(path)
+        .open(&opened)
         .map_err(|err| IngestError::io(path, err))
 }
 

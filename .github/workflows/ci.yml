@@ -22,8 +22,9 @@ jobs:
       matrix:
         # ubuntu-latest moves to Ubuntu 26.04 starting 2026-10-19.
         # 24.04 is the pinned image. 26.04 stays in the matrix only while
-        # that leg is green. macos-14 is the arm64 leg and runs the same
-        # suite, including MinIO and rclone round-trips, from pinned binaries.
+        # that leg is green. macos-14 is the arm64 leg. windows-latest is
+        # the Windows leg. Each runs the same suite, including MinIO and
+        # rclone round-trips, from pinned binaries.
         include:
           - os: ubuntu-24.04
             label: ubuntu-24.04
@@ -34,6 +35,9 @@ jobs:
           - os: macos-14
             label: macos-14 (arm64)
             timeout: 60
+          - os: windows-latest
+            label: windows-latest
+            timeout: 75
     steps:
       - uses: actions/checkout@v5
 
@@ -43,24 +47,38 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.2
 
+      - name: Install Perl for ExifTool
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install strawberryperl -y --no-progress
+          echo "C:/Strawberry/perl/bin" >> "$GITHUB_PATH"
+
       - name: Install pinned ExifTool
+        shell: bash
         run: scripts/install-exiftool.sh
 
       - name: Install pinned rclone
+        shell: bash
         run: scripts/install-rclone.sh
 
       - name: Ban writes outside the destination module
+        shell: bash
         run: |
-          python3 scripts/check-dest-writes.py --self-test
-          python3 scripts/check-dest-writes.py
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/check-dest-writes.py --self-test
+          "$PY" scripts/check-dest-writes.py
 
       - name: Check formatting
+        shell: bash
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        shell: bash
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Round-trip originals through the local filesystem and MinIO
+        shell: bash
         run: scripts/with-minio.sh cargo test --locked --all-targets
 
   android:

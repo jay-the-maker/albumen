@@ -8,7 +8,7 @@ use crate::checksum::{copy_hashed, sha256_file, to_hex};
 use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
-use crate::mtime::{mtime_of, set_mtime, sync_file, to_unix_nanos_string};
+use crate::mtime::{mtime_matches, mtime_of, set_mtime, sync_file, to_unix_nanos_string};
 use crate::source::{parent_dir, SourceRoot};
 use crate::store::{BlobStore, VerifiedObject};
 
@@ -77,7 +77,14 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     let dest = dest_dir.join(&filename);
     root.refuse_destination(&dest)?;
     dest::create_dir_all(dest_dir)?;
-    if dest.exists() {
+    if let Some(existing) = crate::platform::case_collision(dest_dir, &filename)? {
+        return Err(IngestError::CaseCollision {
+            filename: filename.clone(),
+            existing,
+            destination: dest.display().to_string(),
+        });
+    }
+    if crate::platform::io_path(&dest).exists() {
         return Err(IngestError::AlreadyExists {
             filename: filename.clone(),
             destination: dest.display().to_string(),
@@ -94,10 +101,40 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     let written_hash = copy_hashed(input, &output, source, &dest)?;
     sync_file(&output, &dest)?;
     drop(output);
+    copy_named_streams(source, &dest, &filename)?;
 
     let record = finalize_verified(&dest, &filename, &written_hash, mtime)?;
     guard.armed = false;
     Ok(record)
+}
+
+fn copy_named_streams(source: &Path, dest: &Path, filename: &str) -> Result<(), IngestError> {
+    let streams = crate::platform::list_named_streams(source)?;
+    for stream in streams {
+        let src_path = dest::stream_path(source, &stream.name);
+        let dst_path = dest::stream_path(dest, &stream.name);
+        let mut input = fs::File::open(&src_path).map_err(|err| IngestError::io(&src_path, err))?;
+        let output = dest::open_stream(dest, &stream.name).inspect_err(|_| {
+            dest::remove_stream(dest, &stream.name);
+        })?;
+        let written = copy_hashed(&mut input, &output, &src_path, &dst_path)?;
+        sync_file(&output, &dst_path)?;
+        drop(output);
+        let actual = sha256_file(&dst_path)?;
+        if actual != written {
+            dest::remove_stream(dest, &stream.name);
+            return Err(IngestError::AlternateStream {
+                filename: filename.to_string(),
+                name: stream.name,
+                message: format!(
+                    "checksum mismatch: expected {}, got {}",
+                    to_hex(&written),
+                    to_hex(&actual)
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Stream `reader` into a new file at `dest` and verify it the same way as
@@ -159,7 +196,7 @@ pub(crate) fn finalize_verified(
 
     set_mtime(path, mtime)?;
     let stored_mtime = mtime_of(path)?;
-    if stored_mtime != mtime {
+    if !mtime_matches(mtime, stored_mtime) {
         let removed = dest::remove_file(path).is_ok();
         return Err(IngestError::MtimeNotPreserved {
             filename: filename.to_string(),
@@ -170,7 +207,7 @@ pub(crate) fn finalize_verified(
         });
     }
 
-    let byte_len = fs::metadata(path)
+    let byte_len = fs::metadata(crate::platform::io_path(path))
         .map_err(|err| IngestError::io(path, err))?
         .len();
     Ok(VerifiedObject {
@@ -205,6 +242,43 @@ mod tests {
     }
 
     #[test]
+    fn a_different_case_is_a_collision() {
+        let tmp = Tmp::new();
+        let src = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+        fs::write(dest_dir.join("IMG.JPG"), b"already").unwrap();
+        let source = write_file(&src, "img.jpg", b"new", fixed_mtime());
+        let err = copy_verify_file(&source, &dest_dir).unwrap_err();
+        assert!(matches!(err, IngestError::CaseCollision { .. }), "{err}");
+        assert_eq!(fs::read(dest_dir.join("IMG.JPG")).unwrap(), b"already");
+        let names: Vec<_> = fs::read_dir(&dest_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["IMG.JPG".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_named_stream_is_copied_with_the_file() {
+        let tmp = Tmp::new();
+        let src = tmp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "IMG_0001.JPG", b"jpeg", fixed_mtime());
+        let mut stream = source.as_os_str().to_os_string();
+        stream.push(":note");
+        fs::write(stream, b"kept").unwrap();
+        let dest_dir = tmp.path().join("dest");
+        copy_verify_file(&source, &dest_dir).unwrap();
+        let mut copied = dest_dir.join("IMG_0001.JPG").into_os_string();
+        copied.push(":note");
+        assert_eq!(fs::read(copied).unwrap(), b"kept");
+        assert_eq!(fs::read(dest_dir.join("IMG_0001.JPG")).unwrap(), b"jpeg");
+    }
+
+    #[test]
     fn copy_preserves_bytes_name_and_mtime() {
         let tmp = Tmp::new();
         let src_dir = tmp.path().join("src");
@@ -217,7 +291,8 @@ mod tests {
         assert_eq!(fs::read(&dest).unwrap(), bytes);
         assert_eq!(stored.filename, "IMG 0001.jpg");
         assert_eq!(stored.sha256, crate::sha256_hex(&source).unwrap());
-        assert_eq!(mtime_of(&dest).unwrap(), fixed_mtime());
+        assert_eq!(mtime_of(&source).unwrap(), mtime_of(&dest).unwrap());
+        assert!(mtime_matches(fixed_mtime(), mtime_of(&dest).unwrap()));
         assert_eq!(stored.byte_len, bytes.len() as u64);
     }
 
