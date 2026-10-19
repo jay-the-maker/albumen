@@ -47,7 +47,10 @@ pub use export::{
 pub use family_export::{export_family, plan_family_export, FamilyExportPlan, FamilyExportReport};
 pub use family_source::FamilySource;
 pub use icloud::{import_icloud, plan_icloud, IcloudPlan, IcloudReport};
-pub use local::{copy_verify_file, LocalStore};
+pub use local::{
+    copy_verify_file, copy_verify_files_pipelined, prefetch_source, store_prefetched, LocalStore,
+    PrefetchedSource, PREFETCH_MAX_BYTES,
+};
 pub use platform::platform_dirs;
 pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};

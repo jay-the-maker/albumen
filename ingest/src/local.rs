@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::checksum::{copy_hashed, sha256_file, sha256_readback, to_hex};
+use crate::checksum::{copy_hashed, sha256_file, sha256_readback, sha256_slice, to_hex};
 use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
@@ -78,6 +78,184 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     }
     let filename = file_name_str(source)?;
     check_filename(&filename)?;
+    let mtime = mtime_of(source)?;
+    store_checked(source, &filename, dest_dir, mtime, |root, output, dest| {
+        let input = root.open_read(source)?;
+        copy_hashed(input, output, source, dest)
+    })
+}
+
+/// Files at or under this size are read into memory by [`prefetch_source`].
+/// Larger files are copied as a stream by [`copy_verify_file`].
+pub const PREFETCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// A source file read once and hashed, before any destination is opened.
+///
+/// The digest is of exactly these bytes, and these bytes are what
+/// [`store_prefetched`] writes. The destination read-back still has to
+/// match the digest before the file is reported stored.
+#[derive(Debug)]
+pub struct PrefetchedSource {
+    source: PathBuf,
+    filename: String,
+    mtime: std::time::SystemTime,
+    data: Vec<u8>,
+    sha256: [u8; 32],
+}
+
+impl PrefetchedSource {
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+}
+
+/// Read and hash `source` into memory, ready for [`store_prefetched`].
+///
+/// This only reads the source, through the read-only [`SourceRoot`]. It
+/// returns `Ok(None)` when the file is larger than [`PREFETCH_MAX_BYTES`];
+/// the caller copies that file with [`copy_verify_file`].
+pub fn prefetch_source(source: &Path) -> Result<Option<PrefetchedSource>, IngestError> {
+    if !source.is_file() {
+        return Err(IngestError::NotAFile(source.to_path_buf()));
+    }
+    let filename = file_name_str(source)?;
+    check_filename(&filename)?;
+    let root = SourceRoot::open(parent_dir(source))?;
+    let mtime = mtime_of(source)?;
+    let mut input = root.open_read(source)?;
+    let len = input
+        .metadata()
+        .map_err(|err| IngestError::io(source, err))?
+        .len();
+    if len > PREFETCH_MAX_BYTES {
+        return Ok(None);
+    }
+    let mut data = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    let read_at = crate::copy_profile::tic();
+    input
+        .read_to_end(&mut data)
+        .map_err(|err| IngestError::io(source, err))?;
+    crate::copy_profile::add_source_read(read_at);
+    if data.len() as u64 > PREFETCH_MAX_BYTES {
+        return Ok(None);
+    }
+    let hash_at = crate::copy_profile::tic();
+    let sha256 = sha256_slice(&data);
+    crate::copy_profile::add_hash(hash_at);
+    Ok(Some(PrefetchedSource {
+        source: source.to_path_buf(),
+        filename,
+        mtime,
+        data,
+        sha256,
+    }))
+}
+
+/// Write a [`PrefetchedSource`] into `dest_dir` and verify it.
+///
+/// The destination checks, named streams, preserved mtime, file sync,
+/// independent read-back, and directory sync are the same as in
+/// [`copy_verify_file`]. The file is not reported stored until both syncs
+/// have returned and the read-back matched.
+pub fn store_prefetched(
+    prefetched: PrefetchedSource,
+    dest_dir: &Path,
+) -> Result<VerifiedObject, IngestError> {
+    let PrefetchedSource {
+        source,
+        filename,
+        mtime,
+        data,
+        sha256,
+    } = prefetched;
+    store_checked(&source, &filename, dest_dir, mtime, |_, output, dest| {
+        let write_at = crate::copy_profile::tic();
+        let mut writer = output;
+        writer
+            .write_all(&data)
+            .map_err(|err| IngestError::io(dest, err))?;
+        crate::copy_profile::add_write(write_at);
+        Ok(sha256)
+    })
+}
+
+/// Copy `sources` into `dest_dir` with `workers` workers.
+///
+/// Each worker has a prefetch thread that reads and hashes the next source
+/// while the worker writes, syncs, and reads back the current one. A file
+/// is reported to `on_done` only after its file sync, read-back, and
+/// directory sync. Files over [`PREFETCH_MAX_BYTES`] go through
+/// [`copy_verify_file`]. `on_done` gets the index into `sources`. It
+/// returns `false` to stop the copy early.
+pub fn copy_verify_files_pipelined<F>(
+    sources: &[PathBuf],
+    dest_dir: &Path,
+    workers: usize,
+    on_done: F,
+) where
+    F: Fn(usize, Result<VerifiedObject, IngestError>) -> bool + Sync,
+{
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::sync_channel;
+
+    let profile = crate::copy_profile::thread_enabled();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..workers.max(1) {
+            let (tx, rx) =
+                sync_channel::<(usize, Result<Option<PrefetchedSource>, IngestError>)>(1);
+            let next = &next;
+            let stop = &stop;
+            scope.spawn(move || {
+                if profile {
+                    crate::copy_profile::enable_thread();
+                }
+                while !stop.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(source) = sources.get(index) else {
+                        break;
+                    };
+                    if tx.send((index, prefetch_source(source))).is_err() {
+                        break;
+                    }
+                }
+            });
+            let on_done = &on_done;
+            scope.spawn(move || {
+                if profile {
+                    crate::copy_profile::enable_thread();
+                }
+                for (index, prefetched) in rx {
+                    let result = match prefetched {
+                        Ok(Some(prefetched)) => store_prefetched(prefetched, dest_dir),
+                        Ok(None) => copy_verify_file(&sources[index], dest_dir),
+                        Err(err) => Err(err),
+                    };
+                    if !on_done(index, result) {
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// The destination half of a copy: checks, write, streams, mtime, file
+/// sync, read-back, and directory sync. `write` puts the bytes in `output`
+/// and returns the SHA-256 of what it wrote.
+fn store_checked<W>(
+    source: &Path,
+    filename: &str,
+    dest_dir: &Path,
+    mtime: std::time::SystemTime,
+    write: W,
+) -> Result<VerifiedObject, IngestError>
+where
+    W: FnOnce(&SourceRoot, &fs::File, &Path) -> Result<[u8; 32], IngestError>,
+{
+    let filename = filename.to_string();
     let root = SourceRoot::open(parent_dir(source))?;
     root.refuse_destination(dest_dir)?;
     let dest = dest_dir.join(&filename);
@@ -97,14 +275,12 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
         });
     }
 
-    let mtime = mtime_of(source)?;
     let mut guard = RemoveOnDrop {
         path: dest.clone(),
         armed: true,
     };
-    let input = root.open_read(source)?;
     let output = dest::open_new(&dest)?;
-    let written_hash = copy_hashed(input, &output, source, &dest)?;
+    let written_hash = write(&root, &output, &dest)?;
     // Streams land before the mtime is set. The write handle stays open so
     // the fsync below covers the bytes this handle wrote and the mtime.
     copy_named_streams(source, &dest, &filename)?;
@@ -323,6 +499,58 @@ mod tests {
         copied.push(":note");
         assert_eq!(fs::read(copied).unwrap(), b"kept");
         assert_eq!(fs::read(dest_dir.join("IMG_0001.JPG")).unwrap(), b"jpeg");
+    }
+
+    #[test]
+    fn pipelined_copy_matches_copy_verify_file() {
+        let tmp = Tmp::new();
+        let src_dir = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src_dir).unwrap();
+        let mut sources = Vec::new();
+        for index in 0..5u32 {
+            let bytes: Vec<u8> = (0..200_000u32).map(|i| ((i + index) % 251) as u8).collect();
+            sources.push(write_file(
+                &src_dir,
+                &format!("IMG_{index:04}.jpg"),
+                &bytes,
+                fixed_mtime(),
+            ));
+        }
+        let done = std::sync::Mutex::new(Vec::new());
+        copy_verify_files_pipelined(&sources, &dest_dir, 2, |index, result| {
+            done.lock().unwrap().push((index, result.unwrap()));
+            true
+        });
+        let mut done = done.into_inner().unwrap();
+        done.sort_by_key(|(index, _)| *index);
+        assert_eq!(done.len(), sources.len());
+        for (index, stored) in done {
+            let source = &sources[index];
+            let dest = dest_dir.join(&stored.filename);
+            assert_eq!(fs::read(&dest).unwrap(), fs::read(source).unwrap());
+            assert_eq!(stored.sha256, crate::sha256_hex(source).unwrap());
+            assert_eq!(mtime_of(source).unwrap(), mtime_of(&dest).unwrap());
+        }
+    }
+
+    #[test]
+    fn pipelined_copy_refuses_to_overwrite() {
+        let tmp = Tmp::new();
+        let src_dir = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src_dir).unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+        let source = write_file(&src_dir, "a.jpg", b"new", fixed_mtime());
+        write_file(&dest_dir, "a.jpg", b"old", fixed_mtime());
+        let errors = std::sync::Mutex::new(0);
+        copy_verify_files_pipelined(std::slice::from_ref(&source), &dest_dir, 1, |_, result| {
+            assert!(matches!(result, Err(IngestError::AlreadyExists { .. })));
+            *errors.lock().unwrap() += 1;
+            false
+        });
+        assert_eq!(*errors.lock().unwrap(), 1);
+        assert_eq!(fs::read(dest_dir.join("a.jpg")).unwrap(), b"old");
     }
 
     #[test]

@@ -9,7 +9,9 @@
 //!
 //! Each file is hashed once, while its bytes are written, then the
 //! destination is read back and hashed again. Files run on a bounded worker
-//! pool so that hash work overlaps I/O. The pool is `available_parallelism`
+//! pool so that hash work overlaps I/O. Each worker has a prefetch thread
+//! that reads and hashes the next file while the worker writes, syncs, and
+//! reads back the current one. The pool is `available_parallelism`
 //! capped at [`MAX_IMPORT_WORKERS`]. The raw write stays sequential. It uses
 //! the same durability calls as one file of the import: `open_new`,
 //! `File::sync_all`, and `dest::sync_dir` after every file. On macOS that
@@ -29,8 +31,8 @@ use std::time::{Instant, SystemTime};
 
 use albumen_ingest::dest::{self, open_new};
 use albumen_ingest::{
-    copy_phases, copy_verify, enable_copy_profile_thread, reset_copy_profile, sha256_hex, Asset,
-    AssetFile, CopyPhases, LocalStore, Role,
+    copy_phases, copy_verify_files_pipelined, enable_copy_profile_thread, reset_copy_profile,
+    sha256_hex, CopyPhases,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -262,38 +264,33 @@ fn import_workers(files: u64) -> usize {
 }
 
 fn import_parallel(snaps: &[Snap], dest: &Path, workers: usize) -> Result<(u64, u64, u64), String> {
-    let next = AtomicU64::new(0);
     let count_out = AtomicU64::new(0);
     let mismatched = AtomicU64::new(0);
     let imported_bytes = AtomicU64::new(0);
     let error: Mutex<Option<String>> = Mutex::new(None);
-    thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                enable_copy_profile_thread();
-                loop {
-                    if error_is_set(&error) {
-                        break;
-                    }
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(snap) = snaps.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
-                        break;
-                    };
-                    match import_one(snap, dest) {
-                        Ok(ImportOne::Stored(bytes)) => {
-                            count_out.fetch_add(1, Ordering::Relaxed);
-                            imported_bytes.fetch_add(bytes, Ordering::Relaxed);
-                        }
-                        Ok(ImportOne::Mismatch) => {
-                            mismatched.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(err) => {
-                            record_error(&error, err);
-                            break;
-                        }
-                    }
+    let sources: Vec<PathBuf> = snaps.iter().map(|snap| snap.path.clone()).collect();
+    // The pipeline starts its own threads and copies this thread's profile
+    // switch onto them.
+    enable_copy_profile_thread();
+    copy_verify_files_pipelined(&sources, dest, workers, |index, result| {
+        let snap = &snaps[index];
+        match result {
+            Ok(stored) => {
+                if stored.sha256 == snap.sha256
+                    && stored.byte_len == snap.len
+                    && stored.filename == snap.name
+                {
+                    count_out.fetch_add(1, Ordering::Relaxed);
+                    imported_bytes.fetch_add(stored.byte_len, Ordering::Relaxed);
+                } else {
+                    mismatched.fetch_add(1, Ordering::Relaxed);
                 }
-            });
+                true
+            }
+            Err(err) => {
+                record_error(&error, err.to_string());
+                false
+            }
         }
     });
     if let Some(err) = error
@@ -308,35 +305,6 @@ fn import_parallel(snaps: &[Snap], dest: &Path, workers: usize) -> Result<(u64, 
         mismatched.load(Ordering::Relaxed),
         imported_bytes.load(Ordering::Relaxed),
     ))
-}
-
-enum ImportOne {
-    Stored(u64),
-    Mismatch,
-}
-
-fn import_one(snap: &Snap, dest: &Path) -> Result<ImportOne, String> {
-    let asset = Asset::from_files(vec![AssetFile {
-        path: snap.path.clone(),
-        role: Role::Primary,
-    }])
-    .map_err(|err| err.to_string())?;
-    let report = copy_verify(&asset, &LocalStore::new(dest)).map_err(|err| err.to_string())?;
-    if report.files.len() != 1 {
-        return Ok(ImportOne::Mismatch);
-    }
-    let stored = &report.files[0];
-    if stored.sha256 != snap.sha256 || stored.byte_len != snap.len || stored.filename != snap.name {
-        return Ok(ImportOne::Mismatch);
-    }
-    Ok(ImportOne::Stored(stored.byte_len))
-}
-
-fn error_is_set(error: &Mutex<Option<String>>) -> bool {
-    error
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .is_some()
 }
 
 fn record_error(error: &Mutex<Option<String>>, err: String) {
