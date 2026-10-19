@@ -17,4 +17,7 @@ albumen-ingest = { path = "../ingest" }
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+flate2 = "1"
+tar = "0.4"
 tempfile = "3"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }

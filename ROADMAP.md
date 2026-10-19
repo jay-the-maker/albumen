@@ -4,6 +4,10 @@
 
 Albumen is early. This list is the work that is not in the tree yet. The ingest crate, the fixture gate, and the charter are what exist today. Nothing here is a date.
 
+## Google Takeout
+
+Shipped as `albumen import-takeout`. Split zip and tgz parts are streamed read-only, each original is `copy_verify`'d, and Takeout JSON stays byte-for-byte beside the original. See [docs/importers/takeout.md](docs/importers/takeout.md).
+
 ## Export everything
 
 Shipped as `albumen export` and `albumen verify-manifest`. The command copy-verifies the library, sidecars, and pairs to a directory or `s3://` prefix, writes a SHA-256 manifest, and can be run again without overwriting. See the README.

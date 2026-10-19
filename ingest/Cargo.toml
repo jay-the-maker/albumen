@@ -11,11 +11,14 @@ repository.workspace = true
 [dependencies]
 aws-credential-types = "1"
 aws-sdk-s3 = "1"
+flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tar = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "net", "sync"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 tempfile = "3"
