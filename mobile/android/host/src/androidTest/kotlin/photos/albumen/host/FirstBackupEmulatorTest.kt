@@ -9,6 +9,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.FileObserver
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.ViewGroup
@@ -17,6 +18,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.lifecycle.Observer
 import androidx.test.rule.GrantPermissionRule
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
@@ -49,7 +51,8 @@ import java.util.concurrent.TimeUnit
  * clock starts at launch and must reach a verified PUT inside
  * [BackupSchedule.FIRST_BACKUP_TARGET_MINUTES]. A closed port and a wrong
  * `X-Albumen-Sha256` must show the same non-blank failure on the status
- * screen and in notification [BackupNotifier.NOTIFICATION_ID].
+ * screen and in notification [BackupNotifier.NOTIFICATION_ID]. Those checks
+ * block until the status file records the failure, then read the screen.
  */
 @RunWith(AndroidJUnit4::class)
 class FirstBackupEmulatorTest {
@@ -114,7 +117,7 @@ class FirstBackupEmulatorTest {
         }
     }
 
-    @Test(timeout = 120_000)
+    @Test(timeout = 180_000)
     fun hashMismatchIsOnTheStatusScreenAndTheNotification() {
         val context = targetContext()
         val name = "albumen-synthetic-mismatch.jpg"
@@ -135,7 +138,7 @@ class FirstBackupEmulatorTest {
         }
     }
 
-    @Test(timeout = 120_000)
+    @Test(timeout = 180_000)
     fun receiverDownIsOnTheStatusScreenAndTheNotification() {
         val context = targetContext()
         val name = "albumen-synthetic-down.jpg"
@@ -208,20 +211,83 @@ class FirstBackupEmulatorTest {
 
     private data class Surfaced(val screen: String, val notification: String)
 
+    /**
+     * Wait until [BackupStatusStore] and notification [BackupNotifier.NOTIFICATION_ID]
+     * both carry [marker]. The wait wakes when the status file is renamed and when
+     * WorkManager reports a new state. A closed port can sit in the connect timeout
+     * for each attempt, so the bound covers that run. The activity is read after
+     * the write, because resuming it earlier only shows the permission decision.
+     */
     private fun awaitFailure(context: Context, scenario: ActivityScenario<HostActivity>, marker: String): Surfaced {
-        val deadline = SystemClock.elapsedRealtime() + 60_000
-        var screen = ""
-        var notification = ""
-        while (SystemClock.elapsedRealtime() < deadline) {
-            screen = screenText(scenario)
-            notification = notificationText(context)
-            if (marker in screen && marker in notification && failureCount(screen) > 0 && failureCount(notification) > 0) {
-                return Surfaced(screen, notification)
-            }
-            SystemClock.sleep(100)
+        val deadline = SystemClock.elapsedRealtime() + FAILURE_WAIT_MS
+        awaitPublished(context, marker, deadline)
+        val screen = screenText(scenario)
+        val notification = notificationText(context)
+        if (marker in screen && marker in notification && failureCount(screen) > 0 && failureCount(notification) > 0) {
+            return Surfaced(screen, notification)
         }
-        throw AssertionError("failure was not surfaced. screen: $screen\nnotification: $notification")
+        throw AssertionError(
+            "failure was not surfaced. screen: $screen\nnotification: $notification\n" +
+                "store: ${BackupStatusStore.read(context)}\nwork: ${workState(context)}",
+        )
     }
+
+    private fun awaitPublished(context: Context, marker: String, deadline: Long) {
+        val lock = Object()
+        val watcher = object : FileObserver(context.filesDir, FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) {
+            override fun onEvent(event: Int, path: String?) {
+                synchronized(lock) { lock.notifyAll() }
+            }
+        }
+        val live = WorkManager.getInstance(context).getWorkInfosForUniqueWorkLiveData(BackupSchedule.FIRST_NAME)
+        val observer = Observer<List<WorkInfo>> {
+            synchronized(lock) { lock.notifyAll() }
+        }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync { live.observeForever(observer) }
+        watcher.startWatching()
+        try {
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val stored = BackupStatusStore.read(context)
+                val notification = notificationText(context)
+                val state = workState(context)
+                if (marker in stored && marker in notification && failureCount(stored) > 0 && failureCount(notification) > 0) {
+                    return
+                }
+                if ((state == WorkInfo.State.FAILED.name || state == WorkInfo.State.CANCELLED.name) && marker !in stored) {
+                    throw AssertionError(
+                        "first backup $state before [$marker] was stored. store: $stored notification: $notification",
+                    )
+                }
+                val slice = (deadline - SystemClock.elapsedRealtime()).coerceAtMost(SIGNAL_SLICE_MS)
+                if (slice <= 0) {
+                    break
+                }
+                try {
+                    synchronized(lock) { lock.wait(slice) }
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw AssertionError("interrupted while waiting for [$marker]")
+                }
+            }
+        } finally {
+            watcher.stopWatching()
+            instrumentation.runOnMainSync { live.removeObserver(observer) }
+        }
+        throw AssertionError(
+            "failure was not published before the bound. store: ${BackupStatusStore.read(context)} " +
+                "notification: ${notificationText(context)} work: ${workState(context)}",
+        )
+    }
+
+    private fun workState(context: Context): String =
+        WorkManager.getInstance(context)
+            .getWorkInfosForUniqueWork(BackupSchedule.FIRST_NAME)
+            .get(10, TimeUnit.SECONDS)
+            .firstOrNull()
+            ?.state
+            ?.name
+            ?: "missing"
 
     private fun assertFailureSurfaced(screen: String, notification: String, marker: String) {
         assertTrue("status screen was blank", screen.isNotBlank())
@@ -316,4 +382,12 @@ class FirstBackupEmulatorTest {
     }
 
     private fun targetContext(): Context = InstrumentationRegistry.getInstrumentation().targetContext
+
+    private companion object {
+        /** Three connect attempts at the receiver's connect timeout, plus the pass around them. */
+        const val FAILURE_WAIT_MS = 150_000L
+
+        /** Upper bound on each wait so a missed file event is checked again. The wait returns early on a signal. */
+        const val SIGNAL_SLICE_MS = 500L
+    }
 }
