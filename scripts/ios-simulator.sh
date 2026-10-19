@@ -56,26 +56,36 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
+# A newer simulator runtime than this Xcode's SDK rejects simctl privacy.
+# Stay on the selected Xcode and boot an iPhone runtime it can control.
 udid=$(python3 - <<'PY'
 import json, re, subprocess, sys
+
+def version_tuple(text):
+    return tuple(int(part) for part in re.findall(r"\d+", text))
+
+sdk = subprocess.check_output(
+    ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"],
+    text=True,
+).strip()
+sdk_version = version_tuple(sdk)
 raw = subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"])
 data = json.loads(raw)
 candidates = []
 for runtime, devices in data.get("devices", {}).items():
     if "iOS" not in runtime:
         continue
+    runtime_version = version_tuple(runtime)
+    if not runtime_version or runtime_version > sdk_version:
+        continue
     for device in devices:
         if device.get("isAvailable") and str(device.get("name", "")).startswith("iPhone"):
-            candidates.append((runtime, device["udid"], device["name"]))
+            candidates.append((runtime_version, runtime, device["udid"], device["name"]))
 if not candidates:
-    sys.exit("no iPhone simulator runtime is installed")
-
-def version(runtime):
-    return tuple(int(part) for part in re.findall(r"\d+", runtime))
-
-candidates.sort(key=lambda item: (version(item[0]), item[2]))
-runtime, udid, name = candidates[-1]
-print(f"{name} {runtime}", file=sys.stderr)
+    sys.exit(f"no iPhone simulator runtime is installed for iOS {sdk}")
+candidates.sort()
+runtime_version, runtime, udid, name = candidates[-1]
+print(f"iOS SDK {sdk}: {name} {runtime}", file=sys.stderr)
 print(udid)
 PY
 )
@@ -107,7 +117,36 @@ if [[ -z "$app" ]]; then
 fi
 xcrun simctl install "$udid" "$app"
 # The test posts a local notification from this host. Granting it avoids the alert.
-xcrun simctl privacy "$udid" grant notifications photos.albumen.ios.simulator-host
+bundle=photos.albumen.ios.simulator-host
+if ! xcrun simctl privacy "$udid" grant notifications "$bundle"; then
+  echo "simctl could not grant notifications; writing the simulator permission row" >&2
+  python3 - "$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/Library/TCC/TCC.db" "$bundle" <<'PY'
+import sqlite3, sys, time
+db_path, bundle = sys.argv[1], sys.argv[2]
+connection = sqlite3.connect(db_path)
+columns = [row[1] for row in connection.execute("PRAGMA table_info(access)")]
+if not columns:
+    sys.exit(f"no access table in {db_path}")
+values = {
+    "service": "kTCCServiceUserNotifications",
+    "client": bundle,
+    "client_type": 0,
+    "auth_value": 2,
+    "auth_reason": 2,
+    "auth_version": 1,
+    "flags": 0,
+    "last_modified": int(time.time()),
+    "indirect_object_identifier": "UNUSED",
+}
+present = [name for name in values if name in columns]
+connection.execute("DELETE FROM access WHERE service = ? AND client = ?", (values["service"], bundle))
+connection.execute(
+    f"INSERT INTO access ({', '.join(present)}) VALUES ({', '.join('?' for _ in present)})",
+    [values[name] for name in present],
+)
+connection.commit()
+PY
+fi
 
 xcodebuild test-without-building \
   -project "$root/mobile/ios/Albumen.xcodeproj" \
