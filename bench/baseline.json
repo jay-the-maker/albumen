@@ -12,5 +12,9 @@
   "search_warm_p50_ms": 24.246305999999997,
   "search_warm_p50_vs_hash": 0.21329799136649688,
   "search_warm_p95_ms": 25.300707,
-  "search_warm_p95_vs_hash": 0.2078015053097133
+  "search_warm_p95_vs_hash": 0.2078015053097133,
+  "bytes_hashed": 33554432,
+  "items_copied": 8,
+  "search_files": 256,
+  "browse_files": 256
 }

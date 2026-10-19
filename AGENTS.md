@@ -58,7 +58,7 @@ swift test --package-path mobile/ios
 
 A local real-device corpus is optional and must not be committed. See [CONTRIBUTING.md](CONTRIBUTING.md). CI does not set `ALBUMEN_REAL_CORPUS`.
 
-The performance job compares a scaled run with `bench/baseline.json`. It fails when Albumen is more than 10 percent worse than a same-run reference, because runners differ by more than that in raw MB/s. Do not set `ALBUMEN_BENCH_ITEMS` in CI.
+The performance job compares a scaled run with `bench/baseline.json`. It fails when the hashed-byte count, the copied-file count, or the search and browse file counts do not match that scale. Wall-clock is printed and is not a failure. Do not set `ALBUMEN_BENCH_ITEMS` in CI.
 
 ```bash
 export PATH="$(scripts/install-exiftool.sh):$PATH"

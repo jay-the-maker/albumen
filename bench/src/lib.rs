@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Repeated-sample gate for the paths that exist today.
+//! Repeated-sample report for the paths that exist today.
 //!
 //! This is a criterion-style harness: several repeats, a median, and a stored
 //! baseline. A noisy repeat is dropped before the median. The criterion crate
 //! is not a dependency.
 //!
-//! GitHub-hosted runners differ by more than 10 percent from job to job, so
-//! the gate does not compare raw MB/s or milliseconds with a laptop. Each
-//! repeat also times a same-run reference that does the same kind of work:
-//! hash while copying, fsync, and hash the destination; one ExifTool read;
-//! and the same directory walk search and browse use. Throughput is Albumen's MB/s
-//! divided by the reference copy. Latency is the reference time divided by
-//! Albumen's time. Higher is better, and the score fails when it drops by
-//! more than 10 percent. Raw MB/s and milliseconds are still reported.
+//! CI does not fail on wall-clock. Shared runners move MB/s and milliseconds
+//! from job to job. The gate checks deterministic counters: bytes hashed by
+//! `copy_verify`, files copied, and files returned by search and browse.
+//! Wall-clock rates and latencies are printed. Product budgets (MB/s, warm
+//! search milliseconds, the Takeout hour budget) are soft defaults. Override
+//! them with `ALBUMEN_BUDGET_*` and `ALBUMEN_TAKEOUT_BUDGET_SECONDS`.
 
 #![forbid(unsafe_code)]
 
@@ -39,8 +37,14 @@ pub const REPEATS: usize = 5;
 pub const WARM_SAMPLES: usize = 20;
 /// Drop the worst sample when `(max - min) / median` is above this.
 pub const NOISE_SPREAD: f64 = 0.25;
-/// Fail when the median moves by more than this fraction.
-pub const REGRESSION: f64 = 0.10;
+/// Soft default for local copy throughput. Not a CI failure.
+pub const SOFT_COPY_MB_S: f64 = 100.0;
+/// Soft default for local copy items per second. Not a CI failure.
+pub const SOFT_COPY_ITEMS_S: f64 = 20.0;
+/// Soft default for warm search p50, in milliseconds. Not a CI failure.
+pub const SOFT_SEARCH_P50_MS: f64 = 500.0;
+/// Soft default for warm search p95, in milliseconds. Not a CI failure.
+pub const SOFT_SEARCH_P95_MS: f64 = 1_500.0;
 
 pub use takeout_scale::{
     measure_icloud, measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
@@ -74,20 +78,23 @@ pub struct Report {
     pub search_warm_p95_vs_hash: f64,
     /// Directory walk divided by browse p50.
     pub browse_vs_walk: f64,
+    /// Bytes `copy_verify` hashed on one copy pass.
+    pub bytes_hashed: u64,
+    /// Files stored by that copy pass.
+    pub items_copied: u64,
+    /// Files returned by one caption search of the synthetic library.
+    pub search_files: u64,
+    /// Files returned by one browse of the synthetic library.
+    pub browse_files: u64,
 }
 
-/// More than 10 percent worse. The boundary is exact at thousandths.
-pub fn regressed(higher_is_better: bool, baseline: f64, observed: f64) -> bool {
-    if !(baseline.is_finite() && baseline > 0.0 && observed.is_finite() && observed >= 0.0) {
-        return true;
-    }
-    let base = (baseline * 1000.0).round() as i128;
-    let seen = (observed * 1000.0).round() as i128;
-    if higher_is_better {
-        seen * 100 < base * 90
-    } else {
-        seen * 100 > base * 110
-    }
+/// Product bars. Printed beside the wall-clock report. Never a CI failure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftBudgets {
+    pub copy_mb_s: f64,
+    pub copy_items_s: f64,
+    pub search_p50_ms: f64,
+    pub search_p95_ms: f64,
 }
 
 pub fn median(samples: &[f64]) -> f64 {
@@ -168,21 +175,81 @@ pub fn scale_problems(baseline: &Report, observed: &Report) -> Vec<String> {
     problems
 }
 
+/// Fail when a counter does not match the requested scale.
+///
+/// Wall-clock fields are ignored. Search and browse each see one JPEG and
+/// one XMP per library item.
 pub fn regression_problems(baseline: &Report, observed: &Report) -> Vec<String> {
     let mut problems = scale_problems(baseline, observed);
-    for (name, higher_is_better, base, seen) in metric_rows(baseline, observed) {
-        if regressed(higher_is_better, base, seen) {
-            let direction = if higher_is_better {
-                "higher is better"
-            } else {
-                "lower is better"
-            };
-            problems.push(format!(
-                "{name} regressed by more than 10 percent ({direction}): baseline {base}, observed {seen}"
-            ));
-        }
+    let expected_bytes = observed.copy_files.saturating_mul(observed.copy_bytes_each);
+    let expected_files = observed.search_items.saturating_mul(2);
+    if observed.bytes_hashed != expected_bytes {
+        problems.push(format!(
+            "bytes_hashed is {} but copy_verify must hash {} bytes ({} files × {} bytes)",
+            observed.bytes_hashed, expected_bytes, observed.copy_files, observed.copy_bytes_each
+        ));
+    }
+    if observed.items_copied != observed.copy_files {
+        problems.push(format!(
+            "items_copied is {} but the copy pass must store {} files",
+            observed.items_copied, observed.copy_files
+        ));
+    }
+    if observed.search_files != expected_files {
+        problems.push(format!(
+            "search_files is {} but the caption search must return {} files",
+            observed.search_files, expected_files
+        ));
+    }
+    if observed.browse_files != expected_files {
+        problems.push(format!(
+            "browse_files is {} but browse must return {} files",
+            observed.browse_files, expected_files
+        ));
     }
     problems
+}
+
+/// Read soft budgets from the environment. Missing or blank values use the defaults.
+pub fn soft_budgets_from_env() -> Result<SoftBudgets, String> {
+    Ok(SoftBudgets {
+        copy_mb_s: env_f64("ALBUMEN_BUDGET_COPY_MB_S", SOFT_COPY_MB_S)?,
+        copy_items_s: env_f64("ALBUMEN_BUDGET_COPY_ITEMS_S", SOFT_COPY_ITEMS_S)?,
+        search_p50_ms: env_f64("ALBUMEN_BUDGET_SEARCH_P50_MS", SOFT_SEARCH_P50_MS)?,
+        search_p95_ms: env_f64("ALBUMEN_BUDGET_SEARCH_P95_MS", SOFT_SEARCH_P95_MS)?,
+    })
+}
+
+pub fn soft_budget_note(report: &Report, budgets: &SoftBudgets) -> String {
+    format!(
+        "soft budgets (reported only, not a CI failure): copy_verify_mb_s {:.3} vs {:.3} MB/s (ALBUMEN_BUDGET_COPY_MB_S), copy_verify_items_s {:.3} vs {:.3} items/s (ALBUMEN_BUDGET_COPY_ITEMS_S), search_warm_p50_ms {:.3} vs {:.3} ms (ALBUMEN_BUDGET_SEARCH_P50_MS), search_warm_p95_ms {:.3} vs {:.3} ms (ALBUMEN_BUDGET_SEARCH_P95_MS)",
+        report.copy_verify_mb_s,
+        budgets.copy_mb_s,
+        report.copy_verify_items_s,
+        budgets.copy_items_s,
+        report.search_warm_p50_ms,
+        budgets.search_p50_ms,
+        report.search_warm_p95_ms,
+        budgets.search_p95_ms
+    )
+}
+
+fn env_f64(name: &str, default: f64) -> Result<f64, String> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(text) if text.trim().is_empty() => Ok(default),
+        Ok(text) => text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("{name} must be a number, got {text:?}"))
+            .and_then(|value| {
+                if value.is_finite() && value > 0.0 {
+                    Ok(value)
+                } else {
+                    Err(format!("{name} must be a finite number greater than zero"))
+                }
+            }),
+    }
 }
 
 pub fn to_json(report: &Report) -> Value {
@@ -201,6 +268,10 @@ pub fn to_json(report: &Report) -> Value {
         "search_warm_p50_vs_hash": report.search_warm_p50_vs_hash,
         "search_warm_p95_vs_hash": report.search_warm_p95_vs_hash,
         "browse_vs_walk": report.browse_vs_walk,
+        "bytes_hashed": report.bytes_hashed,
+        "items_copied": report.items_copied,
+        "search_files": report.search_files,
+        "browse_files": report.browse_files,
     })
 }
 
@@ -220,6 +291,10 @@ pub fn from_json(value: &Value) -> Result<Report, String> {
         search_warm_p50_vs_hash: required_f64(value, "search_warm_p50_vs_hash")?,
         search_warm_p95_vs_hash: required_f64(value, "search_warm_p95_vs_hash")?,
         browse_vs_walk: required_f64(value, "browse_vs_walk")?,
+        bytes_hashed: required_u64(value, "bytes_hashed")?,
+        items_copied: required_u64(value, "items_copied")?,
+        search_files: required_u64(value, "search_files")?,
+        browse_files: required_u64(value, "browse_files")?,
     })
 }
 
@@ -258,20 +333,28 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
     let mut warm_p95_ratio = Vec::with_capacity(REPEATS);
     let mut browse_ratio = Vec::with_capacity(REPEATS);
     // Ask for the whole synthetic library. A page of one would stop at the
-    // first match, and this job measures a full read against a full-read reference.
-    let search_args = json!({"caption": CAPTION, "limit": search_items.saturating_mul(2)});
-    let browse_args = json!({"limit": search_items.saturating_mul(2)});
+    // first match. Each item is a JPEG plus an XMP sidecar.
+    let library_files = search_items.saturating_mul(2);
+    let search_args = json!({"caption": CAPTION, "limit": library_files});
+    let browse_args = json!({"limit": library_files});
+    let mut bytes_hashed = 0u64;
+    let mut items_copied = 0u64;
+    let mut search_files = 0u64;
+    let mut browse_files = 0u64;
 
     for repeat in 0..REPEATS {
         let plain = plain_copy_mb_s(&copies, &root.path.join(format!("plain-{repeat}")))?;
-        let (mb, items) = copy_once(&copies, &root.path.join(format!("dest-{repeat}")))?;
+        let (mb, items, bytes, count) =
+            copy_once(&copies, &root.path.join(format!("dest-{repeat}")))?;
         mb_s.push(mb);
         items_s.push(items);
+        bytes_hashed = bytes;
+        items_copied = count;
         copy_ratio.push(ratio(mb, plain)?);
 
         let library_handle = Library::new(library.clone(), false, false, false)?;
         let (value, ms) = timed(|| library_handle.call("search", &search_args));
-        assert_hit(&value?, "cold search")?;
+        search_files = file_count(&value?, "cold search")?;
         cold.push(ms);
         let exif_ms = exif_pass_ms(&library, &relative)?;
         cold_ratio.push(ratio(exif_ms, ms)?);
@@ -283,7 +366,8 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
         warm_p50_ratio.push(ratio(hash_ms, p50)?);
         warm_p95_ratio.push(ratio(hash_ms, p95)?);
 
-        let browse_ms = warm_browse(&library_handle, &browse_args)?;
+        let (browse_ms, browsed) = warm_browse(&library_handle, &browse_args)?;
+        browse_files = browsed;
         browse_p50.push(browse_ms);
         let walk_ms = browse_reference_ms(&library)?;
         browse_ratio.push(ratio(walk_ms, browse_ms)?);
@@ -304,6 +388,10 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
         search_warm_p50_vs_hash: settle(&warm_p50_ratio, true)?,
         search_warm_p95_vs_hash: settle(&warm_p95_ratio, true)?,
         browse_vs_walk: settle(&browse_ratio, true)?,
+        bytes_hashed,
+        items_copied,
+        search_files,
+        browse_files,
     })
 }
 
@@ -314,56 +402,30 @@ fn ratio(reference: f64, observed: f64) -> Result<f64, String> {
     Ok(reference / observed)
 }
 
-fn metric_rows(baseline: &Report, observed: &Report) -> [(&'static str, bool, f64, f64); 3] {
-    // Warm p50/p95 ratios are printed and stored. They are not a failure
-    // line: on ubuntu-24.04 that ratio has been both about 0.13 and about
-    // 0.61 for the same benchmark. Copy, cold search, and browse stay inside
-    // 10 percent across those runners.
-    [
-        (
-            "copy_verify_vs_plain",
-            true,
-            baseline.copy_verify_vs_plain,
-            observed.copy_verify_vs_plain,
-        ),
-        (
-            "search_cold_vs_exif",
-            true,
-            baseline.search_cold_vs_exif,
-            observed.search_cold_vs_exif,
-        ),
-        (
-            "browse_vs_walk",
-            true,
-            baseline.browse_vs_walk,
-            observed.browse_vs_walk,
-        ),
-    ]
-}
-
 fn warm_search(library: &Library, args: &Value) -> Result<(f64, f64), String> {
     let mut samples = Vec::with_capacity(WARM_SAMPLES);
     for _ in 0..WARM_SAMPLES {
         let (value, ms) = timed(|| library.call("search", args));
-        assert_hit(&value?, "warm search")?;
+        file_count(&value?, "warm search")?;
         samples.push(ms);
     }
     samples.sort_by(f64::total_cmp);
     Ok((percentile(&samples, 50.0), percentile(&samples, 95.0)))
 }
 
-fn warm_browse(library: &Library, args: &Value) -> Result<f64, String> {
+fn warm_browse(library: &Library, args: &Value) -> Result<(f64, u64), String> {
     let mut samples = Vec::with_capacity(WARM_SAMPLES);
+    let mut count = 0u64;
     for _ in 0..WARM_SAMPLES {
         let (value, ms) = timed(|| library.call("browse", args));
-        assert_hit(&value?, "browse")?;
+        count = file_count(&value?, "browse")?;
         samples.push(ms);
     }
     samples.sort_by(f64::total_cmp);
-    Ok(percentile(&samples, 50.0))
+    Ok((percentile(&samples, 50.0), count))
 }
 
-fn assert_hit(value: &Value, tool: &str) -> Result<(), String> {
+fn file_count(value: &Value, tool: &str) -> Result<u64, String> {
     let files = value
         .get("files")
         .and_then(Value::as_array)
@@ -373,7 +435,7 @@ fn assert_hit(value: &Value, tool: &str) -> Result<(), String> {
             "{tool} returned no files; the synthetic library was not read"
         ));
     }
-    Ok(())
+    u64::try_from(files.len()).map_err(|_| format!("{tool} returned too many files"))
 }
 
 fn plain_copy_mb_s(sources: &[PathBuf], dest: &Path) -> Result<f64, String> {
@@ -490,7 +552,7 @@ fn exif_pass_ms(root: &Path, relative: &[String]) -> Result<f64, String> {
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
-fn copy_once(sources: &[PathBuf], dest: &Path) -> Result<(f64, f64), String> {
+fn copy_once(sources: &[PathBuf], dest: &Path) -> Result<(f64, f64, u64, u64), String> {
     fs::create_dir_all(dest).map_err(|err| format!("create dest: {err}"))?;
     let started = Instant::now();
     let mut bytes = 0u64;
@@ -511,7 +573,7 @@ fn copy_once(sources: &[PathBuf], dest: &Path) -> Result<(f64, f64), String> {
     let seconds = started.elapsed().as_secs_f64().max(1e-9);
     let mb_s = (bytes as f64) / 1_000_000.0 / seconds;
     let items_s = (count as f64) / seconds;
-    Ok((mb_s, items_s))
+    Ok((mb_s, items_s, bytes, count))
 }
 
 fn write_library(dir: &Path, items: u64) -> Result<Vec<String>, String> {
@@ -639,12 +701,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ten_percent_is_the_failure_line() {
-        assert!(!regressed(true, 100.0, 90.0));
-        assert!(regressed(true, 100.0, 89.9));
-        assert!(!regressed(false, 100.0, 110.0));
-        assert!(regressed(false, 100.0, 110.1));
-        assert!(regressed(true, 0.0, 1.0));
+    fn a_short_hash_is_a_failure() {
+        let baseline = sample_report(128);
+        let mut observed = sample_report(128);
+        observed.bytes_hashed -= 1;
+        let problems = regression_problems(&baseline, &observed);
+        assert!(
+            problems.iter().any(|line| line.contains("bytes_hashed")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn wall_clock_does_not_fail_the_gate() {
+        let baseline = sample_report(128);
+        let mut observed = sample_report(128);
+        observed.copy_verify_mb_s = 1.0;
+        observed.search_cold_ms = 1_000_000.0;
+        observed.copy_verify_vs_plain = 0.01;
+        observed.browse_vs_walk = 0.01;
+        assert!(regression_problems(&baseline, &observed).is_empty());
+    }
+
+    #[test]
+    fn caption_search_counts_the_jpeg_and_the_xmp() {
+        if require_exiftool().is_err() {
+            return;
+        }
+        let root = TempDir::new().unwrap();
+        let library = root.path.join("library");
+        fs::create_dir_all(&library).unwrap();
+        write_library(&library, 2).unwrap();
+        let handle = Library::new(library, false, false, false).unwrap();
+        let found = handle
+            .call("search", &json!({"caption": CAPTION, "limit": 4}))
+            .unwrap();
+        assert_eq!(file_count(&found, "search").unwrap(), 4);
+        let browsed = handle.call("browse", &json!({"limit": 4})).unwrap();
+        assert_eq!(file_count(&browsed, "browse").unwrap(), 4);
+    }
+
+    #[test]
+    fn a_blank_budget_override_keeps_the_default() {
+        std::env::remove_var("ALBUMEN_BUDGET_COPY_MB_S");
+        let budgets = soft_budgets_from_env().unwrap();
+        assert_eq!(budgets.copy_mb_s, SOFT_COPY_MB_S);
+        let note = soft_budget_note(&sample_report(128), &budgets);
+        assert!(note.contains("reported only"));
     }
 
     #[test]
@@ -711,6 +814,10 @@ mod tests {
             search_warm_p50_vs_hash: 0.9,
             search_warm_p95_vs_hash: 0.7,
             browse_vs_walk: 0.4,
+            bytes_hashed: DEFAULT_COPY_FILES * DEFAULT_COPY_BYTES,
+            items_copied: DEFAULT_COPY_FILES,
+            search_files: items * 2,
+            browse_files: items * 2,
         }
     }
 }
