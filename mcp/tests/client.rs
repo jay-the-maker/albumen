@@ -153,7 +153,8 @@ fn read_only_server_has_no_write_or_delete_tool() {
         vec![
             "browse".to_string(),
             "ledger".to_string(),
-            "search".to_string()
+            "search".to_string(),
+            "thumbnail".to_string()
         ]
     );
     for tool in client.request(3, "tools/list", json!({}))["tools"]
@@ -248,6 +249,7 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
             "export".to_string(),
             "ledger".to_string(),
             "search".to_string(),
+            "thumbnail".to_string(),
             "upload".to_string()
         ]
     );
@@ -393,7 +395,8 @@ fn enabled_export_to_s3_verifies_and_leaves_the_library() {
             "browse".to_string(),
             "export".to_string(),
             "ledger".to_string(),
-            "search".to_string()
+            "search".to_string(),
+            "thumbnail".to_string()
         ]
     );
     let (is_error, body) = tool_body(&client.request(

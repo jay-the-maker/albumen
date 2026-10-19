@@ -123,7 +123,7 @@ impl SourceRoot {
     /// Refuse `dest` when it resolves to this root or inside it. Unlike
     /// [`Self::refuse_destination`] this does not look for hard links, so it
     /// fits a directory this process creates for its own files.
-    pub(crate) fn refuse_inside(&self, dest: &Path) -> Result<(), IngestError> {
+    pub fn refuse_inside(&self, dest: &Path) -> Result<(), IngestError> {
         let resolved = resolve_dest(dest)?;
         if path_is_inside(&self.canonical, &resolved) {
             return Err(IngestError::DestinationInsideSource {

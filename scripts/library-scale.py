@@ -18,6 +18,13 @@ Measured through the real stdio MCP server (`albumen-mcp --library`):
   answered, which is the moment the first query can be sent. The first
   search's own latency is reported beside it.
 - search: at least 200 fixed `search` calls, nearest-rank p50 and p95.
+- first thumbnail: a fresh `albumen-mcp` with the saved index and an empty
+  thumbnail cache (outside the library) asks for the `thumbnail` of one
+  sample item. Reported from the request to the decoded thumbnail bytes, and
+  from process spawn to those bytes. Then the other samples are asked for
+  cold (p50/p95), then all again from the cache. Target 300 ms. The samples
+  are copies of the CC0 fixture JPEG fixtures/jpeg-gps/IMG_0001.jpg (640x480)
+  placed at fixed item positions; every other item is the 4-byte stub.
 - peak memory: peak RSS (Linux, macOS) or peak working set (Windows) of the
   albumen-mcp process.
 
@@ -39,6 +46,9 @@ import time
 COLD_START_TARGET_MS = 1500.0
 FIRST_ANSWER_TARGET_MS = 1500.0
 SEARCH_P95_TARGET_MS = 200.0
+FIRST_THUMBNAIL_TARGET_MS = 300.0
+THUMBNAIL_SAMPLES = 32
+DEFAULT_SAMPLE_JPEG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures", "jpeg-gps", "IMG_0001.jpg")
 JPEG = b"\xff\xd8\xff\xd9"
 PREFIXES = ("IMG_", "DSC_", "PXL_", "DJI_")
 
@@ -52,7 +62,14 @@ def item_path(index, items):
     return f"{year:04d}/{month:02d}/{prefix}{index:07d}.jpg"
 
 
-def generate(root, items):
+def sample_indexes(items):
+    """Fixed, spread-out item positions that hold a real JPEG."""
+    count = min(THUMBNAIL_SAMPLES, items)
+    return sorted({(k * 2654435761 + 7) % items for k in range(count)})
+
+
+def generate(root, items, sample_bytes):
+    samples = set(sample_indexes(items))
     os.makedirs(root, exist_ok=True)
     if os.listdir(root):
         raise SystemExit(f"refusing to generate into a non-empty directory: {root}")
@@ -65,7 +82,7 @@ def generate(root, items):
             os.makedirs(os.path.join(root, parent), exist_ok=True)
             made.add(parent)
         with open(os.path.join(root, relative), "wb") as handle:
-            handle.write(JPEG)
+            handle.write(sample_bytes if index in samples else JPEG)
         digest.update(relative.encode() + b"\n")
     return digest.hexdigest()
 
@@ -97,10 +114,10 @@ def fixed_queries(items, count, seed):
 
 
 class Server:
-    def __init__(self, binary, library, index_dir):
+    def __init__(self, binary, library, index_dir, thumbnail_dir):
         self.started = time.perf_counter()
         self.proc = subprocess.Popen(
-            [binary, "--library", library, "--index-dir", index_dir],
+            [binary, "--library", library, "--index-dir", index_dir, "--thumbnail-dir", thumbnail_dir],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=sys.stderr,
@@ -145,6 +162,21 @@ class Server:
         if result.get("isError"):
             raise SystemExit(f"search {arguments} failed: {result['content'][0]['text']}")
         return json.loads(result["content"][0]["text"])
+
+    def thumbnail(self, path):
+        """Ask for a thumbnail and return (decoded bytes, result)."""
+        import base64
+
+        result = self.send("tools/call", {"name": "thumbnail", "arguments": {"path": path}})
+        if result.get("isError"):
+            raise SystemExit(f"thumbnail {path} failed: {result['content'][0]['text']}")
+        value = json.loads(result["content"][0]["text"])
+        data = base64.b64decode(value["data_base64"])
+        if not (data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9")) or len(data) != value["bytes"]:
+            raise SystemExit(f"thumbnail {path} is not a JPEG")
+        if max(value["width"], value["height"]) > 256:
+            raise SystemExit(f"thumbnail {path} is {value['width']}x{value['height']}")
+        return data, value
 
     def peak_bytes(self):
         """Peak RSS / working set while the process is alive, or None."""
@@ -209,6 +241,8 @@ def main():
     parser.add_argument("--reuse", action="store_true", help="time an existing generated library")
     parser.add_argument("--json", help="write the report here")
     parser.add_argument("--index-dir", help="where albumen-mcp saves its index (default: a sibling of --library)")
+    parser.add_argument("--thumbnail-dir", help="where albumen-mcp caches thumbnails (default: a sibling of --library); must start empty")
+    parser.add_argument("--sample-jpeg", default=DEFAULT_SAMPLE_JPEG, help="real JPEG copied to the thumbnail sample positions")
     args = parser.parse_args()
     if args.queries < 200 and args.items >= 380000:
         raise SystemExit("the 380,000-item run uses at least 200 queries")
@@ -218,7 +252,9 @@ def main():
     paths_sha256 = None
     if not args.reuse:
         began = time.perf_counter()
-        paths_sha256 = generate(library, args.items)
+        with open(args.sample_jpeg, "rb") as handle:
+            sample_bytes = handle.read()
+        paths_sha256 = generate(library, args.items, sample_bytes)
         generate_s = time.perf_counter() - began
     on_disk = count_files(library)
     if on_disk != args.items:
@@ -245,7 +281,16 @@ def main():
     if library_files_after_build != args.items:
         raise SystemExit(f"index build changed the library file count to {library_files_after_build}")
 
-    server = Server(args.binary, library, index_dir)
+    thumbnail_dir = os.path.abspath(args.thumbnail_dir or library.rstrip("/\\") + ".albumen-thumbnails")
+    if os.path.commonpath([thumbnail_dir, library]) == library:
+        raise SystemExit("--thumbnail-dir must be outside --library")
+    os.makedirs(thumbnail_dir, exist_ok=True)
+    if os.listdir(thumbnail_dir):
+        raise SystemExit(f"thumbnail directory is not empty: {thumbnail_dir}")
+    search_thumbnail_dir = thumbnail_dir + "-search"
+    os.makedirs(search_thumbnail_dir, exist_ok=True)
+
+    server = Server(args.binary, library, index_dir, search_thumbnail_dir)
     server.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "library-scale", "version": "1"}})
     tools = server.send("tools/list", {})
     ready_ms = (time.perf_counter() - server.started) * 1000.0
@@ -280,6 +325,38 @@ def main():
     if peak is None:
         peak = after_exit
     latencies.sort()
+
+    # First thumbnail: a fresh process, the saved index, an empty cache.
+    samples = [item_path(index, args.items) for index in sample_indexes(args.items)]
+    thumbs = Server(args.binary, library, index_dir, thumbnail_dir)
+    thumbs.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "library-scale", "version": "1"}})
+    thumbs.send("tools/list", {})
+    began = time.perf_counter()
+    first_thumb, first_value = thumbs.thumbnail(samples[0])
+    first_thumbnail_ms = (time.perf_counter() - began) * 1000.0
+    spawn_to_thumbnail_ms = (time.perf_counter() - thumbs.started) * 1000.0
+    if first_value.get("cached"):
+        raise SystemExit("the first thumbnail came from a cache that should be empty")
+    cold = []
+    for path in samples[1:]:
+        began = time.perf_counter()
+        _, value = thumbs.thumbnail(path)
+        cold.append((time.perf_counter() - began) * 1000.0)
+        if value.get("cached"):
+            raise SystemExit(f"cold thumbnail {path} came from the cache")
+    warm = []
+    for path in samples:
+        began = time.perf_counter()
+        _, value = thumbs.thumbnail(path)
+        warm.append((time.perf_counter() - began) * 1000.0)
+        if not value.get("cached"):
+            raise SystemExit(f"repeat thumbnail {path} was not cached")
+    thumbs.close()
+    cold.sort()
+    warm.sort()
+    print(f"library-scale {args.leg}: first thumbnail {first_thumbnail_ms:.1f} ms after request, {spawn_to_thumbnail_ms:.1f} ms after spawn; cold p95 {nearest_rank(cold, 95) if cold else 0:.1f} ms, cached p95 {nearest_rank(warm, 95):.1f} ms", file=sys.stderr, flush=True)
+    if count_files(library) != args.items:
+        raise SystemExit("thumbnails changed the library file count")
     report = {
         "leg": args.leg,
         "items": args.items,
@@ -297,6 +374,18 @@ def main():
         "search_max_ms": round(latencies[-1], 1),
         "peak_memory_mib": round(peak / 1048576.0, 1) if peak else None,
         "hits_returned": hits,
+        "thumbnail_samples": len(samples),
+        "first_thumbnail_ms": round(first_thumbnail_ms, 1),
+        "spawn_to_first_thumbnail_ms": round(spawn_to_thumbnail_ms, 1),
+        "first_thumbnail_bytes": len(first_thumb),
+        "first_thumbnail_size": f"{first_value['width']}x{first_value['height']}",
+        "thumbnail_cold_p50_ms": round(nearest_rank(cold, 50), 1) if cold else None,
+        "thumbnail_cold_p95_ms": round(nearest_rank(cold, 95), 1) if cold else None,
+        "thumbnail_cached_p50_ms": round(nearest_rank(warm, 50), 1),
+        "thumbnail_cached_p95_ms": round(nearest_rank(warm, 95), 1),
+        "first_thumbnail_target_ms": FIRST_THUMBNAIL_TARGET_MS,
+        "first_thumbnail_met": first_thumbnail_ms <= FIRST_THUMBNAIL_TARGET_MS,
+        "spawn_to_first_thumbnail_met": spawn_to_thumbnail_ms <= FIRST_THUMBNAIL_TARGET_MS,
         "cold_start_target_ms": COLD_START_TARGET_MS,
         "search_p95_target_ms": SEARCH_P95_TARGET_MS,
         "first_answer_target_ms": FIRST_ANSWER_TARGET_MS,
@@ -324,6 +413,10 @@ def main():
             handle.write(f"| Time to first answer (spawn to first search result, saved index) | {report['spawn_to_first_answer_ms']} ms | ≤ 1500 ms | {mark(report['first_answer_met'])} |\n")
             handle.write(f"| First index build (one time, reported separately) | {report['first_index_build_ms']} ms | | |\n")
             handle.write(f"| Peak memory | {report['peak_memory_mib']} MiB | | |\n")
+            handle.write(f"| First thumbnail (request to bytes, empty cache) | {report['first_thumbnail_ms']} ms | ≤ 300 ms | {mark(report['first_thumbnail_met'])} |\n")
+            handle.write(f"| First thumbnail (spawn to bytes, empty cache) | {report['spawn_to_first_thumbnail_ms']} ms | ≤ 300 ms | {mark(report['spawn_to_first_thumbnail_met'])} |\n")
+            handle.write(f"| Thumbnail p95, {len(samples) - 1} more cold | {report['thumbnail_cold_p95_ms']} ms | | |\n")
+            handle.write(f"| Thumbnail p95, cached | {report['thumbnail_cached_p95_ms']} ms | | |\n")
             handle.write(f"| Generate library (not timed against a target) | {report['generate_seconds']} s | | |\n\n")
             handle.write("Report only. A miss is a measurement, not a failed build.\n\n")
 
