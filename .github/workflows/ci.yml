@@ -299,6 +299,26 @@ jobs:
           fi
           command -v vmtouch || echo "vmtouch unavailable; residency will be none"
 
+      # windows-2025 runners come with more than one disk model, and their
+      # raw rates differ by almost 2x. The bench reports this model next to
+      # its raw-rate band so a ratio is read against its own disk class.
+      - name: Record the disk model under the work directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-PhysicalDisk | Format-Table DeviceId, FriendlyName, MediaType, BusType, Size -AutoSize | Out-String | Write-Host
+          $model = "unknown"
+          try {
+            $letter = (Get-Item $env:GITHUB_WORKSPACE).PSDrive.Name
+            $number = (Get-Partition -DriveLetter $letter | Get-Disk).Number
+            $disk = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq "$number" } | Select-Object -First 1
+            if ($disk) { $model = "$($disk.FriendlyName) $($disk.MediaType) $($disk.BusType)".Trim() }
+          } catch {
+            Write-Host "disk model lookup failed: $_"
+          }
+          Write-Host "disk model under ${env:GITHUB_WORKSPACE}: $model"
+          "ALBUMEN_DISK_MODEL=$model" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Import 1000 synthetic files and compare with a raw write
         env:
           ALBUMEN_THROUGHPUT_LEG: ${{ matrix.label }}

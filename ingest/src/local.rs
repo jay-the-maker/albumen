@@ -225,9 +225,16 @@ pub fn store_prefetched(
 /// Read-back threads used by [`copy_verify_files_pipelined`] for `lanes`
 /// writer lanes: between 2 and 4.
 pub fn pipelined_verifiers(lanes: usize) -> usize {
+    if cfg!(windows) {
+        // Windows runs each file through `copy_verify_file` on its worker.
+        return 0;
+    }
     lanes.clamp(2, 4)
 }
 
+/// On Windows this runs [`copy_verify_file`] on `lanes` workers instead;
+/// see `copy_verify_files_pooled`.
+///
 /// Copy `sources` into `dest_dir` with `lanes` writer lanes and
 /// [`pipelined_verifiers`] read-back threads.
 ///
@@ -258,6 +265,10 @@ pub fn copy_verify_files_pipelined<F>(
     type Hashed = (usize, Result<Option<PrefetchedSource>, IngestError>);
 
     let lanes = lanes.max(1);
+    if cfg!(windows) {
+        copy_verify_files_pooled(sources, dest_dir, lanes, on_done);
+        return;
+    }
     let verifiers = pipelined_verifiers(lanes);
     let profile = crate::copy_profile::thread_enabled();
     let next = AtomicUsize::new(0);
@@ -361,6 +372,43 @@ pub fn copy_verify_files_pipelined<F>(
                         Synced::Pending(pending) => pending.verify().map(Verified::keep),
                     };
                     if !on_done(index, result) {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// The Windows import path: `workers` threads, each taking the next source
+/// and running [`copy_verify_file`] on it. Each file gets its own write,
+/// file sync, read-back, and directory sync, as on every other path. On
+/// slower Windows runner disks this measured faster than the read, hash,
+/// write, and read-back pipeline, which keeps more I/O in flight at once.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn copy_verify_files_pooled<F>(sources: &[PathBuf], dest_dir: &Path, workers: usize, on_done: F)
+where
+    F: Fn(usize, Result<VerifiedObject, IngestError>) -> bool + Sync,
+{
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let profile = crate::copy_profile::thread_enabled();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..workers.max(1) {
+            scope.spawn(|| {
+                if profile {
+                    crate::copy_profile::enable_thread();
+                }
+                while !stop.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(source) = sources.get(index) else {
+                        break;
+                    };
+                    // A file that was stored is always reported, even after
+                    // a stop, so nothing stays in the destination unreported.
+                    if !on_done(index, copy_verify_file(source, dest_dir)) {
                         stop.store(true, Ordering::Relaxed);
                     }
                 }
@@ -776,6 +824,54 @@ mod tests {
             .collect();
         kept.sort();
         assert!(!reported.is_empty());
+        assert_eq!(kept, reported);
+    }
+
+    #[test]
+    fn pooled_copy_matches_copy_verify_file_and_reports_every_kept_file() {
+        let tmp = Tmp::new();
+        let src_dir = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src_dir).unwrap();
+        let sources: Vec<PathBuf> = (0..12u32)
+            .map(|index| {
+                write_file(
+                    &src_dir,
+                    &format!("IMG_{index:04}.jpg"),
+                    &[index as u8; 8192],
+                    fixed_mtime(),
+                )
+            })
+            .collect();
+        let done = std::sync::Mutex::new(Vec::new());
+        copy_verify_files_pooled(&sources, &dest_dir, 3, |index, result| {
+            done.lock().unwrap().push((index, result.unwrap()));
+            true
+        });
+        let done = done.into_inner().unwrap();
+        assert_eq!(done.len(), sources.len());
+        for (index, stored) in &done {
+            let source = &sources[*index];
+            let dest = dest_dir.join(&stored.filename);
+            assert_eq!(fs::read(&dest).unwrap(), fs::read(source).unwrap());
+            assert_eq!(stored.sha256, crate::sha256_hex(source).unwrap());
+            assert_eq!(mtime_of(source).unwrap(), mtime_of(&dest).unwrap());
+        }
+
+        let stopped = tmp.path().join("stopped");
+        let reported = std::sync::Mutex::new(Vec::new());
+        copy_verify_files_pooled(&sources, &stopped, 3, |_, result| {
+            let mut reported = reported.lock().unwrap();
+            reported.push(result.unwrap().filename);
+            reported.len() < 2
+        });
+        let mut reported = reported.into_inner().unwrap();
+        reported.sort();
+        let mut kept: Vec<String> = fs::read_dir(&stopped)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        kept.sort();
         assert_eq!(kept, reported);
     }
 

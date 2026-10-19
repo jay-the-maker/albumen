@@ -72,6 +72,10 @@ const JPEG_EOI: &[u8] = &[0xFF, 0xD9];
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThroughputReport {
     pub leg: String,
+    /// Model of the disk under the work directory, from
+    /// `ALBUMEN_DISK_MODEL`. CI sets it on Windows from `Get-PhysicalDisk`.
+    /// `unknown` when it is not set.
+    pub disk_model: String,
     pub files: u64,
     pub bytes_each: u64,
     pub bytes: u64,
@@ -174,9 +178,19 @@ impl ThroughputReport {
         (good as f64) * 100.0 / (self.files as f64)
     }
 
+    /// The 50 MB/s band that [`Self::raw_mb_s`] falls in, such as
+    /// `"250-300"`. Runners of one label can have disks of different
+    /// speeds, so a ratio is compared only with ratios from the same band
+    /// and [`Self::disk_model`].
+    pub fn raw_band(&self) -> String {
+        raw_band(self.raw_mb_s)
+    }
+
     pub fn to_json(&self) -> Value {
         let mut value = json!({
             "leg": self.leg,
+            "disk_model": self.disk_model,
+            "raw_band_mb_s": self.raw_band(),
             "files": self.files,
             "bytes_each": self.bytes_each,
             "bytes": self.bytes,
@@ -251,6 +265,26 @@ pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
         ));
     }
     problems
+}
+
+/// Width of a raw-rate band, in MB/s.
+pub const RAW_BAND_MB_S: u64 = 50;
+
+/// The [`RAW_BAND_MB_S`] band that a raw rate falls in, such as `"200-250"`.
+pub fn raw_band(raw_mb_s: f64) -> String {
+    if !(raw_mb_s.is_finite() && raw_mb_s >= 0.0) {
+        return "unknown".to_string();
+    }
+    let low = (raw_mb_s as u64) / RAW_BAND_MB_S * RAW_BAND_MB_S;
+    format!("{}-{}", low, low + RAW_BAND_MB_S)
+}
+
+fn disk_model() -> String {
+    std::env::var("ALBUMEN_DISK_MODEL")
+        .ok()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 pub fn ratio_passes(ratio: f64) -> bool {
@@ -351,6 +385,7 @@ pub fn measure_throughput(
     }
     Ok(ThroughputReport {
         leg: leg.to_string(),
+        disk_model: disk_model(),
         files,
         bytes_each,
         bytes: expected_bytes,
@@ -1059,9 +1094,21 @@ mod tests {
     }
 
     #[test]
+    fn raw_band_puts_a_rate_in_its_fifty_megabyte_band() {
+        assert_eq!(raw_band(0.0), "0-50");
+        assert_eq!(raw_band(220.174), "200-250");
+        assert_eq!(raw_band(250.0), "250-300");
+        assert_eq!(raw_band(277.758), "250-300");
+        assert_eq!(raw_band(416.581), "400-450");
+        assert_eq!(raw_band(f64::NAN), "unknown");
+        assert_eq!(raw_band(-1.0), "unknown");
+    }
+
+    #[test]
     fn a_ratio_under_eighty_percent_is_not_a_reconciliation_failure() {
         let report = ThroughputReport {
             leg: "test".to_string(),
+            disk_model: "unknown".to_string(),
             files: 1_000,
             bytes_each: 5_000_000,
             bytes: 5_000_000_000,
