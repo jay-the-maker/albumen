@@ -5,7 +5,8 @@
 //! `--check` is the default. It fails when the median is more than 10 percent
 //! worse than the baseline, and it refuses a library size the baseline was
 //! not recorded at. `--measure` prints the run and does not compare.
-//! `--write-baseline` replaces the file.
+//! `--write-baseline` replaces the file. `--takeout` times a generated
+//! 100,000-member Takeout import and is not part of `--check`.
 
 use std::env;
 use std::fs;
@@ -14,8 +15,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use albumen_bench::{
-    load_baseline, measure, regression_problems, scale_problems, to_json, Report,
-    DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS,
+    load_baseline, measure, measure_takeout, regression_problems, scale_problems, to_json, Report,
+    DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS, DEFAULT_TAKEOUT_ITEMS,
+    TAKEOUT_BUDGET_SECONDS,
 };
 
 fn main() -> ExitCode {
@@ -78,6 +80,26 @@ fn run() -> Result<(), String> {
             print_report(&observed)?;
             eprintln!("wrote {}", invocation.baseline.display());
         }
+        Mode::Takeout => {
+            let items = env_u64("ALBUMEN_TAKEOUT_ITEMS", DEFAULT_TAKEOUT_ITEMS)?;
+            let scale = measure_takeout(items)?;
+            let text =
+                serde_json::to_string_pretty(&scale.to_json()).map_err(|err| err.to_string())?;
+            println!("{text}");
+            io::stdout().flush().map_err(|err| err.to_string())?;
+            if !scale.reconciled() {
+                return Err(format!(
+                    "takeout reconciliation failed: count_in {} count_out {} mismatched {}",
+                    scale.count_in, scale.count_out, scale.mismatched
+                ));
+            }
+            if scale.seconds > TAKEOUT_BUDGET_SECONDS {
+                return Err(format!(
+                    "takeout import of {} items took {:.1}s, budget is {:.0}s",
+                    scale.items, scale.seconds, TAKEOUT_BUDGET_SECONDS
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -87,6 +109,7 @@ enum Mode {
     Check,
     Measure,
     Write,
+    Takeout,
 }
 
 struct Invocation {
@@ -103,6 +126,7 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
             "--check" => set_mode(&mut mode, Mode::Check)?,
             "--measure" => set_mode(&mut mode, Mode::Measure)?,
             "--write-baseline" => set_mode(&mut mode, Mode::Write)?,
+            "--takeout" => set_mode(&mut mode, Mode::Takeout)?,
             "--baseline" => {
                 index += 1;
                 let path = args
@@ -122,7 +146,9 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
 
 fn set_mode(slot: &mut Option<Mode>, mode: Mode) -> Result<(), String> {
     if slot.is_some() {
-        return Err("pass only one of --check, --measure, or --write-baseline".to_string());
+        return Err(
+            "pass only one of --check, --measure, --write-baseline, or --takeout".to_string(),
+        );
     }
     *slot = Some(mode);
     Ok(())
