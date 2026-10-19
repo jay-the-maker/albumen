@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `albumen export`, `albumen import-takeout`, `albumen import-icloud`,
-//! `albumen scan`, and `albumen verify-manifest`.
+//! `albumen scan`, `albumen verify-manifest`, and `albumen family`.
 //!
 //! Export is `copy_verify` across a library. It does not modify sources and
 //! it does not overwrite a destination that differs. Without `--apply` or
@@ -23,10 +23,12 @@ use albumen_ingest::{
 };
 use clap::{Parser, Subcommand};
 
+mod family;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "albumen",
-    about = "Bit-exact photo library export, Takeout import, iCloud import, and read-only scan. Export and import writes require --apply or --execute."
+    about = "Bit-exact photo library export, Takeout import, iCloud import, read-only scan, and family namespaces. Export, import, and family writes require --apply or --execute."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -126,6 +128,11 @@ enum Command {
         #[arg(long)]
         execute: bool,
     },
+    /// Per-member namespaces, a signed album manifest, invite, and revoke.
+    Family {
+        #[command(subcommand)]
+        action: family::Command,
+    },
     /// Hash the exported files, or a scan manifest, and compare them.
     VerifyManifest {
         #[arg(long)]
@@ -193,6 +200,7 @@ fn run() -> Result<(), IngestError> {
             apply,
             execute,
         } => {
+            albumen_ingest::family::refuse_shared_write_root(&to)?;
             if !(apply || execute) {
                 let plan = plan_takeout(&from, &to, &report)?;
                 println!("dry-run: no files written. Pass --apply or --execute to copy.");
@@ -231,6 +239,7 @@ fn run() -> Result<(), IngestError> {
             apply,
             execute,
         } => {
+            albumen_ingest::family::refuse_shared_write_root(&to)?;
             if !(apply || execute) {
                 let plan = plan_icloud(&from, &to, &report)?;
                 println!("dry-run: no files written. Pass --apply or --execute to copy.");
@@ -258,6 +267,7 @@ fn run() -> Result<(), IngestError> {
             println!("report {}", report.display());
             Ok(())
         }
+        Command::Family { action } => family::run(action),
         Command::VerifyManifest { manifest, against } => {
             if manifest_is_jsonl(&manifest)? {
                 if against.starts_with("s3://") {
@@ -292,7 +302,9 @@ fn run() -> Result<(), IngestError> {
 fn refuse_export_targets(from: &Path, to: &str, manifest: &Path) -> Result<(), IngestError> {
     let source = SourceRoot::open(from)?;
     if !to.starts_with("s3://") {
-        source.refuse_destination(Path::new(to))?;
+        let dest = Path::new(to);
+        source.refuse_destination(dest)?;
+        albumen_ingest::family::refuse_shared_write_root(dest)?;
     }
     source.refuse_destination(manifest)
 }

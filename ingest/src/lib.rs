@@ -15,6 +15,7 @@ mod discover;
 mod error;
 mod exiftool;
 mod export;
+pub mod family;
 mod icloud;
 mod local;
 mod mtime;

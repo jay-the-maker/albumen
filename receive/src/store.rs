@@ -33,6 +33,8 @@ pub struct Library {
 impl Library {
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
+        albumen_ingest::family::refuse_shared_write_root(&root)
+            .map_err(|err| io::Error::other(err.to_string()))?;
         dest::create_dir_all(&root).map_err(|err| io::Error::other(err.to_string()))?;
         if !root.is_dir() {
             return Err(io::Error::new(

@@ -66,6 +66,37 @@ pub fn set_len(file: &File, path: &Path, len: u64) -> Result<(), IngestError> {
     file.set_len(len).map_err(|err| IngestError::io(path, err))
 }
 
+pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
+    let dir = File::open(path).map_err(|err| IngestError::io(path, err))?;
+    dir.sync_all().map_err(|err| IngestError::io(path, err))
+}
+
+/// Write a new file and, on Unix, restrict it to the owner.
+///
+/// Used for a family signing key that lives outside the library. An existing
+/// path is left untouched.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), IngestError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all(parent)?;
+        }
+    }
+    let mut file = open_new(path)?;
+    std::io::Write::write_all(&mut file, bytes).map_err(|err| IngestError::io(path, err))?;
+    file.sync_all().map_err(|err| IngestError::io(path, err))?;
+    drop(file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .map_err(|err| IngestError::io(path, err))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions).map_err(|err| IngestError::io(path, err))?;
+    }
+    Ok(())
+}
+
 pub fn set_mtime(path: &Path, mtime: SystemTime) -> Result<(), IngestError> {
     let file = OpenOptions::new()
         .write(true)
