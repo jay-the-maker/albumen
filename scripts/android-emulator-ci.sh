@@ -63,7 +63,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-adb wait-for-device
+# adb wait-for-device has no timeout. A KVM fault can leave qemu up with no guest.
+appeared=0
+for _ in $(seq 1 90); do
+  if ! kill -0 "$emu_pid" 2>/dev/null; then
+    echo "emulator exited before adb" >&2
+    cat "$log" >&2
+    exit 1
+  fi
+  if adb devices | tr -d '\r' | grep -q 'emulator.*device$'; then
+    appeared=1
+    break
+  fi
+  sleep 2
+done
+if [[ "$appeared" != "1" ]]; then
+  echo "emulator never registered with adb" >&2
+  cat "$log" >&2
+  exit 1
+fi
+
 booted=0
 for _ in $(seq 1 90); do
   if ! kill -0 "$emu_pid" 2>/dev/null; then
