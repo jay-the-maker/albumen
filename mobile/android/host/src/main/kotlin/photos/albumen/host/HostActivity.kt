@@ -5,6 +5,9 @@ package photos.albumen.host
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
+import android.view.View
+import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -18,8 +21,9 @@ import photos.albumen.backup.PairingCode
 import photos.albumen.backup.PairingException
 
 /**
- * Requests [CameraRoll.requiredPermissions] and enqueues backup only when the
- * gate allows it. The permission contract receives permission names. The
+ * Requests [CameraRoll.requestedPermissions] and enqueues backup only when the
+ * gate allows it. When Android 14 or newer reports Select photos, the screen
+ * says so and shows one Allow all button that asks for full access again. The permission contract receives permission names. The
  * receiver password stays in a field until [CameraRollBackupWorker.enqueue]
  * stores it in the Keystore. The screen shows that decision and every line
  * the worker has written. CI does not click the system dialog; the gate is
@@ -27,6 +31,8 @@ import photos.albumen.backup.PairingException
  */
 class HostActivity : ComponentActivity() {
     private lateinit var status: TextView
+    private lateinit var allowAll: Button
+    private var allowAllShown: Boolean = false
     private var endpoint: String = ""
     private var user: String = ""
     private var password: String = ""
@@ -57,6 +63,7 @@ class HostActivity : ComponentActivity() {
             } else {
                 decision.message
             }
+            allowAllShown = decision.allowAll
             render()
             if (Build.VERSION.SDK_INT >= 33) {
                 requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -94,6 +101,7 @@ class HostActivity : ComponentActivity() {
         val blocked = CameraRoll.permissionBlock(this)
         if (blocked != null) {
             decisionMessage = blocked
+            allowAllShown = blocked == CameraRoll.SELECTED_ONLY_BLOCK
             render()
             return false
         }
@@ -112,27 +120,55 @@ class HostActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val scroll = ScrollView(this)
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
         status = TextView(this).apply {
             setPadding(48, 48, 48, 48)
         }
-        scroll.addView(status)
+        allowAll = Button(this).apply {
+            text = ALLOW_ALL
+            visibility = View.GONE
+            setOnClickListener { requestAccess() }
+        }
+        column.addView(status)
+        column.addView(allowAll)
+        scroll.addView(column)
         setContentView(scroll)
         endpoint = intent.getStringExtra(EXTRA_ENDPOINT).orEmpty()
         user = intent.getStringExtra(EXTRA_USER).orEmpty()
         password = intent.getStringExtra(EXTRA_PASSWORD).orEmpty()
         memberId = intent.getStringExtra(EXTRA_MEMBER).orEmpty()
         render()
-        requestPermissions.launch(CameraRoll.requiredPermissions())
+        requestAccess()
+    }
+
+    /**
+     * Ask for access. With full access already granted this is the required
+     * set, which returns at once without a dialog.
+     */
+    internal fun requestAccess() {
+        val permissions = if (CameraRoll.permissionBlock(this) == null) {
+            CameraRoll.requiredPermissions()
+        } else {
+            CameraRoll.requestedPermissions()
+        }
+        requestPermissions.launch(permissions)
     }
 
     override fun onResume() {
         super.onResume()
         if (::status.isInitialized) {
+            if (allowAllShown && CameraRoll.permissionBlock(this) == null) {
+                // Full access was granted in Settings. Run the same gate again.
+                requestAccess()
+            }
             render()
         }
     }
 
     private fun render() {
+        allowAll.visibility = if (allowAllShown) View.VISIBLE else View.GONE
         val stored = BackupStatusStore.read(this)
         status.text = buildString {
             append(decisionMessage)
@@ -148,6 +184,7 @@ class HostActivity : ComponentActivity() {
         const val EXTRA_USER = "photos.albumen.host.USER"
         const val EXTRA_PASSWORD = "photos.albumen.host.PASSWORD"
         const val EXTRA_MEMBER = "photos.albumen.host.MEMBER"
+        const val ALLOW_ALL = "Allow all"
         const val NOTIFICATION_DENIED =
             "Notification permission was denied. Backup failures stay on this screen."
 
