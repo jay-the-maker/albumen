@@ -179,18 +179,21 @@ pub fn store_prefetched(
     })
 }
 
-/// Copy `sources` into `dest_dir` with `workers` workers.
+/// Copy `sources` into `dest_dir` on `lanes` lanes.
 ///
-/// Each worker has a prefetch thread that reads and hashes the next source
-/// while the worker writes, syncs, and reads back the current one. A file
-/// is reported to `on_done` only after its file sync, read-back, and
-/// directory sync. Files over [`PREFETCH_MAX_BYTES`] go through
-/// [`copy_verify_file`]. `on_done` gets the index into `sources`. It
-/// returns `false` to stop the copy early.
+/// Each lane has three threads. The first reads and hashes the next source.
+/// The second writes the current file and syncs it. The third reads the
+/// destination back, checks the SHA-256 and mtime, then syncs the
+/// directory. A directory sync covers every file that was created before it
+/// started, so the third thread may sync once for the files waiting in its
+/// queue. A file is reported to `on_done` only after its own file sync, its
+/// read-back, and a directory sync that started after it was created. Files
+/// over [`PREFETCH_MAX_BYTES`] go through [`copy_verify_file`]. `on_done`
+/// gets the index into `sources`. It returns `false` to stop the copy early.
 pub fn copy_verify_files_pipelined<F>(
     sources: &[PathBuf],
     dest_dir: &Path,
-    workers: usize,
+    lanes: usize,
     on_done: F,
 ) where
     F: Fn(usize, Result<VerifiedObject, IngestError>) -> bool + Sync,
@@ -202,11 +205,13 @@ pub fn copy_verify_files_pipelined<F>(
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        for _ in 0..workers.max(1) {
-            let (tx, rx) =
+        for _ in 0..lanes.max(1) {
+            let (read_tx, read_rx) =
                 sync_channel::<(usize, Result<Option<PrefetchedSource>, IngestError>)>(1);
+            let (sync_tx, sync_rx) = sync_channel::<(usize, Synced)>(4);
             let next = &next;
             let stop = &stop;
+            let on_done = &on_done;
             scope.spawn(move || {
                 if profile {
                     crate::copy_profile::enable_thread();
@@ -216,23 +221,81 @@ pub fn copy_verify_files_pipelined<F>(
                     let Some(source) = sources.get(index) else {
                         break;
                     };
-                    if tx.send((index, prefetch_source(source))).is_err() {
+                    if read_tx.send((index, prefetch_source(source))).is_err() {
                         break;
                     }
                 }
             });
-            let on_done = &on_done;
             scope.spawn(move || {
                 if profile {
                     crate::copy_profile::enable_thread();
                 }
-                for (index, prefetched) in rx {
-                    let result = match prefetched {
-                        Ok(Some(prefetched)) => store_prefetched(prefetched, dest_dir),
-                        Ok(None) => copy_verify_file(&sources[index], dest_dir),
-                        Err(err) => Err(err),
+                for (index, prefetched) in read_rx {
+                    let synced = match prefetched {
+                        Ok(Some(prefetched)) => match write_prefetched(prefetched, dest_dir) {
+                            Ok(pending) => Synced::Pending(pending),
+                            Err(err) => Synced::Done(Err(err)),
+                        },
+                        Ok(None) => Synced::Done(copy_verify_file(&sources[index], dest_dir)),
+                        Err(err) => Synced::Done(Err(err)),
                     };
-                    if !on_done(index, result) {
+                    if sync_tx.send((index, synced)).is_err() || stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            });
+            scope.spawn(move || {
+                if profile {
+                    crate::copy_profile::enable_thread();
+                }
+                while let Ok(first) = sync_rx.recv() {
+                    let mut batch = vec![first];
+                    while let Ok(more) = sync_rx.try_recv() {
+                        batch.push(more);
+                    }
+                    let mut results = Vec::with_capacity(batch.len());
+                    let mut waiting = Vec::new();
+                    for (index, synced) in batch {
+                        match synced {
+                            Synced::Done(result) => results.push((index, result)),
+                            Synced::Pending(pending) => match pending.verify() {
+                                Ok(verified) => waiting.push((index, verified)),
+                                Err(err) => results.push((index, Err(err))),
+                            },
+                        }
+                    }
+                    if !waiting.is_empty() {
+                        let dir_at = crate::copy_profile::tic();
+                        let synced = dest::sync_dir(dest_dir);
+                        crate::copy_profile::add_dir_sync(dir_at);
+                        match synced {
+                            Ok(()) => {
+                                for (index, verified) in waiting {
+                                    results.push((index, Ok(verified.keep())));
+                                }
+                            }
+                            Err(err) => {
+                                let message = err.to_string();
+                                for (index, _) in waiting {
+                                    results.push((
+                                        index,
+                                        Err(IngestError::store(
+                                            "sync_dir",
+                                            "local",
+                                            message.clone(),
+                                        )),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    let mut go_on = true;
+                    for (index, result) in results {
+                        if !on_done(index, result) {
+                            go_on = false;
+                        }
+                    }
+                    if !go_on {
                         stop.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -240,6 +303,64 @@ pub fn copy_verify_files_pipelined<F>(
             });
         }
     });
+}
+
+enum Synced {
+    Done(Result<VerifiedObject, IngestError>),
+    Pending(Pending),
+}
+
+/// A destination file that is written, has its mtime, and is synced, but
+/// has not been read back or had its directory synced. Dropping it removes
+/// the file.
+struct Pending {
+    dest: PathBuf,
+    filename: String,
+    sha256: [u8; 32],
+    mtime: std::time::SystemTime,
+    guard: RemoveOnDrop,
+}
+
+impl Pending {
+    fn verify(self) -> Result<Verified, IngestError> {
+        let record = finalize_verified(&self.dest, &self.filename, &self.sha256, self.mtime)?;
+        Ok(Verified {
+            record,
+            guard: self.guard,
+        })
+    }
+}
+
+/// Read back and checked. Still removed on drop until the directory sync.
+struct Verified {
+    record: VerifiedObject,
+    guard: RemoveOnDrop,
+}
+
+impl Verified {
+    fn keep(mut self) -> VerifiedObject {
+        self.guard.armed = false;
+        self.record
+    }
+}
+
+fn write_prefetched(prefetched: PrefetchedSource, dest_dir: &Path) -> Result<Pending, IngestError> {
+    let PrefetchedSource {
+        source,
+        filename,
+        mtime,
+        data,
+        sha256,
+    } = prefetched;
+    write_synced(&source, &filename, dest_dir, mtime, |_, output, dest| {
+        let write_at = crate::copy_profile::tic();
+        let mut writer = output;
+        writer
+            .write_all(&data)
+            .map_err(|err| IngestError::io(dest, err))?;
+        crate::copy_profile::add_write(write_at);
+        Ok(sha256)
+    })
 }
 
 /// The destination half of a copy: checks, write, streams, mtime, file
@@ -252,6 +373,25 @@ fn store_checked<W>(
     mtime: std::time::SystemTime,
     write: W,
 ) -> Result<VerifiedObject, IngestError>
+where
+    W: FnOnce(&SourceRoot, &fs::File, &Path) -> Result<[u8; 32], IngestError>,
+{
+    let verified = write_synced(source, filename, dest_dir, mtime, write)?.verify()?;
+    let dir_at = crate::copy_profile::tic();
+    dest::sync_dir(dest_dir)?;
+    crate::copy_profile::add_dir_sync(dir_at);
+    Ok(verified.keep())
+}
+
+/// Checks, write, streams, mtime, and file sync. The read-back and the
+/// directory sync are left to the caller.
+fn write_synced<W>(
+    source: &Path,
+    filename: &str,
+    dest_dir: &Path,
+    mtime: std::time::SystemTime,
+    write: W,
+) -> Result<Pending, IngestError>
 where
     W: FnOnce(&SourceRoot, &fs::File, &Path) -> Result<[u8; 32], IngestError>,
 {
@@ -275,12 +415,12 @@ where
         });
     }
 
-    let mut guard = RemoveOnDrop {
+    let guard = RemoveOnDrop {
         path: dest.clone(),
         armed: true,
     };
     let output = dest::open_new(&dest)?;
-    let written_hash = write(&root, &output, &dest)?;
+    let sha256 = write(&root, &output, &dest)?;
     // Streams land before the mtime is set. The write handle stays open so
     // the fsync below covers the bytes this handle wrote and the mtime.
     copy_named_streams(source, &dest, &filename)?;
@@ -288,13 +428,13 @@ where
     dest::set_mtime_on(&output, &dest, expected_mtime)?;
     sync_file(&output, &dest)?;
     drop(output);
-
-    let record = finalize_verified(&dest, &filename, &written_hash, mtime)?;
-    let dir_at = crate::copy_profile::tic();
-    dest::sync_dir(dest_dir)?;
-    crate::copy_profile::add_dir_sync(dir_at);
-    guard.armed = false;
-    Ok(record)
+    Ok(Pending {
+        dest,
+        filename,
+        sha256,
+        mtime,
+        guard,
+    })
 }
 
 fn copy_named_streams(source: &Path, dest: &Path, filename: &str) -> Result<(), IngestError> {
