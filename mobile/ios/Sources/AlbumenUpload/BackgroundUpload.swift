@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import Darwin
 import Foundation
 
 /// Background WebDAV upload. The PUT we build has no Authorization header.
@@ -350,8 +351,14 @@ enum AtomicFile {
         } else {
             try FileManager.default.moveItem(at: temp, to: url)
         }
-        let directoryHandle = try FileHandle(forReadingFrom: directory)
-        try directoryHandle.synchronize()
-        try directoryHandle.close()
+        let fd = directory.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(path, O_RDONLY)
+        }
+        guard fd >= 0 else {
+            throw UploadFailure.transport("the backup directory was not saved")
+        }
+        _ = fsync(fd)
+        _ = Darwin.close(fd)
     }
 }
