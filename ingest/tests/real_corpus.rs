@@ -25,12 +25,19 @@ const SKIP_MESSAGE: &str = "skipping real-device corpus: ALBUMEN_REAL_CORPUS is 
 
 /// Tags that describe the filesystem location rather than the original.
 /// FileModifyDate, FileName, and FileSize are not in this list: they must survive.
+///
+/// `FileCreateDate` is the Windows name for the creation time ExifTool reads
+/// from the same stat field Unix reports as `FileInodeChangeDate`.
+/// `ZoneIdentifier` is the NTFS `Zone.Identifier` stream. A byte copy does not
+/// carry that stream. Neither tag is embedded EXIF, XMP, IPTC, GPS, or QuickTime.
 const VOLATILE_TAGS: &[&str] = &[
     "SourceFile",
     "System:Directory",
     "System:FileAccessDate",
     "System:FileInodeChangeDate",
+    "System:FileCreateDate",
     "System:FilePermissions",
+    "System:ZoneIdentifier",
 ];
 
 #[test]

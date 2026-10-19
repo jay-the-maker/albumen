@@ -156,13 +156,14 @@ pub(crate) fn finalize_verified(
         ));
     }
 
-    set_mtime(path, mtime)?;
+    let expected_mtime = crate::mtime::representable_mtime(mtime);
+    set_mtime(path, expected_mtime)?;
     let stored_mtime = mtime_of(path)?;
-    if stored_mtime != mtime {
+    if stored_mtime != expected_mtime {
         let removed = fs::remove_file(path).is_ok();
         return Err(IngestError::MtimeNotPreserved {
             filename: filename.to_string(),
-            expected_unix_nanos: to_unix_nanos_string(mtime),
+            expected_unix_nanos: to_unix_nanos_string(expected_mtime),
             actual_unix_nanos: to_unix_nanos_string(stored_mtime),
             destination: path.display().to_string(),
             removed,
@@ -200,7 +201,22 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     fn fixed_mtime() -> std::time::SystemTime {
-        UNIX_EPOCH + Duration::new(1_339_746_000, 123_456_789)
+        // 100 ns aligned so NTFS can store this exact tick.
+        UNIX_EPOCH + Duration::new(1_339_746_000, 123_456_700)
+    }
+
+    #[test]
+    fn copy_keeps_the_finest_mtime_the_filesystem_stores() {
+        let tmp = Tmp::new();
+        let requested = UNIX_EPOCH + Duration::new(1_339_746_000, 123_456_789);
+        let source = write_file(tmp.path(), "tick.jpg", b"tick-bytes", requested);
+        let stored = mtime_of(&source).unwrap();
+        assert_eq!(stored, crate::mtime::representable_mtime(requested));
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&dest_dir).unwrap();
+        copy_verify_file(&source, &dest_dir).unwrap();
+        assert_eq!(mtime_of(&dest_dir.join("tick.jpg")).unwrap(), stored);
+        assert_eq!(fs::read(dest_dir.join("tick.jpg")).unwrap(), b"tick-bytes");
     }
 
     #[test]

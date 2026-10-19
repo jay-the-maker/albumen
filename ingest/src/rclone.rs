@@ -13,6 +13,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 use crate::checksum::sha256_hex;
 use crate::discover::{check_filename, file_name_str};
@@ -329,7 +330,7 @@ impl RcloneStore {
         let mut command = Command::new(&self.bin);
         command
             .arg("--config")
-            .arg("/dev/null")
+            .arg(empty_rclone_config()?)
             .arg("--log-level")
             .arg("ERROR")
             .arg("--retries")
@@ -431,7 +432,7 @@ impl BlobStore for RcloneStore {
 fn obscure(bin: &Path, password: &str) -> Result<String, IngestError> {
     let output = Command::new(bin)
         .arg("--config")
-        .arg("/dev/null")
+        .arg(empty_rclone_config()?)
         .arg("obscure")
         .arg(password)
         .output()
@@ -505,6 +506,16 @@ fn normalize_prefix(prefix: &str) -> String {
     } else {
         format!("{prefix}/")
     }
+}
+
+fn empty_rclone_config() -> Result<&'static Path, IngestError> {
+    static CONFIG: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = CONFIG.get() {
+        return Ok(path);
+    }
+    let path = std::env::temp_dir().join(format!("albumen-rclone-{}.conf", std::process::id()));
+    fs::write(&path, b"").map_err(|err| IngestError::io(&path, err))?;
+    Ok(CONFIG.get_or_init(|| path))
 }
 
 fn path_arg(path: &Path) -> Result<&str, IngestError> {

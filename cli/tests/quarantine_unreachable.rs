@@ -5,9 +5,22 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn file_id(path: &Path) -> u64 {
+    let meta = fs::metadata(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_index().expect("file index")
+    }
+}
 
 fn albumen() -> Command {
     Command::new(env!("CARGO_BIN_EXE_albumen"))
@@ -60,7 +73,7 @@ fn every_default_cli_path_leaves_the_source_in_place() {
     fs::create_dir(&library).unwrap();
     let source = library.join("IMG_0001.jpg");
     fs::write(&source, b"jpeg-bytes").unwrap();
-    let inode = fs::metadata(&source).unwrap().ino();
+    let inode = file_id(&source);
     let bytes = fs::read(&source).unwrap();
 
     let (ok, text) = run(&[] as &[&str]);
@@ -106,7 +119,7 @@ fn every_default_cli_path_leaves_the_source_in_place() {
     assert!(ok, "{text}");
 
     assert!(source.is_file(), "source path was removed");
-    assert_eq!(fs::metadata(&source).unwrap().ino(), inode);
+    assert_eq!(file_id(&source), inode);
     assert_eq!(fs::read(&source).unwrap(), bytes);
     assert!(dest.join("IMG_0001.jpg").is_file());
     let names = fs::read_dir(&library)

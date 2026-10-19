@@ -3,9 +3,9 @@
 # MinIO is AGPL and is not part of Albumen. This downloads a released binary
 # and runs it as a separate process. The credentials are disposable test values.
 #
-# Docker is not used. Linux amd64 and macOS arm64 have pinned binaries. Any
-# other OS prints that and runs the command with ALBUMEN_S3_UNAVAILABLE=1 so
-# the suite stays on the local filesystem.
+# Docker is not used. Linux amd64, macOS arm64, and Windows amd64 have pinned
+# binaries. Any other OS prints that and runs the command with
+# ALBUMEN_S3_UNAVAILABLE=1 so the suite stays on the local filesystem.
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
@@ -39,21 +39,40 @@ sha256_ok() {
 RELEASE="RELEASE.2025-09-07T16-13-09Z"
 OS_NAME="$(uname -s)"
 ARCH_NAME="$(uname -m)"
-case "${OS_NAME}-${ARCH_NAME}" in
-  Linux-x86_64|Linux-amd64)
-    ASSET="minio.linux-amd64.${RELEASE}"
-    SHA256="7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f"
+ASSET=""
+SHA256=""
+case "${OS_NAME}" in
+  Linux)
+    case "${ARCH_NAME}" in
+      x86_64|amd64)
+        ASSET="minio.linux-amd64.${RELEASE}"
+        SHA256="7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f"
+        ;;
+    esac
     ;;
-  Darwin-arm64)
-    ASSET="minio.darwin-arm64.${RELEASE}"
-    SHA256="7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4"
+  Darwin)
+    case "${ARCH_NAME}" in
+      arm64)
+        ASSET="minio.darwin-arm64.${RELEASE}"
+        SHA256="7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4"
+        ;;
+    esac
     ;;
-  *)
-    echo "Docker is not used. No pinned MinIO binary for ${OS_NAME}-${ARCH_NAME}. S3 will not run; the suite is local filesystem only." >&2
-    export ALBUMEN_S3_UNAVAILABLE=1
-    exec "$@"
+  MINGW*|MSYS*|CYGWIN*)
+    case "${ARCH_NAME}" in
+      x86_64|amd64)
+        ASSET="minio.windows-amd64.${RELEASE}.exe"
+        SHA256="af709e6ba68488404e85acdd22a3030d0f5e56a108d4b27d744f18ceb50861b4"
+        ;;
+    esac
     ;;
 esac
+
+if [[ -z "${ASSET}" ]]; then
+  echo "Docker is not used. No pinned MinIO binary for ${OS_NAME}-${ARCH_NAME}. S3 will not run; the suite is local filesystem only." >&2
+  export ALBUMEN_S3_UNAVAILABLE=1
+  exec "$@"
+fi
 
 URL="https://github.com/minio/minio/releases/download/${RELEASE}/${ASSET}"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/albumen"
@@ -74,13 +93,17 @@ fi
 DATA="$(mktemp -d)"
 LOG="$(mktemp)"
 PORT="${ALBUMEN_MINIO_PORT:-9000}"
+DATA_ARG="$DATA"
+if command -v cygpath >/dev/null 2>&1; then
+  DATA_ARG="$(cygpath -w "$DATA")"
+fi
 
 export ALBUMEN_S3_ACCESS_KEY="${ALBUMEN_S3_ACCESS_KEY:-albumen}"
 export ALBUMEN_S3_SECRET_KEY="${ALBUMEN_S3_SECRET_KEY:-albumen-ci-not-a-secret}"
 export MINIO_ROOT_USER="$ALBUMEN_S3_ACCESS_KEY"
 export MINIO_ROOT_PASSWORD="$ALBUMEN_S3_SECRET_KEY"
 
-"$BIN" server "$DATA" --address ":${PORT}" --console-address ":$((PORT + 1))" >"$LOG" 2>&1 &
+"$BIN" server "$DATA_ARG" --address ":${PORT}" --console-address ":$((PORT + 1))" >"$LOG" 2>&1 &
 PID=$!
 
 cleanup() {
@@ -117,7 +140,14 @@ export ALBUMEN_S3_REGION="${ALBUMEN_S3_REGION:-us-east-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RCLONE_DIR="$("${SCRIPT_DIR}/install-rclone.sh")"
 export PATH="${RCLONE_DIR}:${PATH}"
-export ALBUMEN_RCLONE="${RCLONE_DIR}/rclone"
+RCLONE_BIN="${RCLONE_DIR}/rclone"
+if [[ -f "${RCLONE_DIR}/rclone.exe" ]]; then
+  RCLONE_BIN="${RCLONE_DIR}/rclone.exe"
+fi
+if command -v cygpath >/dev/null 2>&1; then
+  RCLONE_BIN="$(cygpath -w "$RCLONE_BIN")"
+fi
+export ALBUMEN_RCLONE="${RCLONE_BIN}"
 
 set +e
 "$@"
