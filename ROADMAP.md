@@ -18,17 +18,17 @@ Shipped. A source is opened read-only. Scan, import, and export read through tha
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
 
-## Shared libraries
+## Family library
 
-A library can belong to several people. Each person owns their originals. Photos you add stay yours, bit-exact, in the library you choose. Someone else's originals stay theirs. Albumen can read a library that was shared with you, and a copy into your own library is a new original you own, checked with SHA-256.
+Not built. A design for a shared library on storage the family already has, with no server the owner runs, is [docs/design/family-sharing.md](docs/design/family-sharing.md). Each member has an append-only namespace. Originals stay bit-exact under `copy_verify`. A hide is per viewer and leaves the other member's files in place.
 
 ## Live Photo playback
 
-A Live Photo plays as the still and its paired video. Both files stay the originals Albumen stored. Playback does not transcode them and does not write a new master.
+Not built. A Live Photo would play as the still and its paired video. Both files stay the originals Albumen stored. Playback does not transcode them and does not write a new master.
 
 ## Windows and Linux, with macOS
 
-Linux, Windows, and macOS are first-class for the ingest tools. The round-trip suite, the read-only source snapshot, and the in-process scale tests run on `ubuntu-24.04`, `ubuntu-26.04`, `windows-latest`, and `macos-14`.
+Linux, Windows, and macOS are first-class for the ingest tools. The round-trip suite, the read-only source snapshot, and the in-process scale tests run on `ubuntu-24.04`, `ubuntu-26.04`, `windows-2025`, `windows-latest`, and `macos-14`. `windows-2025` is the pinned image.
 
 Windows opens paths longer than 260 characters, reserved device names, and trailing dots or spaces with the `\\?\` prefix. A destination that already has another spelling of the same name is reported. Named NTFS alternate data streams are copied with the file. Modification time is kept to the 100 ns tick NTFS stores.
 
