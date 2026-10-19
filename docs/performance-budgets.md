@@ -85,3 +85,21 @@ ALBUMEN_BENCH_ITEMS=380000 cargo run --release --locked -p albumen-bench -- --me
 ```
 
 Do not set `ALBUMEN_BENCH_ITEMS` in CI. The workflow uses the default 128.
+
+## Takeout import, 100,000 items
+
+This is the switching-time measurement for `albumen import-takeout`. It is not the performance-regression job. That job does not pass `--takeout` and does not set `ALBUMEN_TAKEOUT_ITEMS`.
+
+The fixture is generated in a stored zip: 50,000 tiny JPEG members and 50,000 tiny JSON sidecars, 100,000 archive members in all. No real photo is used. The clock starts at `import_takeout` and stops when it returns. Generation is not included. Reconciliation is 100 percent when `count_in` and `count_out` are both 100,000 and `mismatched` is 0.
+
+The local budget is 4 hours or less for those 100,000 members.
+
+```bash
+cargo run --release --locked -p albumen-bench -- --takeout
+```
+
+`ALBUMEN_TAKEOUT_ITEMS` overrides the member count. The default is 100000. A smaller count is only for a smoke check. The budget stays 4 hours, which is the budget for 100,000 members.
+
+The command prints JSON. `seconds` is the import time. `reconciled` is true only at 100 percent. The process exits non-zero when reconciliation is short of that or when `seconds` is over 14400.
+
+A pull request does not run this. It is too long for the ingest matrix. [`.github/workflows/takeout-scale.yml`](../.github/workflows/takeout-scale.yml) runs it on `workflow_dispatch` and on a weekly schedule.

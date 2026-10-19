@@ -17,6 +17,8 @@
 
 #![forbid(unsafe_code)]
 
+mod takeout_scale;
+
 use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::{Read, Write};
@@ -39,6 +41,10 @@ pub const WARM_SAMPLES: usize = 20;
 pub const NOISE_SPREAD: f64 = 0.25;
 /// Fail when the median moves by more than this fraction.
 pub const REGRESSION: f64 = 0.10;
+
+pub use takeout_scale::{
+    measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
+};
 
 pub const DEFAULT_SEARCH_ITEMS: u64 = 128;
 pub const DEFAULT_COPY_FILES: u64 = 8;

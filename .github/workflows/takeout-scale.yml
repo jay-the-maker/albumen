@@ -1,0 +1,28 @@
+name: takeout scale
+
+# A 100,000-member Takeout import is too slow for the pull-request ingest
+# matrix. Run it by hand, or let the weekly schedule run it. The budget is
+# 4 hours. The job timeout is a backstop past that budget.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 15 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  takeout-100k:
+    name: 100k Takeout import
+    runs-on: ubuntu-24.04
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Import 100,000 generated Takeout members
+        run: cargo run --release --locked -p albumen-bench -- --takeout
