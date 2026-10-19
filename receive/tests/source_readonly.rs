@@ -9,7 +9,6 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +23,7 @@ struct Entry {
     xattr: Vec<u8>,
 }
 
+#[cfg(unix)]
 fn xattr_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "albumen.trial"
@@ -32,9 +32,73 @@ fn xattr_name() -> &'static str {
     }
 }
 
+fn meta_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.mode()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
+    }
+}
+
+fn locked_mode(mode: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        mode & !0o222
+    }
+    #[cfg(windows)]
+    {
+        mode | 1
+    }
+}
+
+fn apply_mode(path: &Path, mode: u32) {
+    let mut perms = fs::symlink_metadata(path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(mode);
+    }
+    #[cfg(windows)]
+    {
+        perms.set_readonly(mode & 1 != 0);
+    }
+    fs::set_permissions(path, perms).unwrap();
+}
+
+fn mark_extra(path: &Path, bytes: &[u8]) {
+    #[cfg(unix)]
+    {
+        xattr::set(path, xattr_name(), bytes).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(":albumen");
+        fs::write(name, bytes).unwrap();
+    }
+}
+
+fn read_extra(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        xattr::get(path, xattr_name()).unwrap().unwrap_or_default()
+    }
+    #[cfg(windows)]
+    {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(":albumen");
+        fs::read(name).unwrap_or_default()
+    }
+}
+
 fn stamp(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
-    xattr::set(path, xattr_name(), b"trial").unwrap();
+    mark_extra(path, b"trial");
     OpenOptions::new()
         .write(true)
         .open(path)
@@ -47,7 +111,7 @@ fn stamp(path: &Path, bytes: &[u8]) {
 
 fn plant(root: &Path) {
     fs::create_dir_all(root.join("roll")).unwrap();
-    xattr::set(root, xattr_name(), b"root").unwrap();
+    mark_extra(root, b"root");
     stamp(&root.join("roll/a.jpg"), b"jpeg");
 }
 
@@ -64,8 +128,8 @@ fn capture(root: &Path) -> Vec<Entry> {
                 Vec::new()
             },
             mtime: meta.modified().unwrap(),
-            mode: meta.mode(),
-            xattr: xattr::get(path, xattr_name()).unwrap().unwrap_or_default(),
+            mode: meta_mode(&meta),
+            xattr: read_extra(path),
         });
     }
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) {
@@ -105,10 +169,8 @@ fn lock_writes(root: &Path) {
         paths.push(path);
     }
     for path in paths {
-        let mode = fs::symlink_metadata(&path).unwrap().mode() & !0o222;
-        let mut perms = fs::symlink_metadata(&path).unwrap().permissions();
-        perms.set_mode(mode);
-        fs::set_permissions(&path, perms).unwrap();
+        let mode = locked_mode(meta_mode(&fs::symlink_metadata(&path).unwrap()));
+        apply_mode(&path, mode);
     }
 }
 

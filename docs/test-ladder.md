@@ -10,9 +10,7 @@ Safety comes before a scan of a machine that holds the only copy. Each rung has 
 
 Entry: a pull request, or a local `cargo test` of this tree.
 
-What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, `macos-14`, and `windows-2025`. The corpus is the CC0 fixtures. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
-
-**Planned:** a `windows-latest` leg beside the pinned `windows-2025` image. It is not in the matrix.
+What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, `macos-14`, `windows-2025`, and `windows-latest`. `windows-2025` is the pinned Windows image. `windows-latest` is the moving image beside it. The corpus is the CC0 fixtures. The Windows legs also cover paths longer than 260 characters, case-insensitive name collisions, reserved device names, NTFS alternate data streams, and 100 ns modification times. The in-process scale tests, including the million-item page test that does not create a million inodes, run on every leg. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
 
 `scripts/check-dest-writes.py` fails the job if production code creates, writes, renames, or removes a file outside `ingest/src/dest.rs`. The bench harness is not part of that scan. It writes synthetic timing files and does not open a user archive.
 
@@ -29,6 +27,8 @@ Entry: rung 1 is green. The host has rootless podman, or rootless docker. Rootfu
 The before/after snapshot is mtime, mode, and size. Access time is not part of it. Albumen's own reads use `O_NOATIME` on Linux, but ExifTool does not, and listing a directory can change that directory's access time. macOS has no `O_NOATIME`. Neither access time is restored.
 
 `scripts/scan-no-network.sh` is the CI form of the same idea on Ubuntu. It straces `albumen scan` and an `albumen-receive` dry-run and fails if the trace contains a socket call or a write, unlink, rename, truncate, chmod, xattr set, or `utimensat` under the source. It then repeats the scan inside the seccomp container. ExifTool is a child of scan and has to succeed with sockets denied.
+
+`scripts/no-unexpected-egress.sh` runs each binary in a user network namespace. The namespace has loopback and no route beyond it. The trace may show a connection only when the command was given that destination: `ALBUMEN_S3_ENDPOINT` for an S3 export, or the listen address for `albumen-receive --apply`. Every other address fails the run.
 
 Exit: the script prints `rung 2 exit: source copy unchanged` and the metadata diff is empty.
 
@@ -59,3 +59,13 @@ Gated: run on an owner's machine only after rungs 1-3 are green and with the own
 Use a dedicated non-admin user. Scan a copied folder, not the original volume. Take the network away with `scripts/macos-readonly-sandbox.sh`. Mount the copy read-only (`mount -u -o rdonly,noatime`, a read-only APFS snapshot, or a read-only disk image) so a read cannot change access time. macOS has no `O_NOATIME`. Without that mount, a read may update atime. Bytes, mtime, and xattrs are still left unchanged. `chmod a-w` does not replace the mount or the sandbox profile.
 
 Exit: the mounted copy's bytes, mtime, xattrs, and access time match the snapshot taken before the scan. The original volume was not the path that was scanned.
+
+## Rung 5 — Windows sandbox
+
+Entry: rungs 1–4 are green. This rung runs on a Windows machine. It is not a GitHub-hosted job.
+
+Use Windows Sandbox, or a container with the network off. Windows Sandbox is a disposable desktop. The configuration [scripts/windows-sandbox.wsb](../scripts/windows-sandbox.wsb) sets `<Networking>Disable</Networking>` and maps a copied folder read-only. `scripts/windows-sandbox.ps1` copies `fixtures/` (or `-Corpus`) into a fresh directory and writes that configuration next to the copy. It does not mount the original path.
+
+Inside the sandbox, run `albumen scan` and `albumen verify-manifest` against the mapped copy. The manifest is written outside the mapped folder. Compare the copy's bytes, modification time, and alternate data streams with the snapshot taken before the scan. A container with `--network none` is the same rung when Windows Sandbox is not available.
+
+Exit: the script prints `rung 5 exit: source copy unchanged`. The live library was not the path that was scanned.

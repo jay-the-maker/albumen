@@ -10,7 +10,6 @@
 #![cfg(unix)]
 
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime};
@@ -25,11 +24,25 @@ struct Snap {
     xattrs: Vec<(String, Vec<u8>)>,
 }
 
+#[cfg(unix)]
 fn xattr_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "albumen.trial"
     } else {
         "user.albumen-trial"
+    }
+}
+
+fn meta_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.mode()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
     }
 }
 
@@ -41,7 +54,40 @@ fn item_count() -> u64 {
 }
 
 fn mark(path: &Path) {
-    xattr::set(path, xattr_name(), b"raid").unwrap();
+    #[cfg(unix)]
+    {
+        xattr::set(path, xattr_name(), b"raid").unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(":albumen");
+        fs::write(name, b"raid").unwrap();
+    }
+}
+
+fn extra_metadata(path: &Path) -> Vec<(String, Vec<u8>)> {
+    #[cfg(unix)]
+    {
+        let mut names: Vec<_> = xattr::list(path).unwrap().collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                let value = xattr::get(path, &name).unwrap().unwrap_or_default();
+                (name.to_string_lossy().into_owned(), value)
+            })
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(":albumen");
+        match fs::read(name) {
+            Ok(value) => vec![("albumen".to_string(), value)],
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 fn touch_empty(path: &Path) {
@@ -57,12 +103,17 @@ fn sparse(path: &Path, len: u64) {
         .unwrap();
     file.set_len(len).unwrap();
     let meta = file.metadata().unwrap();
-    assert!(
-        meta.blocks() * 512 < len / 2,
-        "expected a sparse file at {}, blocks {}",
-        path.display(),
-        meta.blocks()
-    );
+    assert_eq!(meta.len(), len);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert!(
+            meta.blocks() * 512 < len / 2,
+            "expected a sparse file at {}, blocks {}",
+            path.display(),
+            meta.blocks()
+        );
+    }
 }
 
 fn build(root: &Path, items: u64) {
@@ -122,21 +173,13 @@ fn capture(root: &Path) -> Vec<Snap> {
     let mut out = Vec::new();
     fn push(path: &Path, rel: String, out: &mut Vec<Snap>) {
         let meta = fs::symlink_metadata(path).unwrap();
-        let mut names: Vec<_> = xattr::list(path).unwrap().collect();
-        names.sort();
-        let xattrs = names
-            .into_iter()
-            .map(|name| {
-                let value = xattr::get(path, &name).unwrap().unwrap_or_default();
-                (name.to_string_lossy().into_owned(), value)
-            })
-            .collect();
+        let xattrs = extra_metadata(path);
         out.push(Snap {
             rel,
             is_dir: meta.is_dir(),
             len: meta.len(),
             mtime: meta.modified().unwrap(),
-            mode: meta.mode(),
+            mode: meta_mode(&meta),
             xattrs,
         });
     }

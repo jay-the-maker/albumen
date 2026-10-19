@@ -1,0 +1,18 @@
+<Configuration>
+  <Networking>Disable</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\albumen-trial\copy</HostFolder>
+      <SandboxFolder>C:\albumen\library</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\albumen-trial\out</HostFolder>
+      <SandboxFolder>C:\albumen\out</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>cmd.exe /c echo Albumen Windows sandbox. The library is read-only at C:\albumen\library. Write the manifest under C:\albumen\out.</Command>
+  </LogonCommand>
+</Configuration>

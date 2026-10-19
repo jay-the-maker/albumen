@@ -17,16 +17,16 @@ use std::process::ExitCode;
 
 use albumen_ingest::{
     dest, export_tree, import_icloud, import_takeout_with, parse_manifest, plan_icloud,
-    plan_takeout, scan_tree, verify_scan_manifest, verify_tree, walk_sorted, write_manifest,
-    DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store, SourceRoot,
-    WalkControl,
+    plan_takeout, platform_dirs, scan_tree, verify_scan_manifest, verify_tree, walk_sorted,
+    write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
+    SourceRoot, WalkControl,
 };
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "albumen",
-    about = "Bit-exact photo library export, Takeout import, iCloud import, and read-only scan. Export and import writes require --apply or --execute."
+    about = "Bit-exact photo library export, Takeout import, iCloud import, and read-only scan. Export and import writes require --apply or --execute. platform-dirs prints native paths and creates nothing."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -55,6 +55,12 @@ enum Command {
         #[arg(long)]
         execute: bool,
     },
+    /// Print the platform config and data directories. Creates nothing.
+    ///
+    /// Linux uses XDG, macOS uses ~/Library/Application Support, and Windows
+    /// uses the roaming Known Folder. These paths are not used unless you
+    /// pass them to another command.
+    PlatformDirs,
     /// Read a library and write a JSONL manifest outside it.
     ///
     /// The source is opened read-only. Scan does not write the source.
@@ -256,6 +262,14 @@ fn run() -> Result<(), IngestError> {
                 to.display()
             );
             println!("report {}", report.display());
+            Ok(())
+        }
+        Command::PlatformDirs => {
+            let (config, data) = platform_dirs()?;
+            println!("platform-dirs");
+            println!("  config: {}", config.display());
+            println!("  data: {}", data.display());
+            println!("  creates: nothing");
             Ok(())
         }
         Command::VerifyManifest { manifest, against } => {
