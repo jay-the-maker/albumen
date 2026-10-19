@@ -1340,12 +1340,17 @@ mod tests {
         let source = tmp.path().join("library");
         fs::create_dir_all(&source).unwrap();
         let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789);
-        let path = write_file(&source, "a.txt", b"alpha", mtime);
+        let path = write_file(&source, "a.txt", b"alpha", mtime)
+            .canonicalize()
+            .unwrap();
         let manifest = tmp.path().join("scan.jsonl");
         let new_mtime = UNIX_EPOCH + Duration::new(1_700_000_000, 50);
         let _hook = HookGuard::install({
             let path = path.clone();
             move |opened: &Path| {
+                let Ok(opened) = opened.canonicalize() else {
+                    return;
+                };
                 if opened == path {
                     fs::write(&path, b"alphabet").unwrap();
                     crate::mtime::set_mtime(&path, new_mtime).unwrap();
