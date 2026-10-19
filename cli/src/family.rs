@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use albumen_ingest::family::{self, FamilyKey};
-use albumen_ingest::IngestError;
+use albumen_ingest::{export_family, plan_family_export, IngestError};
 use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
@@ -37,6 +37,24 @@ pub enum Command {
         #[arg(long, default_value = "founder")]
         name: String,
         /// Write the library. Without this or `--execute`, print the plan and write nothing.
+        #[arg(long)]
+        apply: bool,
+        /// Same as `--apply`.
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Copy every member's originals and sidecars out of the library.
+    Export {
+        /// Family library directory (the directory that contains genesis.json).
+        #[arg(long)]
+        library: PathBuf,
+        /// Destination directory. Must not be inside the library.
+        #[arg(long)]
+        to: PathBuf,
+        /// Checksum manifest. Defaults to `<to>/ALBUMEN-MANIFEST.txt`.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Copy the files. Without this or `--execute`, print the plan and write nothing.
         #[arg(long)]
         apply: bool,
         /// Same as `--apply`.
@@ -243,6 +261,37 @@ pub fn run(command: Command) -> Result<(), IngestError> {
             println!("library {}", library.display());
             println!("member {}", signing.member_id());
             println!("device {}", signing.device_id());
+            Ok(())
+        }
+        Command::Export {
+            library,
+            to,
+            manifest,
+            apply,
+            execute,
+        } => {
+            let manifest_path = manifest.unwrap_or_else(|| to.join("ALBUMEN-MANIFEST.txt"));
+            let plan = plan_family_export(&library)?;
+            if !(apply || execute) {
+                println!("dry-run: no files written. Pass --apply or --execute to copy.");
+                println!("family export");
+                println!("  library: {}", library.display());
+                println!("  to: {}", to.display());
+                println!("  manifest: {}", manifest_path.display());
+                println!("  members: {}", plan.members.len());
+                for member in &plan.members {
+                    println!("  member: {member}");
+                }
+                println!("  files: {}", plan.files);
+                return Ok(());
+            }
+            let report = export_family(&library, &to, &manifest_path)?;
+            println!("exported {} files to {}", report.count_out, to.display());
+            println!("manifest {}", manifest_path.display());
+            println!(
+                "{{\"summary\":true,\"count_in\":{},\"count_out\":{},\"mismatched\":{}}}",
+                report.count_in, report.count_out, report.mismatched
+            );
             Ok(())
         }
         Command::Add {

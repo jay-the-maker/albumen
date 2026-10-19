@@ -16,6 +16,8 @@ mod error;
 mod exiftool;
 mod export;
 pub mod family;
+mod family_export;
+mod family_source;
 mod icloud;
 mod local;
 mod mtime;
@@ -36,6 +38,8 @@ pub use export::{
     export_tree, format_manifest, parse_manifest, verify_tree, walk_sorted, write_manifest,
     DirectoryTree, ExportDest, ManifestEntry, Placed, WalkControl,
 };
+pub use family_export::{export_family, plan_family_export, FamilyExportPlan, FamilyExportReport};
+pub use family_source::FamilySource;
 pub use icloud::{import_icloud, plan_icloud, IcloudPlan, IcloudReport};
 pub use local::{copy_verify_file, LocalStore};
 pub use platform::platform_dirs;

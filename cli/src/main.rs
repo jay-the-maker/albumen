@@ -307,7 +307,11 @@ fn run() -> Result<(), IngestError> {
             let dest = open_target(&against)?;
             let ignore = manifest_ignore(&manifest, &against)?;
             verify_tree(&entries, dest.as_ref(), &ignore)?;
-            println!("verified {} files in {against}", entries.len());
+            let count = entries.len() as u64;
+            println!("verified {count} files in {against}");
+            println!(
+                "{{\"summary\":true,\"count_in\":{count},\"count_out\":{count},\"mismatched\":0}}"
+            );
             Ok(())
         }
     }
