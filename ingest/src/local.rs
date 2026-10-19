@@ -158,6 +158,8 @@ impl ReadSource {
 /// Read `source` into `data` (cleared first) through the read-only
 /// [`SourceRoot`]. `Ok(None)` when it is over [`PREFETCH_MAX_BYTES`].
 fn read_source_into(source: &Path, mut data: Vec<u8>) -> Result<Option<ReadSource>, IngestError> {
+    // Source checks before the read count as preflight too.
+    let preflight_at = crate::copy_profile::tic();
     if !source.is_file() {
         return Err(IngestError::NotAFile(source.to_path_buf()));
     }
@@ -173,6 +175,7 @@ fn read_source_into(source: &Path, mut data: Vec<u8>) -> Result<Option<ReadSourc
     if len > PREFETCH_MAX_BYTES {
         return Ok(None);
     }
+    crate::copy_profile::add_preflight(preflight_at);
     data.clear();
     data.reserve(usize::try_from(len).unwrap_or(0));
     let read_at = crate::copy_profile::tic();
@@ -508,6 +511,7 @@ fn write_synced<W>(
 where
     W: FnOnce(&SourceRoot, &fs::File, &Path) -> Result<[u8; 32], IngestError>,
 {
+    let preflight_at = crate::copy_profile::tic();
     let filename = filename.to_string();
     let root = SourceRoot::open(parent_dir(source))?;
     root.refuse_destination(dest_dir)?;
@@ -533,12 +537,15 @@ where
         armed: true,
     };
     let output = dest::open_new(&dest)?;
+    crate::copy_profile::add_preflight(preflight_at);
     let sha256 = write(&root, &output, &dest)?;
     // Streams land before the mtime is set. The write handle stays open so
     // the fsync below covers the bytes this handle wrote and the mtime.
+    let metadata_at = crate::copy_profile::tic();
     copy_named_streams(source, &dest, &filename)?;
     let expected_mtime = crate::mtime::representable_mtime(mtime);
     dest::set_mtime_on(&output, &dest, expected_mtime)?;
+    crate::copy_profile::add_metadata(metadata_at);
     sync_file(&output, &dest)?;
     drop(output);
     Ok(Pending {
