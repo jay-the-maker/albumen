@@ -10,13 +10,18 @@ import android.content.Context
 import androidx.core.app.NotificationCompat
 
 /**
- * One backup notification, replaced in place. A failure alerts. A later update
- * of a success does not add another notification. There is no rating prompt
- * and no second channel.
+ * One backup status notification, replaced in place. A failure alerts. A later
+ * update of a success does not add another notification. There is no rating
+ * prompt and no second channel. While a pass runs, WorkManager shows
+ * [ongoing] under [ONGOING_NOTIFICATION_ID]. WorkManager removes that ID with
+ * `stopForeground(true)` when the pass ends, so the status keeps its own ID.
  */
 object BackupNotifier {
     const val CHANNEL_ID = "albumen-backup"
     const val NOTIFICATION_ID = 1001
+
+    /** Foreground-service notification for a running pass. Never the status. */
+    const val ONGOING_NOTIFICATION_ID = 1002
 
     fun show(context: Context, text: String, alert: Boolean) {
         require(text.isNotBlank()) { "notification text is empty" }
