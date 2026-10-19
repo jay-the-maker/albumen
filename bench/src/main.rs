@@ -145,7 +145,7 @@ fn run() -> Result<(), String> {
             println!("{text}");
             io::stdout().flush().map_err(|err| err.to_string())?;
             eprintln!(
-                "import-throughput leg={} files={} bytes_each={} workers={} verifiers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} ceiling_mb_s={:.3} ceiling_ratio={:.4} copy_ceiling_mb_s={:.3} copy_ceiling_ratio={:.4} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={} comparison=abab rounds={} import_samples={} raw_samples={} resident_before_raw={} resident_before_import={} resident_before_copy_ceiling={} cpu_seconds={:.3} cpu_seconds_per_gb={:.3} cores={} cpu_percent={:.2} cpu_target_percent={:.1} cpu_seconds_per_1000={:.3} phase_cpu_ms={} sha_hw={} sha256_mb_s={:.0}",
+                "import-throughput leg={} files={} bytes_each={} workers={} verifiers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} ceiling_mb_s={:.3} ceiling_ratio={:.4} copy_ceiling_mb_s={:.3} copy_ceiling_ratio={:.4} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={} comparison=abab rounds={} import_samples={} raw_samples={} resident_before_raw={} resident_before_import={} resident_before_copy_ceiling={} cpu_seconds={:.3} cpu_seconds_per_gb={:.3} cpu_gb_target={:.1} cpu_gb_gate={:.1} cores={} cpu_percent={:.2} cpu_target_percent={:.1} cpu_seconds_per_1000={:.3} phase_cpu_ms={} sha_hw={} sha256_mb_s={:.0}",
                 report.leg,
                 report.files,
                 report.bytes_each,
@@ -174,6 +174,8 @@ fn run() -> Result<(), String> {
                 share_list(&report.resident_before_copy_ceiling),
                 report.cpu_seconds,
                 report.cpu_seconds_per_gb,
+                albumen_bench::CPU_SECONDS_PER_GB_TARGET,
+                albumen_bench::CPU_SECONDS_PER_GB_GATE,
                 report.cores,
                 report.cpu_percent,
                 albumen_bench::CPU_PERCENT_TARGET,
@@ -182,6 +184,16 @@ fn run() -> Result<(), String> {
                 report.sha_hw,
                 report.sha256_mb_s,
             );
+            if let Some(path) = env::var_os("ALBUMEN_THROUGHPUT_SCORECARD") {
+                use std::io::Write as _;
+                let mut out = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|err| format!("open scorecard: {err}"))?;
+                writeln!(out, "{}", albumen_bench::cpu_scorecard(&report))
+                    .map_err(|err| format!("write scorecard: {err}"))?;
+            }
             let problems = throughput_problems(&report);
             if !problems.is_empty() {
                 return Err(problems.join("\n"));

@@ -46,10 +46,19 @@ pub const DEFAULT_THROUGHPUT_BYTES: u64 = 5_000_000;
 /// Product target for import MB/s divided by raw MB/s. CI prints the ratio
 /// and does not fail below this. See `docs/performance-budgets.md`.
 pub const THROUGHPUT_RATIO_FLOOR: f64 = 0.80;
-/// Product target for import CPU: at most this percent of the machine while
-/// 1,000 photos import. Report only. The definition is
+/// The earlier import CPU target: at most this percent of the machine while
+/// 1,000 photos import. Now printed as context next to CPU seconds per GB,
+/// because it moves with disk speed. The definition is
 /// [`ThroughputReport::cpu_percent`].
 pub const CPU_PERCENT_TARGET: f64 = 10.0;
+
+/// Scored team target for CPU seconds per GB imported (10^9 bytes; copy,
+/// both SHA-256 passes, fsync, and read-back included). Report only. The
+/// derivation is in docs/performance-budgets.md.
+pub const CPU_SECONDS_PER_GB_TARGET: f64 = 2.0;
+/// Team regression gate for CPU seconds per GB imported: the import
+/// throughput job fails above it on any leg.
+pub const CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
 /// Upper bound on import workers. The pool is also limited by the CPU count
 /// and by the number of files.
 pub const MAX_IMPORT_WORKERS: usize = 8;
@@ -222,6 +231,11 @@ impl ThroughputReport {
         });
         // A second step keeps the json! macro under its recursion limit.
         value["cpu_seconds_per_gb"] = json!(self.cpu_seconds_per_gb);
+        value["cpu_seconds_per_gb_target"] = json!(CPU_SECONDS_PER_GB_TARGET);
+        value["cpu_seconds_per_gb_gate"] = json!(CPU_SECONDS_PER_GB_GATE);
+        value["cpu_seconds_per_gb_gate_passed"] = json!(cpu_gate_passes(self.cpu_seconds_per_gb));
+        value["cpu_seconds_per_gb_met"] =
+            json!(self.cpu_seconds_per_gb <= CPU_SECONDS_PER_GB_TARGET);
         value["phase_cpu_ms_per_round"] = phase_cpu_ms(self);
         value["sha_hw"] = json!(self.sha_hw);
         value["sha256_mb_s"] = json!(self.sha256_mb_s);
@@ -250,7 +264,20 @@ pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
             report.source_changed
         ));
     }
+    if !cpu_gate_passes(report.cpu_seconds_per_gb) {
+        problems.push(format!(
+            "import CPU {:.3} CPU seconds per GB is above the {:.1} regression gate",
+            report.cpu_seconds_per_gb, CPU_SECONDS_PER_GB_GATE
+        ));
+    }
     problems
+}
+
+/// The CPU gate passes at or below [`CPU_SECONDS_PER_GB_GATE`], compared at
+/// three decimals, as the job prints it.
+pub fn cpu_gate_passes(cpu_seconds_per_gb: f64) -> bool {
+    cpu_seconds_per_gb.is_finite()
+        && (cpu_seconds_per_gb * 1000.0).round() <= (CPU_SECONDS_PER_GB_GATE * 1000.0).round()
 }
 
 pub fn ratio_passes(ratio: f64) -> bool {
@@ -780,6 +807,31 @@ fn sha256_mb_s() -> f64 {
     (buf.len() * rounds) as f64 / 1_000_000.0 / seconds
 }
 
+/// Markdown scorecard for the CI step summary: CPU seconds per GB against
+/// its team gate and scored team target, with `cpu_percent` as context.
+pub fn cpu_scorecard(report: &ThroughputReport) -> String {
+    let mark = |met: bool| if met { "met" } else { "not met" };
+    format!(
+        "| import CPU ({leg}) | value | team target | |\n|---|---|---|---|\n\
+         | CPU seconds per GB imported | {gb:.2} | ≤ {gb_target:.1} scored | {gb_met} |\n\
+         | CPU seconds per GB, regression gate | {gb:.2} | ≤ {gb_gate:.1} (fails the job) | {gate_met} |\n\
+         | cpu_percent (CPU ÷ (wall × {cores} cores)), context | {pct:.1}% | | |\n\
+         | CPU seconds per 1,000 photos | {per_1000:.2} | | |\n\
+         | hardware SHA-256 | {sha_hw} ({sha_mb_s:.0} MB/s) | | |\n",
+        leg = report.leg,
+        gb = report.cpu_seconds_per_gb,
+        gb_target = CPU_SECONDS_PER_GB_TARGET,
+        gb_met = mark(report.cpu_seconds_per_gb <= CPU_SECONDS_PER_GB_TARGET),
+        gb_gate = CPU_SECONDS_PER_GB_GATE,
+        gate_met = mark(cpu_gate_passes(report.cpu_seconds_per_gb)),
+        cores = report.cores,
+        pct = report.cpu_percent,
+        per_1000 = report.cpu_seconds_per_1000,
+        sha_hw = report.sha_hw,
+        sha_mb_s = report.sha256_mb_s,
+    )
+}
+
 fn ns_to_ms(ns: u64) -> f64 {
     (ns as f64) / 1_000_000.0
 }
@@ -1016,6 +1068,18 @@ impl Drop for TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cpu_gate_passes_the_measured_legs_and_fails_above_three() {
+        // #112 on 2026-10-19: ubuntu-24.04, ubuntu-26.04, windows-2025, macos-14.
+        for measured in [1.863, 2.790, 2.932, 1.935] {
+            assert!(cpu_gate_passes(measured), "{measured}");
+        }
+        assert!(cpu_gate_passes(3.0));
+        assert!(cpu_gate_passes(3.0004));
+        assert!(!cpu_gate_passes(3.001));
+        assert!(!cpu_gate_passes(f64::NAN));
+    }
 
     #[test]
     fn vmtouch_resident_pages_parse() {

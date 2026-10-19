@@ -47,8 +47,9 @@ pub use takeout_scale::{
     measure_icloud, measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
 };
 pub use throughput::{
-    measure_throughput, optional_rate, phase_cpu_line, phase_share_line, ratio_passes,
-    throughput_problems, ThroughputReport, CPU_PERCENT_TARGET, DEFAULT_THROUGHPUT_BYTES,
+    cpu_gate_passes, cpu_scorecard, measure_throughput, optional_rate, phase_cpu_line,
+    phase_share_line, ratio_passes, throughput_problems, ThroughputReport, CPU_PERCENT_TARGET,
+    CPU_SECONDS_PER_GB_GATE, CPU_SECONDS_PER_GB_TARGET, DEFAULT_THROUGHPUT_BYTES,
     DEFAULT_THROUGHPUT_FILES, THROUGHPUT_RATIO_FLOOR,
 };
 
