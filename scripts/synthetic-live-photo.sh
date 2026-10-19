@@ -179,7 +179,8 @@ exiftool -overwrite_original \
 # -Apple:ContentIdentifier does not create a maker-note directory. ExifTool
 # will store one that already has the Apple iOS header and an IFD at byte 14.
 # Tag 0x0011 is ContentIdentifier. The string offset is from the start of the
-# block: 14 bytes of header plus an 18-byte IFD.
+# block: 14 bytes of header plus an 18-byte IFD. The output path is native()
+# because Windows Python cannot create a Git Bash /tmp path.
 "$PY" - "$CONTENT_ID" "$(native "$work/apple-makernote.bin")" <<'PY'
 import struct, sys
 text = sys.argv[1].encode("ascii") + b"\x00"
