@@ -72,6 +72,8 @@ Why the target changed: on `macos-14` the copy ceiling swung between 0.72 and 1.
 
 Every run reconciled 100 percent. In the interleaved runs, `vmtouch` found 0 to 67 percent of the source pages in the page cache before each macOS import, while both Ubuntu legs were at 100 percent. `macos-14` is at about 72 to 76 percent of its copy ceiling, so this target is still open there.
 
+The macOS import is measured with the read-back coming from the device. Since [#124](https://github.com/jay-the-maker/albumen/pull/124), the destination write sets `F_NOCACHE`, so the independent SHA-256 read-back reads the stored bytes from the device instead of from cached pages. In #124's CI the read-back read went from about 2% to 18–19% of import time. The 90% target is unchanged and includes that cost. The copy ceiling has no read-back, as before.
+
 The durability calls, both SHA-256 passes, the destination read-back, the raw sample, and the 100 percent reconciliation gate are unchanged.
 
 ## Camera RAW verify
