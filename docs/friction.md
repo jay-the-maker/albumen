@@ -22,17 +22,15 @@ A machine without Rust has a sixth step, installing the toolchain, and that path
 
 ## Phone backup
 
-Phone backup is not five steps. It sends to a receiver, so the five steps above come first. The host then adds seven more, which is over the target until the apps exist:
+The Android host sends to a receiver, so the five steps above come first. The phone then takes five steps. There is no account screen. The debug APK is installed by you. It is not a store install. The detail is [mobile-android-backup.md](mobile-android-backup.md).
 
 1. Build the host with `scripts/android-ci.sh`.
 2. Install the host debug APK on the device.
-3. Launch `HostActivity` with intent extras `photos.albumen.host.ENDPOINT`, `photos.albumen.host.USER`, and `photos.albumen.host.PASSWORD`. There is no settings screen and no account screen.
+3. Launch `HostActivity` with intent extras `photos.albumen.host.ENDPOINT`, `photos.albumen.host.USER`, and `photos.albumen.host.PASSWORD`.
 4. Grant images, video, and location. That is one system dialog. Denying images or video does not enqueue. Denying location does not start the backup, because MediaStore would strip GPS. A partial grant is not enough.
-5. Leave the device idle.
-6. Put it on a charger.
-7. Connect it to a network.
+5. Leave the phone on a network.
 
-`CameraRollBackupWorker` runs only while all three of those are true. The upload does not delete the camera-roll item.
+The first job is queued with no initial delay and a network constraint, so a verified copy can finish within 5 minutes of setup. Later backups run while the phone is idle, charging, and on a network. The upload does not delete the camera-roll item. iOS background upload is still the scoped extension in [camera-roll-scope.md](camera-roll-scope.md).
 
 ## Hard rules
 
@@ -42,7 +40,7 @@ Phone backup is not five steps. It sends to a receiver, so the five steps above 
 - There is no delete tool. The CLI has no move.
 - A backup that would strip GPS does not start, and the message says why.
 - The receiver does not listen until you pass `--webdav`, `--sftp`, or `--ftp`.
-- The Android worker does not run unless the device is idle, charging, and on a network.
+- The Android periodic worker does not run unless the device is idle, charging, and on a network. The first job after setup runs on a network so a verified copy can finish within 5 minutes.
 
 ### No account required
 

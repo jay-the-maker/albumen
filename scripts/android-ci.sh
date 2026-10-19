@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Compile the Android camera-roll library and host app, and run their JVM unit tests.
+# Compile the Android camera-roll library and host app, and run their unit tests.
+# Robolectric runs inside :backup:testDebugUnitTest. The emulator job is separate.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
