@@ -115,6 +115,16 @@ impl PrefetchedSource {
 /// returns `Ok(None)` when the file is larger than [`PREFETCH_MAX_BYTES`];
 /// the caller copies that file with [`copy_verify_file`].
 pub fn prefetch_source(source: &Path) -> Result<Option<PrefetchedSource>, IngestError> {
+    prefetch_source_into(source, Vec::new())
+}
+
+/// [`prefetch_source`] into `buf`, which is cleared first. A pipeline hands
+/// back the buffer of a file it has written, so the next read lands in
+/// memory that is already mapped.
+fn prefetch_source_into(
+    source: &Path,
+    mut data: Vec<u8>,
+) -> Result<Option<PrefetchedSource>, IngestError> {
     if !source.is_file() {
         return Err(IngestError::NotAFile(source.to_path_buf()));
     }
@@ -130,7 +140,8 @@ pub fn prefetch_source(source: &Path) -> Result<Option<PrefetchedSource>, Ingest
     if len > PREFETCH_MAX_BYTES {
         return Ok(None);
     }
-    let mut data = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    data.clear();
+    data.reserve(usize::try_from(len).unwrap_or(0));
     let read_at = crate::copy_profile::tic();
     input
         .read_to_end(&mut data)
@@ -209,6 +220,7 @@ pub fn copy_verify_files_pipelined<F>(
             let (read_tx, read_rx) =
                 sync_channel::<(usize, Result<Option<PrefetchedSource>, IngestError>)>(1);
             let (sync_tx, sync_rx) = sync_channel::<(usize, Synced)>(4);
+            let (spare_tx, spare_rx) = sync_channel::<Vec<u8>>(2);
             let next = &next;
             let stop = &stop;
             let on_done = &on_done;
@@ -221,7 +233,11 @@ pub fn copy_verify_files_pipelined<F>(
                     let Some(source) = sources.get(index) else {
                         break;
                     };
-                    if read_tx.send((index, prefetch_source(source))).is_err() {
+                    let buf = spare_rx.try_recv().unwrap_or_default();
+                    if read_tx
+                        .send((index, prefetch_source_into(source, buf)))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -232,10 +248,14 @@ pub fn copy_verify_files_pipelined<F>(
                 }
                 for (index, prefetched) in read_rx {
                     let synced = match prefetched {
-                        Ok(Some(prefetched)) => match write_prefetched(prefetched, dest_dir) {
-                            Ok(pending) => Synced::Pending(pending),
-                            Err(err) => Synced::Done(Err(err)),
-                        },
+                        Ok(Some(prefetched)) => {
+                            let (written, buf) = write_prefetched(prefetched, dest_dir);
+                            let _ = spare_tx.try_send(buf);
+                            match written {
+                                Ok(pending) => Synced::Pending(pending),
+                                Err(err) => Synced::Done(Err(err)),
+                            }
+                        }
                         Ok(None) => Synced::Done(copy_verify_file(&sources[index], dest_dir)),
                         Err(err) => Synced::Done(Err(err)),
                     };
@@ -344,7 +364,11 @@ impl Verified {
     }
 }
 
-fn write_prefetched(prefetched: PrefetchedSource, dest_dir: &Path) -> Result<Pending, IngestError> {
+/// Write and file-sync a prefetched file. The buffer comes back for reuse.
+fn write_prefetched(
+    prefetched: PrefetchedSource,
+    dest_dir: &Path,
+) -> (Result<Pending, IngestError>, Vec<u8>) {
     let PrefetchedSource {
         source,
         filename,
@@ -352,7 +376,7 @@ fn write_prefetched(prefetched: PrefetchedSource, dest_dir: &Path) -> Result<Pen
         data,
         sha256,
     } = prefetched;
-    write_synced(&source, &filename, dest_dir, mtime, |_, output, dest| {
+    let written = write_synced(&source, &filename, dest_dir, mtime, |_, output, dest| {
         let write_at = crate::copy_profile::tic();
         let mut writer = output;
         writer
@@ -360,7 +384,8 @@ fn write_prefetched(prefetched: PrefetchedSource, dest_dir: &Path) -> Result<Pen
             .map_err(|err| IngestError::io(dest, err))?;
         crate::copy_profile::add_write(write_at);
         Ok(sha256)
-    })
+    });
+    (written, data)
 }
 
 /// The destination half of a copy: checks, write, streams, mtime, file

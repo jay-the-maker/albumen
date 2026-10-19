@@ -11,8 +11,7 @@
 //! destination is read back and hashed again. Files run on a bounded worker
 //! pool so that hash work overlaps I/O. Each lane reads and hashes the next
 //! file, writes and syncs the current one, and reads back and directory-syncs
-//! the one before, on three threads. On Apple there is one lane, because
-//! concurrent `F_FULLFSYNC` calls wait on each other. The pool is `available_parallelism`
+//! the one before, on three threads. Each lane reuses its read buffers. The pool is `available_parallelism`
 //! capped at [`MAX_IMPORT_WORKERS`]. The raw write stays sequential. It uses
 //! the same durability calls as one file of the import: `open_new`,
 //! `File::sync_all`, and `dest::sync_dir` after every file. On macOS that
@@ -256,17 +255,11 @@ pub fn measure_throughput(
     })
 }
 
-/// Import lanes for this run. `F_FULLFSYNC` flushes the whole drive cache,
-/// so on Apple concurrent file syncs wait on each other. One lane keeps a
-/// single file sync in flight there, and its prefetch and verify threads
-/// overlap the read, hash, and read-back with it. Other systems use the
-/// worker pool.
+/// Import lanes for this run: the worker pool on every system. Each lane
+/// keeps one file sync in flight, and its prefetch and verify threads
+/// overlap the read, hash, and read-back with it.
 fn import_lanes(files: u64) -> usize {
-    if cfg!(target_vendor = "apple") {
-        1
-    } else {
-        import_workers(files)
-    }
+    import_workers(files)
 }
 
 fn import_workers(files: u64) -> usize {
