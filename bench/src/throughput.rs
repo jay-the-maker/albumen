@@ -83,6 +83,12 @@ pub struct CpuRound {
     pub normalized: f64,
     /// Thread CPU of the write phase in this round, in ms.
     pub write_ms: f64,
+    /// Process user and system CPU in this round, in seconds (Unix).
+    pub user_s: f64,
+    pub sys_s: f64,
+    /// Write calls and bytes the import made in this round.
+    pub write_calls: u64,
+    pub write_bytes: u64,
 }
 
 const JPEG_PREFIX: &[u8] = &[
@@ -280,7 +286,7 @@ impl ThroughputReport {
         value["cpu_rounds"] = json!(self
             .cpu_rounds
             .iter()
-            .map(|round| json!({"raw": round.raw, "normalized": round.normalized, "write_ms": round.write_ms}))
+            .map(|round| json!({"raw": round.raw, "normalized": round.normalized, "write_ms": round.write_ms, "user_s": round.user_s, "sys_s": round.sys_s, "write_calls": round.write_calls, "write_bytes": round.write_bytes}))
             .collect::<Vec<_>>());
         value["round_order"] = json!(self.round_order);
         value["cpu_seconds_per_gb_gate_passed"] =
@@ -404,6 +410,7 @@ pub fn measure_throughput(
     let mut cpu_rounds = Vec::with_capacity(rounds);
     let mut before_hash = 0u64;
     let mut before_write = 0u64;
+    let mut before_calls = albumen_ingest::write_calls();
     for round in 0..rounds {
         let import_first = match order {
             RoundOrder::RawFirst => false,
@@ -424,10 +431,19 @@ pub fn measure_throughput(
         resident_before_import.push(resident_share(&source_paths));
         fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
         let cpu_before = process_cpu_time()?;
+        let split_before = albumen_win::process_user_sys().ok();
         let started = Instant::now();
         let (out, bad, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
         let seconds = started.elapsed().as_secs_f64().max(1e-9);
         let round_cpu = process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+        let (user_s, sys_s) = match (split_before, albumen_win::process_user_sys().ok()) {
+            (Some((u0, s0)), Some((u1, s1))) => (
+                u1.saturating_sub(u0).as_secs_f64(),
+                s1.saturating_sub(s0).as_secs_f64(),
+            ),
+            _ => (f64::NAN, f64::NAN),
+        };
+        let calls_now = albumen_ingest::write_calls();
         cpu_seconds += round_cpu;
         let so_far = copy_phases();
         let hash_now = hash_cpu_ns(&so_far);
@@ -437,7 +453,12 @@ pub fn measure_throughput(
             raw: round_cpu / gb,
             normalized: normalized_cpu_seconds_per_gb(round_cpu / gb, round_hash, sha_rate),
             write_ms: write_now.saturating_sub(before_write) as f64 / 1e6,
+            user_s,
+            sys_s,
+            write_calls: calls_now.0.saturating_sub(before_calls.0),
+            write_bytes: calls_now.1.saturating_sub(before_calls.1),
         });
+        before_calls = calls_now;
         before_hash = hash_now;
         before_write = write_now;
         import_seconds_total += seconds;
@@ -593,8 +614,14 @@ pub fn cpu_rounds_line(rounds: &[CpuRound]) -> String {
         .iter()
         .map(|round| {
             format!(
-                "{:.3}/{:.3}/{:.0}",
-                round.raw, round.normalized, round.write_ms
+                "{:.3}/{:.3}/{:.0}/u{:.2}/s{:.2}/w{}x{}",
+                round.raw,
+                round.normalized,
+                round.write_ms,
+                round.user_s,
+                round.sys_s,
+                round.write_calls,
+                round.write_bytes / round.write_calls.max(1)
             )
         })
         .collect::<Vec<_>>()
@@ -1413,6 +1440,10 @@ mod tests {
                     raw: 0.8,
                     normalized: 0.8,
                     write_ms: 1.0,
+                    user_s: 0.0,
+                    sys_s: 0.0,
+                    write_calls: 0,
+                    write_bytes: 0,
                 };
                 6
             ],
@@ -1449,6 +1480,10 @@ mod tests {
             raw: normalized,
             normalized,
             write_ms: 0.0,
+            user_s: 0.0,
+            sys_s: 0.0,
+            write_calls: 0,
+            write_bytes: 0,
         };
         let mut rounds: Vec<CpuRound> = [2.6, 2.7, 4.1, 2.8, 2.9, 3.6].map(round).to_vec();
         let mut values: Vec<f64> = rounds.iter().map(|r| r.normalized).collect();
@@ -1460,7 +1495,10 @@ mod tests {
         let mut values: Vec<f64> = rounds.iter().map(|r| r.normalized).collect();
         assert!(!cpu_gate_passes(median(&mut values)));
         assert_eq!(MIN_CPU_ROUNDS, 5);
-        assert_eq!(cpu_rounds_line(&[round(2.5)]), "2.500/2.500/0");
+        assert_eq!(
+            cpu_rounds_line(&[round(2.5)]),
+            "2.500/2.500/0/u0.00/s0.00/w0x0"
+        );
     }
 
     #[test]
