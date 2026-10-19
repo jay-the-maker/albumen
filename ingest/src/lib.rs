@@ -20,6 +20,7 @@ pub mod family;
 mod family_export;
 mod family_source;
 mod icloud;
+pub mod index;
 pub mod ledger;
 mod local;
 mod mtime;
