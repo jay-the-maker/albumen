@@ -90,6 +90,15 @@ pub struct ThroughputReport {
     pub raw_samples: Vec<f64>,
     pub phases: CopyPhases,
     pub ratio: f64,
+    /// Ceiling under the import's durability: the same number of workers
+    /// as the import, each writing files from a warm buffer with
+    /// `File::sync_all` on every file and `dest::sync_dir` after every file.
+    /// No source read, no hash, no read-back. Median of the samples.
+    pub ceiling_mb_s: f64,
+    pub ceiling_samples: Vec<f64>,
+    /// [`Self::ceiling_mb_s`] divided by [`Self::raw_mb_s`]. The import
+    /// ratio cannot reach this with the same syncs.
+    pub ceiling_ratio: f64,
     pub count_in: u64,
     pub count_out: u64,
     pub mismatched: u64,
@@ -140,6 +149,9 @@ impl ThroughputReport {
             "phase_ms": phase_ms(&self.phases),
             "phase_share": phase_share(&self.phases),
             "ratio": self.ratio,
+            "ceiling_mb_s": self.ceiling_mb_s,
+            "ceiling_samples": self.ceiling_samples,
+            "ceiling_ratio": self.ceiling_ratio,
             "count_in": self.count_in,
             "count_out": self.count_out,
             "mismatched": self.mismatched,
@@ -224,6 +236,16 @@ pub fn measure_throughput(
         &mut raw_samples,
         &mut plain_samples,
     )?;
+    let mut ceiling_samples = Vec::with_capacity(RAW_SAMPLES_PER_SIDE);
+    for _ in 0..RAW_SAMPLES_PER_SIDE {
+        ceiling_samples.push(ceiling_sample(
+            &root.path.join("ceiling"),
+            files,
+            bytes_each,
+            workers,
+        )?);
+    }
+    let ceiling_mb_s = median(&mut ceiling_samples.clone());
     let expected_bytes = files.saturating_mul(bytes_each);
     let import_mb_s = (imported_bytes as f64) / 1_000_000.0 / import_seconds;
     let raw_mb_s = median(&mut raw_samples.clone());
@@ -247,6 +269,9 @@ pub fn measure_throughput(
         raw_samples,
         phases,
         ratio: import_mb_s / raw_mb_s,
+        ceiling_mb_s,
+        ceiling_samples,
+        ceiling_ratio: ceiling_mb_s / raw_mb_s,
         count_in: files,
         count_out,
         mismatched,
@@ -582,6 +607,67 @@ fn raw_write(dir: &Path, files: u64, bytes_each: u64, kind: RawSync) -> Result<(
     Ok(())
 }
 
+/// One import-shaped raw sample on `workers` threads. Each file gets the
+/// import's durability calls, `File::sync_all` then `dest::sync_dir`, and
+/// nothing else.
+fn ceiling_sample(dir: &Path, files: u64, bytes_each: u64, workers: usize) -> Result<f64, String> {
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|err| format!("remove ceiling sample: {err}"))?;
+    }
+    fs::create_dir_all(dir).map_err(|err| format!("create ceiling dest: {err}"))?;
+    let next = AtomicU64::new(0);
+    let error: Mutex<Option<String>> = Mutex::new(None);
+    let started = Instant::now();
+    thread::scope(|scope| {
+        for _ in 0..workers.max(1) {
+            scope.spawn(|| {
+                let mut buf = vec![0u8; 1024 * 1024];
+                fill(&mut buf, 0);
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= files {
+                        break;
+                    }
+                    let path = dir.join(format!("ceiling-{index:04}.bin"));
+                    let result = (|| -> Result<(), String> {
+                        let mut file = open_new(&path).map_err(|err| err.to_string())?;
+                        let mut left = bytes_each;
+                        while left > 0 {
+                            let n =
+                                usize::try_from(left.min(buf.len() as u64)).unwrap_or(buf.len());
+                            file.write_all(&buf[..n]).map_err(|err| {
+                                format!("ceiling write {}: {err}", path.display())
+                            })?;
+                            left -= n as u64;
+                        }
+                        sync_raw_file(&file, &path, RawSync::Import)?;
+                        drop(file);
+                        sync_raw_dir(dir, RawSync::Import)
+                    })();
+                    if let Err(err) = result {
+                        record_error(&error, err);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let seconds = started.elapsed().as_secs_f64().max(1e-9);
+    if let Some(err) = error
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+    {
+        return Err(err);
+    }
+    fs::remove_dir_all(dir).map_err(|err| format!("remove ceiling sample: {err}"))?;
+    let mb_s = (files.saturating_mul(bytes_each) as f64) / 1_000_000.0 / seconds;
+    if !mb_s.is_finite() || mb_s <= 0.0 {
+        return Err("a ceiling sample was not a positive number".to_string());
+    }
+    Ok(mb_s)
+}
+
 fn sync_raw_file(file: &File, path: &Path, kind: RawSync) -> Result<(), String> {
     match kind {
         RawSync::Import => file
@@ -725,6 +811,9 @@ mod tests {
             raw_samples: vec![600.0, 625.0, 650.0],
             phases: CopyPhases::default(),
             ratio: 0.448,
+            ceiling_mb_s: 600.0,
+            ceiling_samples: vec![600.0],
+            ceiling_ratio: 0.96,
             count_in: 1_000,
             count_out: 1_000,
             mismatched: 0,

@@ -193,14 +193,13 @@ pub fn store_prefetched(
 /// Copy `sources` into `dest_dir` on `lanes` lanes.
 ///
 /// Each lane has three threads. The first reads and hashes the next source.
-/// The second writes the current file and syncs it. The third reads the
-/// destination back, checks the SHA-256 and mtime, then syncs the
-/// directory. A directory sync covers every file that was created before it
-/// started, so the third thread may sync once for the files waiting in its
-/// queue. A file is reported to `on_done` only after its own file sync, its
-/// read-back, and a directory sync that started after it was created. Files
-/// over [`PREFETCH_MAX_BYTES`] go through [`copy_verify_file`]. `on_done`
-/// gets the index into `sources`. It returns `false` to stop the copy early.
+/// The second writes the current file, syncs it, then syncs the directory,
+/// so each lane has one full sync in flight. The third reads the
+/// destination back and checks the SHA-256 and mtime. A file is reported to
+/// `on_done` only after its own file sync, its own directory sync, and its
+/// read-back. Files over [`PREFETCH_MAX_BYTES`] go through
+/// [`copy_verify_file`]. `on_done` gets the index into `sources`. It
+/// returns `false` to stop the copy early.
 pub fn copy_verify_files_pipelined<F>(
     sources: &[PathBuf],
     dest_dir: &Path,
@@ -251,7 +250,15 @@ pub fn copy_verify_files_pipelined<F>(
                         Ok(Some(prefetched)) => {
                             let (written, buf) = write_prefetched(prefetched, dest_dir);
                             let _ = spare_tx.try_send(buf);
-                            match written {
+                            match written.and_then(|pending| {
+                                // The directory sync runs here, right after
+                                // this file's sync, so a lane has one
+                                // full sync in flight at a time.
+                                let dir_at = crate::copy_profile::tic();
+                                let synced = dest::sync_dir(dest_dir);
+                                crate::copy_profile::add_dir_sync(dir_at);
+                                synced.map(|()| pending)
+                            }) {
                                 Ok(pending) => Synced::Pending(pending),
                                 Err(err) => Synced::Done(Err(err)),
                             }
@@ -268,54 +275,12 @@ pub fn copy_verify_files_pipelined<F>(
                 if profile {
                     crate::copy_profile::enable_thread();
                 }
-                while let Ok(first) = sync_rx.recv() {
-                    let mut batch = vec![first];
-                    while let Ok(more) = sync_rx.try_recv() {
-                        batch.push(more);
-                    }
-                    let mut results = Vec::with_capacity(batch.len());
-                    let mut waiting = Vec::new();
-                    for (index, synced) in batch {
-                        match synced {
-                            Synced::Done(result) => results.push((index, result)),
-                            Synced::Pending(pending) => match pending.verify() {
-                                Ok(verified) => waiting.push((index, verified)),
-                                Err(err) => results.push((index, Err(err))),
-                            },
-                        }
-                    }
-                    if !waiting.is_empty() {
-                        let dir_at = crate::copy_profile::tic();
-                        let synced = dest::sync_dir(dest_dir);
-                        crate::copy_profile::add_dir_sync(dir_at);
-                        match synced {
-                            Ok(()) => {
-                                for (index, verified) in waiting {
-                                    results.push((index, Ok(verified.keep())));
-                                }
-                            }
-                            Err(err) => {
-                                let message = err.to_string();
-                                for (index, _) in waiting {
-                                    results.push((
-                                        index,
-                                        Err(IngestError::store(
-                                            "sync_dir",
-                                            "local",
-                                            message.clone(),
-                                        )),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    let mut go_on = true;
-                    for (index, result) in results {
-                        if !on_done(index, result) {
-                            go_on = false;
-                        }
-                    }
-                    if !go_on {
+                for (index, synced) in sync_rx {
+                    let result = match synced {
+                        Synced::Done(result) => result,
+                        Synced::Pending(pending) => pending.verify().map(Verified::keep),
+                    };
+                    if !on_done(index, result) {
                         stop.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -331,8 +296,7 @@ enum Synced {
 }
 
 /// A destination file that is written, has its mtime, and is synced, but
-/// has not been read back or had its directory synced. Dropping it removes
-/// the file.
+/// has not been read back. Dropping it removes the file.
 struct Pending {
     dest: PathBuf,
     filename: String,
