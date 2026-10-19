@@ -18,10 +18,10 @@ use std::process::ExitCode;
 
 use albumen_bench::{
     load_baseline, measure, measure_icloud, measure_takeout, measure_throughput, optional_rate,
-    phase_share_line, regression_problems, scale_problems, throughput_problems, to_json, Report,
-    DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS, DEFAULT_TAKEOUT_ITEMS,
-    DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES, TAKEOUT_BUDGET_SECONDS,
-    THROUGHPUT_RATIO_FLOOR,
+    phase_cpu_line, phase_share_line, regression_problems, scale_problems, throughput_problems,
+    to_json, Report, DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS,
+    DEFAULT_TAKEOUT_ITEMS, DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES,
+    TAKEOUT_BUDGET_SECONDS, THROUGHPUT_RATIO_FLOOR,
 };
 
 fn main() -> ExitCode {
@@ -145,7 +145,7 @@ fn run() -> Result<(), String> {
             println!("{text}");
             io::stdout().flush().map_err(|err| err.to_string())?;
             eprintln!(
-                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={} cpu_seconds={:.3} cores={} cpu_percent={:.2} cpu_seconds_per_1000={:.3} cpu_target_percent={:.1}",
+                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={} cpu_seconds={:.3} cores={} cpu_percent={:.2} cpu_seconds_per_1000={:.3} cpu_target_percent={:.1} worker_cpu_seconds={:.3} phase_cpu_ms={} sha_hw={} sha256_mb_s={:.0}",
                 report.leg,
                 report.files,
                 report.bytes_each,
@@ -165,7 +165,11 @@ fn run() -> Result<(), String> {
                 report.cores,
                 report.cpu_percent,
                 report.cpu_seconds_per_1000,
-                albumen_bench::CPU_PERCENT_TARGET
+                albumen_bench::CPU_PERCENT_TARGET,
+                report.worker_cpu_seconds,
+                phase_cpu_line(&report),
+                report.sha_hw,
+                report.sha256_mb_s
             );
             let problems = throughput_problems(&report);
             if !problems.is_empty() {
