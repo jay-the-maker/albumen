@@ -39,7 +39,7 @@ pub use store::{
     copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,
     VerifiedObject,
 };
-pub use takeout::{import_takeout, TakeoutReport};
+pub use takeout::{import_takeout, import_takeout_with, TakeoutReport};
 
 #[cfg(test)]
 mod test_support {

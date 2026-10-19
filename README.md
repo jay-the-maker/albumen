@@ -49,10 +49,10 @@ The container is the same server. The image entrypoint is `albumen-mcp --library
 
 ```bash
 docker build -t albumen-mcp .
-docker run --rm -i -v "$PWD/library:/library" albumen-mcp
+docker run --rm -i --mount type=bind,src="$PWD/library",dst=/library,readonly albumen-mcp
 ```
 
-Tag `v0.1.0` publishes `ghcr.io/jay-the-maker/albumen-mcp:0.1.0` and the [server.json](server.json) entry `io.github.jay-the-maker/albumen` to the MCP Registry. [glama.json](glama.json) names the maintainer for Glama. This repository does not submit Glama, Smithery, PulseMCP, or mcp.so by itself.
+That mount is read-only. A writable directory for opt-in export or upload is a separate mount at `/destination`, not the library of originals. Tag `v0.1.1` publishes `ghcr.io/jay-the-maker/albumen-mcp:0.1.1` and the [server.json](server.json) entry `io.github.jay-the-maker/albumen` to the MCP Registry. [glama.json](glama.json) names the maintainer for Glama. This repository does not submit Glama, Smithery, PulseMCP, or mcp.so by itself.
 
 ## Ingest core
 

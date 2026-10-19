@@ -112,6 +112,53 @@ fn import_takeout_reconciles_a_synthetic_split_download() {
 }
 
 #[test]
+fn import_takeout_derive_xmp_leaves_the_original() {
+    let root = tempfile::tempdir().unwrap();
+    let incoming = root.path().join("incoming");
+    fs::create_dir(&incoming).unwrap();
+    let archive = incoming.join("takeout.zip");
+    let jpeg = b"\xff\xd8\xff\xdb synthetic-cli-xmp-jpeg";
+    let json = br#"{"title":"IMG_0001.jpg","description":"synthetic fixture","creationTime":{"timestamp":"1600000000","formatted":"synthetic"},"photoTakenTime":{"timestamp":"1590000000","formatted":"synthetic"},"geoData":{"latitude":0.0,"longitude":0.0,"altitude":0.0,"latitudeSpan":0.0,"longitudeSpan":0.0}}"#;
+    write_zip(
+        &archive,
+        &[
+            ("Takeout/IMG_0001.jpg", jpeg.as_slice()),
+            ("Takeout/IMG_0001.jpg.json", json.as_slice()),
+        ],
+    );
+    let library = root.path().join("library");
+    let report = root.path().join("report.jsonl");
+    let output = albumen()
+        .args(["import-takeout", "--derive-xmp", "--from"])
+        .arg(&archive)
+        .arg("--to")
+        .arg(&library)
+        .arg("--report")
+        .arg(&report)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    let photo = library.join("Takeout/IMG_0001.jpg");
+    assert_eq!(fs::read(&photo).unwrap(), jpeg);
+    assert_eq!(
+        fs::read(library.join("Takeout/IMG_0001.jpg.json")).unwrap(),
+        json
+    );
+    let xmp = fs::read_to_string(library.join("Takeout/IMG_0001.jpg.xmp")).unwrap();
+    assert!(xmp.contains("2020-05-20T18:40:00Z"), "{xmp}");
+    assert!(!xmp.contains("2020-09-13T12:26:40Z"), "{xmp}");
+    let summary = fs::read_to_string(&report).unwrap();
+    assert!(summary.contains("\"count_in\":2"), "{summary}");
+    assert!(summary.contains("\"count_out\":2"), "{summary}");
+    assert!(summary.contains("\"kind\":\"derived-xmp\""));
+}
+
+#[test]
 fn import_takeout_exits_nonzero_on_a_mismatch() {
     let root = tempfile::tempdir().unwrap();
     let incoming = root.path().join("incoming");
