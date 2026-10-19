@@ -76,6 +76,7 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     if !source.is_file() {
         return Err(IngestError::NotAFile(source.to_path_buf()));
     }
+    let preflight_at = crate::copy_profile::tic();
     let filename = file_name_str(source)?;
     check_filename(&filename)?;
     let root = SourceRoot::open(parent_dir(source))?;
@@ -104,12 +105,15 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     };
     let input = root.open_read(source)?;
     let output = dest::open_new(&dest)?;
+    crate::copy_profile::add_preflight(preflight_at);
     let written_hash = copy_hashed(input, &output, source, &dest)?;
     // Streams land before the mtime is set. The write handle stays open so
     // the fsync below covers the bytes this handle wrote and the mtime.
+    let metadata_at = crate::copy_profile::tic();
     copy_named_streams(source, &dest, &filename)?;
     let expected_mtime = crate::mtime::representable_mtime(mtime);
     dest::set_mtime_on(&output, &dest, expected_mtime)?;
+    crate::copy_profile::add_metadata(metadata_at);
     sync_file(&output, &dest)?;
     drop(output);
 
