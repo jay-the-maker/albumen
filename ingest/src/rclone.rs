@@ -14,6 +14,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use crate::checksum::sha256_hex;
@@ -35,6 +36,9 @@ pub struct RcloneStore {
     flags: Vec<String>,
     secrets: Vec<String>,
     label: String,
+    /// Host and port this store contacts. Logged once, before the first rclone run.
+    contact: Option<(String, u16)>,
+    contact_logged: AtomicBool,
 }
 
 impl std::fmt::Debug for RcloneStore {
@@ -74,6 +78,8 @@ impl RcloneStore {
             root: ":sftp:".into(),
             label: format!("sftp://{user}@{host}:{port}"),
             bin,
+            contact: Some((host.to_string(), port)),
+            contact_logged: AtomicBool::new(false),
         })
     }
 
@@ -85,6 +91,7 @@ impl RcloneStore {
     ) -> Result<Self, IngestError> {
         let bin = bin.into();
         let obscured = obscure(&bin, password)?;
+        let (host, port) = crate::ledger::endpoint_host_port(url)?;
         Ok(Self {
             flags: vec![
                 "--webdav-url".into(),
@@ -98,6 +105,8 @@ impl RcloneStore {
             root: ":webdav:".into(),
             label: format!("webdav://{url}"),
             bin,
+            contact: Some((host, port)),
+            contact_logged: AtomicBool::new(false),
         })
     }
 
@@ -121,6 +130,8 @@ impl RcloneStore {
             root: format!(":b2:{}/{}", bucket, normalize_prefix(prefix)),
             label: format!("b2://{bucket}/{prefix}"),
             bin: bin.into(),
+            contact: Some(("api.backblazeb2.com".to_string(), 443)),
+            contact_logged: AtomicBool::new(false),
         })
     }
 
@@ -135,6 +146,7 @@ impl RcloneStore {
         prefix: &str,
     ) -> Result<Self, IngestError> {
         check_bucket(bucket)?;
+        let (host, port) = crate::ledger::endpoint_host_port(endpoint)?;
         let store = Self {
             flags: vec![
                 "--s3-provider".into(),
@@ -151,6 +163,8 @@ impl RcloneStore {
             root: format!(":s3:{}/{}", bucket, normalize_prefix(prefix)),
             label: format!("s3://{bucket}/{prefix}"),
             bin: bin.into(),
+            contact: Some((host, port)),
+            contact_logged: AtomicBool::new(false),
         };
         store.ensure_s3_bucket(bucket)?;
         Ok(store)
@@ -328,7 +342,22 @@ impl RcloneStore {
         Err(self.fail("deletefile", filename, &output))
     }
 
+    fn note_contact(&self) -> Result<(), IngestError> {
+        let Some((host, port)) = &self.contact else {
+            return Ok(());
+        };
+        if self.contact_logged.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        if let Err(err) = crate::ledger::record_anchored_connection("connect", host, *port) {
+            self.contact_logged.store(false, Ordering::Relaxed);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn run(&self, args: &[String]) -> Result<Output, IngestError> {
+        self.note_contact()?;
         let mut command = Command::new(&self.bin);
         command
             .arg("--config")

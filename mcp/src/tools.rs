@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Library tools. Search and browse only read. Export and upload call
+//! Library tools. Search, browse, and ledger only read. Export and upload call
 //! `copy_verify` and refuse to overwrite. Nothing here deletes a source or
 //! renames one into quarantine.
 
@@ -53,6 +53,7 @@ impl Library {
         } else {
             destination
         };
+        albumen_ingest::ledger::anchor(&root, "export");
         Ok(Self {
             root,
             destination,
@@ -64,7 +65,7 @@ impl Library {
     }
 
     pub fn tool_defs(&self) -> Vec<Value> {
-        let mut tools = vec![search_def(), browse_def()];
+        let mut tools = vec![search_def(), browse_def(), ledger_def()];
         if self.enable_export {
             tools.push(export_def());
         }
@@ -79,6 +80,7 @@ impl Library {
         match name {
             "search" => self.search(arguments),
             "browse" => self.browse(arguments),
+            "ledger" => self.ledger(arguments),
             "export" => {
                 if !self.enable_export {
                     return Err(
@@ -251,6 +253,7 @@ impl Library {
         if !self.apply {
             return export_plan(&source, to, &manifest);
         }
+        albumen_ingest::ledger::anchor(&self.root, "export");
         let dest = open_target(to)?;
         let entries = export_tree(&source, dest.as_ref()).map_err(show)?;
         if !to.starts_with("s3://") {
@@ -269,6 +272,14 @@ impl Library {
             "manifest": manifest.display().to_string(),
             "destination": to,
         }))
+    }
+
+    fn ledger(&self, arguments: &Value) -> Result<Value, String> {
+        if arguments.as_object().is_some_and(|map| !map.is_empty()) {
+            return Err("ledger takes no arguments".to_string());
+        }
+        let ledger = albumen_ingest::ledger::build(&self.root, None).map_err(show)?;
+        serde_json::to_value(ledger).map_err(|err| err.to_string())
     }
 
     fn upload(&self, arguments: &Value) -> Result<Value, String> {
@@ -664,6 +675,18 @@ fn search_def() -> Value {
                 "limit": {"type": "integer", "minimum": 0, "description": "Page size. Soft default is 1000, or ALBUMEN_SEARCH_PAGE. There is no maximum."},
                 "cursor": {"type": "string", "description": "Return matches strictly after this relative path."}
             },
+            "additionalProperties": false
+        }
+    })
+}
+
+fn ledger_def() -> Value {
+    json!({
+        "name": "ledger",
+        "description": "Read every stored file in the library, every analysis that ran on-device, and every network destination recorded beside the library. The read is local. Nothing is written and no connection is opened.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
             "additionalProperties": false
         }
     })

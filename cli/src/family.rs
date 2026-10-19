@@ -513,6 +513,7 @@ pub fn run(command: Command) -> Result<(), IngestError> {
             if !prefix.is_empty() {
                 config.prefix = prefix;
             }
+            albumen_ingest::ledger::anchor(&library, "export");
             let store = albumen_ingest::S3Store::connect(config)?;
             let count = family::publish_member_s3(&library, signing.member_id(), &store)?;
             println!("published {count}");

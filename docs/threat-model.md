@@ -52,7 +52,7 @@ The published image mounts the library at `/library` read-only. CI runs `scripts
 
 `scripts/no-unexpected-egress.sh` runs `albumen`, `albumen-mcp`, and `albumen-receive` in a user network namespace. The namespace has loopback and no route beyond it. `strace` logs every `connect`, `sendto`, `sendmsg`, and `bind`. `scripts/check-egress.py` fails the run when a logged address is not a destination that invocation named.
 
-A scan, a local export, a Takeout or iCloud dry-run, `platform-dirs`, an MCP search, and a receive dry-run name no network destination. Any Internet address fails that run. `export --apply` to `s3://` may connect to `ALBUMEN_S3_ENDPOINT` and nowhere else. `albumen-receive --apply` may bind the listen address it was given. It does not connect out. The CI job is the `sandbox` job on `ubuntu-24.04`.
+A scan, a local export, a Takeout or iCloud dry-run, `platform-dirs`, an MCP search, `albumen ledger`, and a receive dry-run name no network destination. Any Internet address fails that run. `export --apply` to `s3://` may connect to `ALBUMEN_S3_ENDPOINT` and nowhere else. `albumen-receive --apply` may bind the listen address it was given. It does not connect out. Each of those contacts is appended to a connection log before the socket opens. `albumen ledger` reads that log locally. A traced destination that is absent from the ledger fails the same job. The CI job is the `sandbox` job on `ubuntu-24.04`.
 
 ## What this does not claim
 

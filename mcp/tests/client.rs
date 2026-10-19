@@ -148,7 +148,14 @@ fn read_only_server_has_no_write_or_delete_tool() {
     let mut client = Client::start(&fixtures, &[]);
     handshake(&mut client);
     let names = tool_names(&client.request(2, "tools/list", json!({})));
-    assert_eq!(names, vec!["browse".to_string(), "search".to_string()]);
+    assert_eq!(
+        names,
+        vec![
+            "browse".to_string(),
+            "ledger".to_string(),
+            "search".to_string()
+        ]
+    );
     for tool in client.request(3, "tools/list", json!({}))["tools"]
         .as_array()
         .unwrap()
@@ -239,6 +246,7 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
         vec![
             "browse".to_string(),
             "export".to_string(),
+            "ledger".to_string(),
             "search".to_string(),
             "upload".to_string()
         ]
@@ -384,6 +392,7 @@ fn enabled_export_to_s3_verifies_and_leaves_the_library() {
         vec![
             "browse".to_string(),
             "export".to_string(),
+            "ledger".to_string(),
             "search".to_string()
         ]
     );
@@ -680,4 +689,45 @@ fn quarantine_is_unreachable_from_the_mcp_server() {
         assert!(!trash.exists());
         assert!(source.is_file());
     }
+}
+
+#[test]
+fn ledger_tool_lists_every_stored_file() {
+    let root = tempfile::tempdir().unwrap();
+    let library = root.path().join("library");
+    fs::create_dir_all(library.join("members/ab")).unwrap();
+    fs::write(library.join("note.txt"), b"note").unwrap();
+    fs::write(library.join("members/ab/photo.jpg"), b"jpeg").unwrap();
+    let before = snapshot(&library.join("note.txt"));
+
+    let mut client = Client::start(&library, &[]);
+    handshake(&mut client);
+    let names = tool_names(&client.request(2, "tools/list", json!({})));
+    assert!(names.iter().any(|name| name == "ledger"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "delete"));
+    let (is_error, body) =
+        tool_body(&client.request(3, "tools/call", json!({"name": "ledger", "arguments": {}})));
+    assert!(!is_error, "{body}");
+    let objects = body["objects"].as_array().unwrap();
+    assert_eq!(body["object_count"], 2, "{body}");
+    assert_eq!(objects.len(), 2, "{body}");
+    let note = objects
+        .iter()
+        .find(|object| object["path"] == "note.txt")
+        .unwrap();
+    assert_eq!(note["bytes"], 4);
+    assert_eq!(note["member"], Value::Null);
+    assert_eq!(
+        note["sha256"],
+        "edb465624291e4053c6c5ea4b7eb320dec773e10a57d26b95dcf0564f8e310f8"
+    );
+    let photo = objects
+        .iter()
+        .find(|object| object["path"] == "members/ab/photo.jpg")
+        .unwrap();
+    assert_eq!(photo["member"], "ab");
+    assert_eq!(photo["bytes"], 4);
+    client.close();
+    assert_eq!(snapshot(&library.join("note.txt")), before);
+    assert!(!library.join("connections.jsonl").exists());
 }

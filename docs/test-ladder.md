@@ -28,7 +28,7 @@ The before/after snapshot is mtime, mode, and size. Access time is not part of i
 
 `scripts/scan-no-network.sh` is the CI form of the same idea on Ubuntu. It straces `albumen scan` and an `albumen-receive` dry-run and fails if the trace contains a socket call or a write, unlink, rename, truncate, chmod, xattr set, or `utimensat` under the source. It then repeats the scan inside the seccomp container. ExifTool is a child of scan and has to succeed with sockets denied.
 
-`scripts/no-unexpected-egress.sh` runs each binary in a user network namespace. The namespace has loopback and no route beyond it. The trace may show a connection only when the command was given that destination: `ALBUMEN_S3_ENDPOINT` for an S3 export, or the listen address for `albumen-receive --apply`. Every other address fails the run.
+`scripts/no-unexpected-egress.sh` runs each binary in a user network namespace. The namespace has loopback and no route beyond it. The trace may show a connection only when the command was given that destination: `ALBUMEN_S3_ENDPOINT` for an S3 export, or the listen address for `albumen-receive --apply`. Every other address fails the run. `albumen ledger` is read at the end of that run, and every destination in the trace has to be in the ledger.
 
 Exit: the script prints `rung 2 exit: source copy unchanged` and the metadata diff is empty.
 

@@ -217,6 +217,12 @@ fn exercise(root: &Path, outside: &Path) {
     assert!(ok, "{text}");
     assert!(outside.join("copy").join("a.txt").is_file(), "{text}");
 
+    let (ok, text) = run(&["ledger", "--library", root.to_str().unwrap()]);
+    assert!(ok, "{text}");
+    assert!(text.contains("objects:"), "{text}");
+    assert!(text.contains("a.txt"), "{text}");
+    assert!(text.contains("trip/IMG.jpg"), "{text}");
+
     let manifest = outside.join("scan.jsonl");
     let (ok, text) = run(&[
         "scan",

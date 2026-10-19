@@ -89,6 +89,7 @@ async fn listen_inner(
             "--pair requires --webdav",
         ));
     }
+    let library_path = settings.library.clone();
     // Open the library before any pairing file is written. A refused family
     // root leaves the certificate directory uncreated.
     let library = Arc::new(match &settings.member {
@@ -131,5 +132,19 @@ async fn listen_inner(
         Some(addr) => Some(ftp::spawn(addr, library, settings.user, settings.password).await?),
         None => None,
     };
+    for addr in [webdav, sftp, ftp].into_iter().flatten() {
+        record_listen(&library_path, addr)?;
+    }
     Ok((Listening { webdav, sftp, ftp }, session))
+}
+
+fn record_listen(library: &std::path::Path, addr: SocketAddr) -> std::io::Result<()> {
+    albumen_ingest::ledger::record_connection(
+        Some(library),
+        "receive",
+        "bind",
+        &addr.ip().to_string(),
+        addr.port(),
+    )
+    .map_err(|err| std::io::Error::other(err.to_string()))
 }
