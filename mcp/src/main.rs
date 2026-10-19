@@ -98,7 +98,7 @@ fn initialize_result(params: &Value) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": {"tools": {"listChanged": false}},
-        "serverInfo": {"name": "albumen-mcp", "version": "0.1.0"},
+        "serverInfo": {"name": "albumen-mcp", "version": "0.1.1"},
     })
 }
 

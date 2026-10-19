@@ -10,11 +10,11 @@
     "id": "1424496552",
     "subfolder": "mcp"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/jay-the-maker/albumen-mcp:0.1.0",
+      "identifier": "ghcr.io/jay-the-maker/albumen-mcp:0.1.1",
       "runtimeHint": "docker",
       "transport": {
         "type": "stdio"
@@ -23,12 +23,26 @@
         {
           "type": "named",
           "name": "--mount",
-          "description": "Mount the library of originals at /library. Search and browse only read it.",
-          "value": "type=bind,src={library_path},dst=/library",
+          "description": "Mount the library of originals at /library, read-only. Search and browse read it. The mount cannot create, modify, rename, or delete.",
+          "value": "type=bind,src={library_path},dst=/library,readonly",
           "isRequired": true,
           "variables": {
             "library_path": {
-              "description": "Host directory of originals.",
+              "description": "Host directory of originals. Mounted read-only.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "--mount",
+          "description": "Optional writable directory for opt-in export or upload. This is not the library of originals.",
+          "value": "type=bind,src={destination_path},dst=/destination",
+          "isRequired": false,
+          "variables": {
+            "destination_path": {
+              "description": "Host directory that may be written. Never the library of originals.",
               "format": "filepath",
               "isRequired": true
             }
