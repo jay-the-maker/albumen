@@ -26,7 +26,7 @@ Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md), then the crate you are changi
 | Camera receiver | `receive/src/store.rs` |
 | MCP tools | `mcp/src/tools.rs`, `mcp/src/main.rs` |
 | iOS camera roll | `mobile/ios`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
-| Android camera roll | `mobile/android`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
+| Android camera roll | `mobile/android`, [docs/mobile-android-backup.md](docs/mobile-android-backup.md) |
 | Benchmarks | `bench/`, [docs/performance-budgets.md](docs/performance-budgets.md) |
 | Scale, page size, safety bounds | [docs/scale.md](docs/scale.md), `mcp/src/page.rs` |
 | What is not built | [ROADMAP.md](ROADMAP.md) |
@@ -93,4 +93,4 @@ A 380,000-item run is local only: `ALBUMEN_BENCH_ITEMS=380000 cargo run --releas
 
 You are a contributor. Read [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs `Signed-off-by`. Keep a pull request to one concern. The pull request body checks the philosophy box, checks `Sane defaults`, `No account required`, and `No nags`, and explains how the change upholds [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). The `philosophy-ack` workflow fails unless those boxes are checked, the explanation is at least 20 characters and is not the template placeholder, and every commit in the pull request has `Signed-off-by`.
 
-Do not copy Immich, Ente, or other AGPL photo-library source into this Apache-2.0 tree. MinIO is an external CI process and is not vendored. Do not commit real photos, real filenames, real checksums, or real GPS. Do not change branch protection. The only registry publish is `.github/workflows/publish-mcp.yml` on a `v*` tag. Do not publish [server.json](server.json) by hand, and do not submit the server to Glama, Smithery, PulseMCP, or mcp.so.
+This tree is Apache-2.0 and contains Albumen's own code. AGPL photo-library source, including Immich and Ente, stays in those projects. MinIO is an external CI process and stays outside the tree. Do not commit real photos, real filenames, real checksums, or real GPS. Do not change branch protection. The only registry publish is `.github/workflows/publish-mcp.yml` on a `v*` tag. Do not publish [server.json](server.json) by hand, and do not submit the server to Glama, Smithery, PulseMCP, or mcp.so.

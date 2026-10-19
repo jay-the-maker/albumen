@@ -15,6 +15,8 @@ The files and sidecars stay the source of truth. A process-local metadata cache 
 | ExifTool batch | 64 | `ALBUMEN_EXIFTOOL_BATCH` | Files per ExifTool process. Not a limit on the library. |
 | Metadata cache | 16384 records | `ALBUMEN_METADATA_CACHE_ITEMS` | Records kept in this process. `0` keeps every record read. A larger library is still searchable. |
 | S3 workers | one per CPU | `ALBUMEN_S3_WORKERS` | Tokio workers for the S3 client. The SDK still applies network backpressure. No maximum. |
+| Android backup page | 32 | `pageSize` on `CameraRollBackupWorker.enqueue` | MediaStore rows held for one pass. The walk continues at the next offset. No maximum. A value above `Int.MAX_VALUE` is asked as that platform argument's width, and the walk continues. |
+| Android backup pass | 4 minutes | `budgetMillis` on `CameraRollBackupWorker.enqueue` | How long one WorkManager run copies before it pauses and resumes. Not a limit on the camera roll. |
 
 A page walks files in relative-path order and stops when the page is full. It does not load the library into a vector and then truncate it. Metadata for a page is read in batches, including the XMP or AAE sidecar beside a file, and records that are not on the page are not kept.
 
@@ -43,6 +45,7 @@ Checksum verification, write-once mtime, and the refusal to overwrite a differen
 - Pair discovery reads the parent directory for a same-stem companion. It does not cap how many files may sit there.
 - Takeout import. Zip and tgz members are streamed. There is no compiled cap on part count, member count, or member size. The 1 MiB copy buffer is the hashing buffer. Rejecting `..` and absolute member paths is the filename safety bound.
 - iCloud Photos import. A directory is walked one folder at a time, and an archive is streamed. There is no compiled cap on part count, file count, or file size. The 1 MiB copy buffer and the 8 KiB sidecar scan buffer are hashing and search windows. Photos library metadata is read one asset at a time. Rejecting `..` and absolute member paths is the filename safety bound. Opening `Photos.sqlite` with `mode=ro&immutable=1` is what keeps the library from being rewritten.
+- The Android progress file. One line per verified camera-roll item (content URI, size, modified time). It is a cache. Dropping it uploads again, and the receiver dedupes identical bytes. It does not hold pixels or GPS. There is no compiled cap on how many lines it may grow.
 
 ## Scale test
 

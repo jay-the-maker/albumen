@@ -20,7 +20,7 @@ Albumen is not a hosting service. Storage stays where you put it:
 
 - Local disk, NAS, SMB, SFTP, WebDAV, S3, and Backblaze B2, reached directly or through rclone.
 - Google Drive and Dropbox through the synced folder you already have. Albumen treats that folder as a filesystem.
-- iCloud is import-only. Apple does not offer a stable API that can write originals back without rewriting them.
+- An iCloud Photos download, export, or Photos library copy imports into the library you choose, with those originals kept bit-exact.
 
 Clients:
 
@@ -144,7 +144,9 @@ The SFTP host key is generated for that process. FTP passive mode advertises the
 
 ## Camera-roll backup
 
-`mobile/ios` and `mobile/android` are skeletons, not apps. iOS exports PhotoKit originals, including a Live Photo's paired video, and does not ask PhotoKit for a rendered preview. An iCloud-optimized asset is fetched with network access allowed. A derivative is not uploaded in its place; that failure is logged. The receiver password is in the Keychain. Android opens MediaStore with `setRequireOriginal` and `ACCESS_MEDIA_LOCATION`, and WorkManager runs the backup while the device is idle and charging. The receiver password is in Keystore-backed storage, not in WorkManager input. Both upload with WebDAV and accept the copy only when `X-Albumen-Sha256` matches the client's SHA-256. The camera-roll item stays. The background-upload extension and the Android permission dialog are scoped in [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
+`mobile/ios` is a PhotoKit library, not an app. It exports originals, including a Live Photo's paired video, and does not ask PhotoKit for a rendered preview. An iCloud-optimized asset is fetched with network access allowed. A derivative is not uploaded in its place; that failure is logged. The receiver password is in the Keychain. The background-upload extension is scoped in [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
+
+`mobile/android/host` is the Android backup app. It opens MediaStore with `setRequireOriginal` and `ACCESS_MEDIA_LOCATION`, uploads to `albumen-receive` over WebDAV, and accepts the copy only when `X-Albumen-Sha256` matches the client's SHA-256. A mismatch is retried and shown. The first job runs on a network and is aimed at a verified copy within 5 minutes of setup. Later jobs run while the phone is idle, charging, and on a network. The receiver password is in Keystore-backed storage, not in WorkManager input. The camera-roll item stays. The debug APK is not published to a store. The path is [docs/mobile-android-backup.md](docs/mobile-android-backup.md).
 
 ## Agents
 
@@ -161,9 +163,9 @@ Details are in [docs/architecture.md](docs/architecture.md). What is not built y
 
 Albumen will be funded through GitHub Sponsors (profile pending), and no other platforms.
 
-## Not Immich, and not Ente
+## Apache-2.0 code in this tree
 
-Immich and Ente are useful and they are AGPL. Albumen may share ideas. It does not copy their code, or the code of other AGPL photo libraries. MinIO, used only as a CI process, is also AGPL and is not vendored.
+Albumen is Apache-2.0. Immich and Ente are useful AGPL photo libraries, and Albumen may share ideas with them. The code in this tree is Albumen's own. MinIO runs as a CI process and stays outside the tree.
 
 ## License
 

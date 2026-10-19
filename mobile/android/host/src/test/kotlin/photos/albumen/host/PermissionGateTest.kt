@@ -86,6 +86,23 @@ class PermissionGateTest {
     }
 
     @Test
+    fun missingReceiverDoesNotEnqueue() {
+        val grants = mapOf(
+            Manifest.permission.READ_MEDIA_IMAGES to true,
+            Manifest.permission.READ_MEDIA_VIDEO to true,
+            Manifest.permission.ACCESS_MEDIA_LOCATION to true,
+        )
+        val calls = mutableListOf<Triple<String, String, String>>()
+        val decision = HostSession.onPermissionResult(33, grants, "", "camera", "secret") { endpoint, user, password ->
+            calls.add(Triple(endpoint, user, password))
+        }
+        assertFalse(decision.enqueue)
+        assertFalse(decision.backupFinished)
+        assertEquals(HostSession.MISSING_RECEIVER, decision.message)
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
     fun emptyPasswordDoesNotEnqueue() {
         val grants = mapOf(
             Manifest.permission.READ_MEDIA_IMAGES to true,
@@ -107,6 +124,8 @@ class PermissionGateTest {
         val activity = File("src/main/kotlin/photos/albumen/host/HostActivity.kt").readText()
         assertTrue(activity.contains("requestPermissions.launch(CameraRoll.requiredPermissions())"))
         assertTrue(activity.contains("HostSession.onPermissionResult"))
+        assertTrue(activity.contains("BackupStatusStore.read"))
+        assertTrue(activity.contains("BackupSchedule.FIRST_RUN_MESSAGE"))
         assertFalse(activity.contains("workDataOf"))
         assertFalse(activity.contains("RequestMultiplePermissions(password"))
         val gate = File("src/main/kotlin/photos/albumen/host/PermissionGate.kt").readText()

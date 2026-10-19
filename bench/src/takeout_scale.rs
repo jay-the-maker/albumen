@@ -132,15 +132,18 @@ struct TempDir {
 
 impl TempDir {
     fn new() -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|err| err.to_string())?
             .as_nanos();
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "albumen-takeout-scale-{nanos}-{}",
+            "albumen-takeout-scale-{nanos}-{n}-{}",
             std::process::id()
         ));
-        fs::create_dir_all(&path).map_err(|err| format!("create temp dir: {err}"))?;
+        fs::create_dir(&path).map_err(|err| format!("create temp dir: {err}"))?;
         Ok(Self { path })
     }
 }

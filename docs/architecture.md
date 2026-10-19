@@ -14,7 +14,7 @@ This is the outline of the system. The ingest crate, the export command, and the
 | `albumen-ingest` copy/verify for local files, S3, and rclone (SFTP, WebDAV, B2) | Here |
 | Fixture corpus and MinIO round-trip CI | Here |
 | Catalog / search index | No on-disk catalog. MCP search reads files and sidecars into a process-local cache |
-| macOS, iOS, and Android apps | Camera-roll skeletons in `mobile/ios` and `mobile/android`. `mobile/android/host` requests the runtime permissions. Not shipped apps. The macOS library UI is not started |
+| macOS, iOS, and Android apps | iOS is a PhotoKit library. Android `mobile/android/host` backs up the camera roll to `albumen-receive`. It is not published to a store. The macOS library UI is not started |
 | MCP server (`albumen-mcp`, stdio) | Here |
 | Camera-to-cloud (FTP/SFTP/WebDAV/S3 and USB) | `albumen-receive` speaks WebDAV, SFTP, and FTP into `copy_verify`. S3 upload and USB are not started |
 | Export-everything command (`albumen export`) | Here |
@@ -98,10 +98,10 @@ A future catalog may store ids, paths, filenames, mtimes, SHA-256, and extracted
 
 ## Apps
 
-- macOS: SwiftUI for the library UI, AppKit where SwiftUI still falls short (import panels, drag and drop, menus). It links or shells out to the ingest core. That UI is not started.
-- iOS and Android: `mobile/ios` and `mobile/android` are camera-roll backup skeletons, not apps. iOS writes PhotoKit `PHAssetResource` originals, including a Live Photo's paired video, with `isNetworkAccessAllowed` set so an iCloud original is downloaded. It does not call `PHImageManager.requestImage`, and it does not upload a derivative when the full original is missing. The background extension is scoped in [camera-roll-scope.md](camera-roll-scope.md). `mobile/android/host` requests the Android permissions and enqueues only when media and location are granted. CI does not click that dialog. Android opens MediaStore with `setRequireOriginal` and asks for `ACCESS_MEDIA_LOCATION`. WorkManager schedules that backup while the device is idle and charging. The receiver password is in Keystore-backed storage on Android and in the Keychain on iOS. WorkManager input carries the endpoint and the user only. Both PUT the bytes to `albumen-receive` and accept the copy only when `X-Albumen-Sha256` matches the client's SHA-256. The camera-roll original stays. The apps do not transcode to "save space" on the way in.
+- macOS: SwiftUI for the library UI, and AppKit for import panels, drag and drop, and menus. It links or shells out to the ingest core. That UI is not started.
+- iOS and Android: `mobile/ios` is a PhotoKit library. It writes `PHAssetResource` originals, including a Live Photo's paired video, with `isNetworkAccessAllowed` set so an iCloud original is downloaded. It does not call `PHImageManager.requestImage`, and it does not upload a derivative when the full original is missing. The background extension is scoped in [camera-roll-scope.md](camera-roll-scope.md). `mobile/android/host` is the Android backup app. It requests media and location permission and enqueues only when both are granted. CI does not click that dialog. Android opens MediaStore with `setRequireOriginal` and `ACCESS_MEDIA_LOCATION`. The first WorkManager job runs on a network and is aimed at a verified copy within 5 minutes of setup. Later jobs run while the device is idle, charging, and on a network. The receiver password is in Keystore-backed storage on Android and in the Keychain on iOS. WorkManager input carries the endpoint and the user only. Both PUT the bytes to `albumen-receive` and accept the copy only when `X-Albumen-Sha256` matches the client's SHA-256. A mismatch is retried and shown. The camera-roll original stays. The Android path is [mobile-android-backup.md](mobile-android-backup.md). The apps do not transcode to "save space" on the way in. The Android debug APK is not published to a store.
 
-iCloud is import-only. A user can copy photos out of iCloud into the library. Albumen does not write back into iCloud Photos, because that path rewrites containers and does not promise bit-exact originals.
+An iCloud Photos download, export, or Photos library copy imports into the library. Originals stay bit-exact in the directory you choose.
 
 ## Camera to cloud
 
@@ -143,14 +143,14 @@ Hundreds of thousands of items and multiple terabytes means:
 
 ## Why the ingest core is Rust
 
-The macOS and iOS apps will be Swift, and the Android app will be Kotlin. The piece that must not lose a byte has to run in CI on Linux, and later it has to be callable from all three clients. A Rust library can do that: explicit errors, streaming SHA-256, filesystem timestamps, and an S3 client, without a garbage-collected runtime in the copy path. Swift packages cannot be the CI gate on a Linux runner. The crate is small on purpose. UI, face detection, and the catalog do not belong in it.
+The macOS and iOS apps will be Swift, and the Android app will be Kotlin. The piece that must not lose a byte runs in CI on Linux and is callable from all three clients. The Rust library does that: explicit errors, streaming SHA-256, filesystem timestamps, and an S3 client, without a garbage-collected runtime in the copy path. The crate is small on purpose. UI, face detection, and the catalog stay outside it.
 
 ## CI
 
-GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` on `ubuntu-24.04` and `ubuntu-26.04`. A separate `ubuntu-24.04` job compiles the Android camera-roll skeleton. A `macos-14` job builds the iOS package. The runner pin, the ExifTool 13.59 checksum, the MinIO checksum, and the Android SDK pin are in [ci.md](ci.md). MinIO is AGPL. The workflow downloads it and runs it; the Albumen tree does not contain MinIO source. The S3 credentials in CI are fixed test strings (`albumen` / `albumen-ci-not-a-secret`) for a server that exists only for that job.
+GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` on `ubuntu-24.04` and `ubuntu-26.04`. A separate `ubuntu-24.04` job unit-tests the Android backup and assembles the debug APK. Another job runs the MediaStore instrumented test on an API 30 emulator on `ubuntu-latest`, with KVM and `reactivecircus/android-emulator-runner`. A `macos-14` job builds the iOS package. The runner pin, the ExifTool 13.59 checksum, the MinIO checksum, and the Android SDK pin are in [ci.md](ci.md). MinIO is AGPL. The workflow downloads it and runs it; the Albumen tree does not contain MinIO source. The S3 credentials in CI are fixed test strings (`albumen` / `albumen-ci-not-a-secret`) for a server that exists only for that job.
 
 The fixture corpus is synthetic and CC0. It includes a Motion Photo (JPEG plus appended MP4), an Apple `.aae` edit sidecar, and an Ultra HDR JPEG with a synthetic ICC profile and an MPF gain map, along with the earlier GPS, HEIC, RAW+JPEG, XMP, Live Photo, and video files. Tests compare each file with itself after a round trip. They do not depend on a checked-in ExifTool golden file, so an ExifTool upgrade that changes formatting still compares equal as long as both sides are read by the same binary.
 
-## AGPL boundary
+## License boundary
 
-Immich and Ente solved related problems and their code is AGPL. Read them for ideas if you want. Do not copy, translate, or re-license that code into this repository. The same rule covers other AGPL photo libraries.
+This repository is Apache-2.0. Immich and Ente are useful AGPL photo libraries, and reading them for ideas is welcome. The code in this tree is Albumen's own. The same boundary covers other AGPL photo libraries: their source stays in their repositories.
