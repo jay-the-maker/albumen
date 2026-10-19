@@ -226,3 +226,52 @@ pub fn uncached_writes(file: &std::fs::File) -> std::io::Result<()> {
     let _ = file;
     Ok(())
 }
+
+/// Reserve disk blocks for `len` bytes at the end of a new, empty file
+/// (macOS `F_PREALLOCATE`, contiguous first, then any blocks). It allocates
+/// only and never changes the file's logical size. Elsewhere it does
+/// nothing. An error means nothing was reserved; the caller writes as usual.
+pub fn reserve_blocks(file: &std::fs::File, len: u64) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        #[repr(C)]
+        struct Fstore {
+            flags: u32,
+            posmode: std::ffi::c_int,
+            offset: i64,
+            length: i64,
+            bytesalloc: i64,
+        }
+        extern "C" {
+            fn fcntl(fd: std::ffi::c_int, cmd: std::ffi::c_int, ...) -> std::ffi::c_int;
+        }
+        const F_PREALLOCATE: std::ffi::c_int = 42;
+        const F_ALLOCATECONTIG: u32 = 0x2;
+        const F_ALLOCATEALL: u32 = 0x4;
+        const F_PEOFPOSMODE: std::ffi::c_int = 3;
+        let length = i64::try_from(len).map_err(|_| std::io::Error::other("length too large"))?;
+        let fd = file.as_raw_fd();
+        for flags in [F_ALLOCATECONTIG | F_ALLOCATEALL, F_ALLOCATEALL] {
+            let mut store = Fstore {
+                flags,
+                posmode: F_PEOFPOSMODE,
+                offset: 0,
+                length,
+                bytesalloc: 0,
+            };
+            // SAFETY: `fd` is an open descriptor owned by `file`, and
+            // `store` is a valid fstore_t for the duration of the call.
+            let rc = unsafe { fcntl(fd, F_PREALLOCATE, &mut store as *mut Fstore) };
+            if rc != -1 {
+                return Ok(());
+            }
+        }
+        Err(std::io::Error::last_os_error())
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = (file, len);
+        Ok(())
+    }
+}

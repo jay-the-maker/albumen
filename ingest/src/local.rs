@@ -235,6 +235,7 @@ pub fn store_prefetched(
         mtime,
         |_, output, dest| {
             let write_at = crate::copy_profile::tic();
+            reserve_space(output, data.len());
             let mut writer = output;
             writer
                 .write_all(&data)
@@ -499,6 +500,7 @@ fn write_prefetched(
         mtime,
         |_, output, dest| {
             let write_at = crate::copy_profile::tic();
+            reserve_space(output, data.len());
             let mut writer = output;
             writer
                 .write_all(&data)
@@ -508,6 +510,15 @@ fn write_prefetched(
         },
     );
     (written, data)
+}
+
+/// Reserve disk blocks for `len` bytes before a whole-buffer write. On
+/// macOS this is `F_PREALLOCATE`, which allocates blocks only: the logical
+/// size stays at the bytes actually written, so a copy cut short is still
+/// short and fails the read-back. A refusal (no space, unsupported
+/// filesystem) leaves the plain write. Elsewhere it does nothing.
+fn reserve_space(output: &fs::File, len: usize) {
+    let _ = albumen_win::reserve_blocks(output, u64::try_from(len).unwrap_or(u64::MAX));
 }
 
 /// The destination half of a copy: checks, write, streams, mtime, file
@@ -919,6 +930,75 @@ mod tests {
             .collect();
         kept.sort();
         assert_eq!(kept, reported);
+    }
+
+    #[test]
+    fn reserved_space_never_grows_the_file_and_a_cut_copy_leaves_nothing() {
+        let tmp = Tmp::new();
+        let src_dir = tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let data = vec![7u8; 3 * 1024 * 1024];
+        let source = write_file(&src_dir, "cut.jpg", &data, fixed_mtime());
+        let dest_dir = tmp.path().join("dest");
+
+        // Reserving blocks leaves the logical size at what was written.
+        fs::create_dir_all(&dest_dir).unwrap();
+        let probe = dest_dir.join("probe");
+        let file = fs::File::create(&probe).unwrap();
+        reserve_space(&file, data.len());
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        drop(file);
+        fs::remove_file(&probe).unwrap();
+
+        // A copy that fails halfway after reserving space: an error, no
+        // record, and no destination file left behind.
+        let root = SourceRoot::open(parent_dir(&source)).unwrap();
+        let result = store_checked(
+            &root,
+            &source,
+            "cut.jpg",
+            &dest_dir,
+            fixed_mtime(),
+            |_, output, dest| {
+                reserve_space(output, data.len());
+                let mut writer = output;
+                writer
+                    .write_all(&data[..data.len() / 2])
+                    .map_err(|err| IngestError::io(dest, err))?;
+                assert_eq!(output.metadata().unwrap().len(), (data.len() / 2) as u64);
+                Err(IngestError::io(
+                    dest,
+                    std::io::Error::other("copy cut short"),
+                ))
+            },
+        );
+        assert!(result.is_err());
+        assert!(!dest_dir.join("cut.jpg").exists());
+
+        // A copy that stops short but claims the source hash fails the
+        // read-back and leaves nothing.
+        let sha = crate::sha256_hex(&source).unwrap();
+        let mut digest = [0u8; 32];
+        for (i, byte) in digest.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&sha[2 * i..2 * i + 2], 16).unwrap();
+        }
+        let result = store_checked(
+            &root,
+            &source,
+            "cut.jpg",
+            &dest_dir,
+            fixed_mtime(),
+            |_, output, dest| {
+                reserve_space(output, data.len());
+                let mut writer = output;
+                writer
+                    .write_all(&data[..data.len() / 2])
+                    .map_err(|err| IngestError::io(dest, err))?;
+                Ok(digest)
+            },
+        );
+        assert!(result.is_err());
+        assert!(!dest_dir.join("cut.jpg").exists());
     }
 
     #[test]
