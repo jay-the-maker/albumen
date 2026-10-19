@@ -18,6 +18,10 @@ This is the gap after the safety work and before the storage backends. Both impo
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
 
+## Family library
+
+Not built. A design for a shared library on storage the family already has, with no server the owner runs, is [docs/design/family-sharing.md](docs/design/family-sharing.md). Each member has an append-only namespace. Originals stay bit-exact under `copy_verify`. A hide is per viewer and leaves the other member's files in place.
+
 ## Export everything
 
 Shipped as `albumen export` and `albumen verify-manifest`. The command copy-verifies the library, sidecars, and pairs to a directory or `s3://` prefix, writes a SHA-256 manifest, and can be run again without overwriting. See the README.
