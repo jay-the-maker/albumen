@@ -22,8 +22,6 @@ pub(crate) enum DirSyncKind {
     Flush = 2,
     /// `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`.
     WriteThrough = 3,
-    /// Both Windows calls failed. A warning was logged. The rename still landed.
-    Warned = 4,
 }
 
 thread_local! {
@@ -34,13 +32,37 @@ fn note_dir_sync(kind: DirSyncKind) {
     LAST_DIR_SYNC.set(kind as u8);
 }
 
+static DIR_FLUSH_OK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIR_WRITE_THROUGH_OK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIR_SYNC_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn count(counter: &std::sync::atomic::AtomicU64) {
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Directory durability counts for this process:
+/// `(flushed, write_through, failed)`.
+///
+/// `flushed` is a directory flush that succeeded (`fsync` on Unix,
+/// `FlushFileBuffers` on a write handle on Windows). `write_through` is a
+/// rename that `MoveFileExW` committed with `MOVEFILE_WRITE_THROUGH`.
+/// `failed` is a directory sync that returned an error. The bench prints these
+/// and fails when `failed` is not zero.
+pub fn dir_sync_counts() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        DIR_FLUSH_OK.load(Relaxed),
+        DIR_WRITE_THROUGH_OK.load(Relaxed),
+        DIR_SYNC_FAILED.load(Relaxed),
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn last_dir_sync() -> DirSyncKind {
     match LAST_DIR_SYNC.get() {
         1 => DirSyncKind::Unix,
         2 => DirSyncKind::Flush,
         3 => DirSyncKind::WriteThrough,
-        4 => DirSyncKind::Warned,
         other => panic!("directory sync was not recorded ({other})"),
     }
 }
@@ -187,110 +209,54 @@ pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
 
 #[cfg(not(windows))]
 pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
-    let dir = File::open(opened(path)).map_err(|err| IngestError::io(path, err))?;
-    dir.sync_all().map_err(|err| IngestError::io(path, err))?;
+    let synced = File::open(opened(path)).and_then(|dir| dir.sync_all());
+    if let Err(err) = synced {
+        count(&DIR_SYNC_FAILED);
+        return Err(IngestError::io(path, err));
+    }
+    count(&DIR_FLUSH_OK);
     note_dir_sync(DirSyncKind::Unix);
     Ok(())
 }
 
 #[cfg(windows)]
 fn sync_dir_windows(path: &Path) -> Result<(), IngestError> {
-    // `opened` adds `\\?\` when the directory needs the extended path.
-    // `MOVEFILE_WRITE_THROUGH` names the directory twice and does not replace it.
-    let directory = opened(path);
-    // Experiment (Performance, Windows): when both calls already failed for
-    // this directory in this process, they fail the same way again, so skip
-    // the two failing calls and the repeated warning. The result recorded is
-    // still `Warned`, exactly what the two calls would have produced.
-    if known_unflushable(&directory) {
-        note_dir_sync(DirSyncKind::Warned);
-        return Ok(());
-    }
-    match flush_dir(&directory) {
+    // `FlushFileBuffers` needs a handle with GENERIC_WRITE, and a directory
+    // opens only with FILE_FLAG_BACKUP_SEMANTICS. A failure is an error: the
+    // directory entry is not known to be durable.
+    match flush_dir(&opened(path)) {
         Ok(()) => {
+            count(&DIR_FLUSH_OK);
             note_dir_sync(DirSyncKind::Flush);
             Ok(())
         }
-        Err(flush_err) => match albumen_win::move_file_ex(
-            &directory,
-            &directory,
-            albumen_win::MOVEFILE_WRITE_THROUGH,
-        ) {
-            Ok(()) => {
-                note_dir_sync(DirSyncKind::WriteThrough);
-                Ok(())
-            }
-            Err(move_err) => {
-                warn_dir(path, &flush_err, &move_err);
-                remember_unflushable(&directory);
-                Ok(())
-            }
-        },
-    }
-}
-
-#[cfg(windows)]
-fn unflushable() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
-    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
-        std::sync::OnceLock::new();
-    SET.get_or_init(Default::default)
-}
-
-#[cfg(windows)]
-fn known_unflushable(directory: &Path) -> bool {
-    unflushable()
-        .lock()
-        .map(|set| set.contains(directory))
-        .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn remember_unflushable(directory: &Path) {
-    if let Ok(mut set) = unflushable().lock() {
-        set.insert(directory.to_path_buf());
+        Err(err) => {
+            count(&DIR_SYNC_FAILED);
+            Err(IngestError::io(path, err))
+        }
     }
 }
 
 #[cfg(windows)]
 fn rename_durable(from: &Path, to: &Path) -> Result<(), IngestError> {
-    // Durable replace: `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`.
-    // If that call fails, the rename still uses `fs::rename`, then the parent
-    // directory is flushed. A warning is logged only when both calls fail.
+    // `MOVEFILE_WRITE_THROUGH` does not return until the move is flushed to
+    // disk. If that call fails, the rename uses `fs::rename`, and the parent
+    // directory is then flushed through a write handle. A failed flush is an
+    // error.
     let from_opened = opened(from);
     let to_opened = opened(to);
     let flags = albumen_win::MOVEFILE_REPLACE_EXISTING | albumen_win::MOVEFILE_WRITE_THROUGH;
-    match albumen_win::move_file_ex(&from_opened, &to_opened, flags) {
-        Ok(()) => {
-            note_dir_sync(DirSyncKind::WriteThrough);
-            Ok(())
-        }
-        Err(move_err) => {
-            fs::rename(&from_opened, &to_opened).map_err(|err| IngestError::io(to, err))?;
-            let parent = to
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            match flush_dir(&opened(parent)) {
-                Ok(()) => {
-                    note_dir_sync(DirSyncKind::Flush);
-                    Ok(())
-                }
-                Err(flush_err) => {
-                    warn_dir(parent, &flush_err, &move_err);
-                    Ok(())
-                }
-            }
-        }
+    if albumen_win::move_file_ex(&from_opened, &to_opened, flags).is_ok() {
+        count(&DIR_WRITE_THROUGH_OK);
+        note_dir_sync(DirSyncKind::WriteThrough);
+        return Ok(());
     }
-}
-
-#[cfg(windows)]
-fn warn_dir(path: &Path, flush_err: &std::io::Error, move_err: &std::io::Error) {
-    eprintln!(
-        "albumen: warning: directory {} was not flushed: FlushFileBuffers failed ({flush_err}); MoveFileExW write-through failed ({move_err})",
-        path.display()
-    );
-    note_dir_sync(DirSyncKind::Warned);
+    fs::rename(&from_opened, &to_opened).map_err(|err| IngestError::io(to, err))?;
+    let parent = to
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_dir_windows(parent)
 }
 
 #[cfg(windows)]
@@ -301,6 +267,7 @@ fn flush_dir(path: &Path) -> Result<(), std::io::Error> {
     use std::os::windows::fs::OpenOptionsExt;
     let file = OpenOptions::new()
         .read(true)
+        .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
     // `sync_all` is `FlushFileBuffers` on Windows.
@@ -371,13 +338,37 @@ mod tests {
         #[cfg(windows)]
         {
             let kind = last_dir_sync();
-            assert!(
-                kind == DirSyncKind::Flush || kind == DirSyncKind::WriteThrough,
-                "windows directory sync did not flush or write-through: {kind:?}"
+            assert_eq!(
+                kind,
+                DirSyncKind::Flush,
+                "windows directory sync did not flush through a write handle"
             );
         }
         #[cfg(not(windows))]
         assert_eq!(last_dir_sync(), DirSyncKind::Unix);
+    }
+
+    #[test]
+    fn a_directory_flush_never_fails_and_is_counted() {
+        let tmp = Tmp::new();
+        let dir = tmp.path().join("library");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("photo.jpg"), b"bytes").unwrap();
+        let (flushed_before, _, _) = super::dir_sync_counts();
+        for _ in 0..3 {
+            sync_dir(&dir).expect("directory flush returned an error");
+        }
+        let (flushed, _, _) = super::dir_sync_counts();
+        assert!(flushed >= flushed_before + 3, "flushes were not counted");
+    }
+
+    #[test]
+    fn a_missing_directory_is_an_error_and_counted_as_failed() {
+        let tmp = Tmp::new();
+        let (_, _, failed_before) = super::dir_sync_counts();
+        assert!(sync_dir(&tmp.path().join("missing")).is_err());
+        let (_, _, failed) = super::dir_sync_counts();
+        assert!(failed > failed_before);
     }
 
     #[cfg(windows)]
