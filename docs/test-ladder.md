@@ -1,5 +1,7 @@
 # Test ladder
 
+**Draft.** This page is the safety ladder as it stands. A row marked **planned** is not enforced yet. Do not treat a planned row as a green job.
+
 Safety comes before a scan of a machine that holds the only copy. Each rung has to be green before the next one is a place to learn something. Sources are read-only, forever. A destination that resolves inside a source, or is the same path, is refused. There is no override. `copy_verify_quarantine` cannot target a source.
 
 `chmod a-w` is not a substitute for a sandbox. It is an extra check inside rung 1.
@@ -8,7 +10,9 @@ Safety comes before a scan of a machine that holds the only copy. Each rung has 
 
 Entry: a pull request, or a local `cargo test` of this tree.
 
-What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, and `macos-14`. The corpus is the CC0 fixtures. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
+What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, `macos-14`, and `windows-2025`. The corpus is the CC0 fixtures. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
+
+**Planned:** a `windows-latest` leg beside the pinned `windows-2025` image. It is not in the matrix.
 
 `scripts/check-dest-writes.py` fails the job if production code creates, writes, renames, or removes a file outside `ingest/src/dest.rs`. The bench harness is not part of that scan. It writes synthetic timing files and does not open a user archive.
 
@@ -28,11 +32,11 @@ The before/after snapshot is mtime, mode, and size. Access time is not part of i
 
 Exit: the script prints `rung 2 exit: source copy unchanged` and the metadata diff is empty.
 
-## Rung 3 — generated million-item tree on macos-14
+## Rung 3 — generated million-item tree on macOS, Windows, and Linux
 
 Entry: rungs 1 and 2 are green.
 
-`cli/tests/raid_scale.rs` is `#[ignore]` so an ordinary `cargo test`, and a pull request, does not create a million inodes. A million files hung the pull-request job, so [`.github/workflows/raid-scale.yml`](../.github/workflows/raid-scale.yml) runs it on `workflow_dispatch` and a weekly schedule. The job timeout is 180 minutes. The command is:
+`cli/tests/raid_scale.rs` is `#[ignore]` so an ordinary `cargo test`, and a pull request, does not create a million inodes. A million files hung the pull-request job, so [`.github/workflows/raid-scale.yml`](../.github/workflows/raid-scale.yml) runs it on `workflow_dispatch` and a weekly schedule. The job timeout is 180 minutes. The runner today is `macos-14` only. The command is:
 
 ```bash
 cargo test --release --locked -p albumen --test raid_scale -- --ignored --nocapture --test-threads=1
@@ -44,9 +48,11 @@ Scan writes the manifest outside the tree. Verify hashes the tree again. The bef
 
 Exit: the ignored test passes on the scheduled or manual `macos-14` job and the snapshot diff is empty. A pull request does not wait for this rung.
 
+**Planned:** the same generated tree on a Linux runner and on a Windows runner. Those jobs are not in the workflow. Until they are, rung 3 is enforced on macOS only.
+
 ## Rung 4 — optional owner Mac
 
-Entry: rungs 1–3 are green. This rung is not run in CI.
+Entry: rungs 1–3 are green. **Planned:** this rung is not run in CI. It is an owner trial, not a job that can go red.
 
 Use a dedicated non-admin macOS user, or a VM. Work on a **copied** folder, not the live volume. Keep the copy read-only from the process's point of view. Take the network away with `scripts/macos-readonly-sandbox.sh` (a `sandbox-exec` profile) or with pf or LuLu. The profile allows reads and allows writes only in the manifest's parent directory. It refuses a manifest that resolves inside the source. `chmod a-w` does not replace that profile.
 
