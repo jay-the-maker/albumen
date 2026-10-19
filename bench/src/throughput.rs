@@ -9,7 +9,9 @@
 //!
 //! Each file is hashed once, while its bytes are written, then the
 //! destination is read back and hashed again. Files run on a bounded worker
-//! pool so that hash work overlaps I/O. The pool is `available_parallelism`
+//! pool so that hash work overlaps I/O. Each lane reads and hashes the next
+//! file, writes and syncs the current one, and reads back and directory-syncs
+//! the one before, on three threads. Each lane reuses its read buffers. The pool is `available_parallelism`
 //! capped at [`MAX_IMPORT_WORKERS`]. The raw write stays sequential. It uses
 //! the same durability calls as one file of the import: `open_new`,
 //! `File::sync_all`, and `dest::sync_dir` after every file. On macOS that
@@ -20,7 +22,7 @@
 //! ratio is import MB/s divided by that raw MB/s. 1 MB is 1,000,000 bytes.
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -29,8 +31,8 @@ use std::time::{Instant, SystemTime};
 
 use albumen_ingest::dest::{self, open_new};
 use albumen_ingest::{
-    copy_phases, copy_verify, enable_copy_profile_thread, reset_copy_profile, sha256_hex, Asset,
-    AssetFile, CopyPhases, LocalStore, Role,
+    copy_phases, copy_verify_files_pipelined, enable_copy_profile_thread, reset_copy_profile,
+    sha256_hex, CopyPhases,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -51,10 +53,12 @@ pub const CPU_PERCENT_TARGET: f64 = 10.0;
 /// Upper bound on import workers. The pool is also limited by the CPU count
 /// and by the number of files.
 pub const MAX_IMPORT_WORKERS: usize = 8;
-/// Raw samples before the import, and the same number after it.
+/// Half the number of raw samples, and of import samples.
 ///
-/// The reported raw rate is the median of all of them. One sample on either
-/// side of a warm or cold disk moves the ratio.
+/// The run takes `2 * RAW_SAMPLES_PER_SIDE` rounds. Each round is one raw
+/// sample and then one import, so the raw and import medians see the same
+/// disk and cache state over the run (ABAB). One sample on a warm or cold
+/// disk does not move either median.
 pub const RAW_SAMPLES_PER_SIDE: usize = 3;
 
 const JPEG_PREFIX: &[u8] = &[
@@ -92,6 +96,21 @@ pub struct ThroughputReport {
     pub raw_samples: Vec<f64>,
     pub phases: CopyPhases,
     pub ratio: f64,
+    /// Ceiling under the import's durability: the same number of workers
+    /// as the import, each writing files from a warm buffer with
+    /// `File::sync_all` on every file and `dest::sync_dir` after every file.
+    /// No source read, no hash, no read-back. Median of the samples.
+    pub ceiling_mb_s: f64,
+    pub ceiling_samples: Vec<f64>,
+    /// [`Self::ceiling_mb_s`] divided by [`Self::raw_mb_s`]. The import
+    /// ratio cannot reach this with the same syncs.
+    pub ceiling_ratio: f64,
+    /// Like [`Self::ceiling_mb_s`], but each file's bytes are first read
+    /// from its generated source file. Still no hash and no read-back.
+    pub copy_ceiling_mb_s: f64,
+    pub copy_ceiling_samples: Vec<f64>,
+    /// [`Self::copy_ceiling_mb_s`] divided by [`Self::raw_mb_s`].
+    pub copy_ceiling_ratio: f64,
     pub count_in: u64,
     pub count_out: u64,
     pub mismatched: u64,
@@ -108,6 +127,18 @@ pub struct ThroughputReport {
     pub cpu_percent: f64,
     /// `cpu_seconds * 1000 / files`: CPU seconds per 1,000 imported photos.
     pub cpu_seconds_per_1000: f64,
+    /// Read-back threads behind the import's writer lanes.
+    pub verifiers: u64,
+    /// Interleaved rounds. Each round takes one raw sample and then one
+    /// import sample, so both see the same disk and cache over the run.
+    pub rounds: u64,
+    /// One import rate per round. [`Self::import_mb_s`] is their median.
+    pub import_samples: Vec<f64>,
+    /// Share of source pages in the page cache just before each sample,
+    /// from `mincore`. `None` where it cannot be read (Windows).
+    pub resident_before_raw: Vec<Option<f64>>,
+    pub resident_before_import: Vec<Option<f64>>,
+    pub resident_before_copy_ceiling: Vec<Option<f64>>,
 }
 
 impl ThroughputReport {
@@ -153,11 +184,26 @@ impl ThroughputReport {
             "phase_ms": phase_ms(&self.phases),
             "phase_share": phase_share(&self.phases),
             "ratio": self.ratio,
+            "ceiling_mb_s": self.ceiling_mb_s,
+            "ceiling_samples": self.ceiling_samples,
+            "ceiling_ratio": self.ceiling_ratio,
+            "copy_ceiling_mb_s": self.copy_ceiling_mb_s,
+            "copy_ceiling_samples": self.copy_ceiling_samples,
+            "copy_ceiling_ratio": self.copy_ceiling_ratio,
             "count_in": self.count_in,
             "count_out": self.count_out,
             "mismatched": self.mismatched,
             "source_changed": self.source_changed,
             "workers": self.workers,
+            "verifiers": self.verifiers,
+            "comparison": "abab",
+            "rounds": self.rounds,
+            "import_samples": self.import_samples,
+            "source_resident": {
+                "before_raw": self.resident_before_raw,
+                "before_import": self.resident_before_import,
+                "before_copy_ceiling": self.resident_before_copy_ceiling,
+            },
             "reconciled_percent": self.reconciled_percent(),
             "cpu_seconds": self.cpu_seconds,
             "cores": self.cores,
@@ -213,43 +259,77 @@ pub fn measure_throughput(
     fs::create_dir_all(&sources).map_err(|err| format!("create sources: {err}"))?;
     let (snaps, _unlock) = generate(&sources, files, bytes_each)?;
 
-    let mut raw_samples = Vec::with_capacity(RAW_SAMPLES_PER_SIDE * 2);
+    let source_paths: Vec<PathBuf> = snaps.iter().map(|snap| snap.path.clone()).collect();
+    let workers = import_lanes(files);
+    let rounds = RAW_SAMPLES_PER_SIDE * 2;
+    let mut raw_samples = Vec::with_capacity(rounds);
     let mut plain_samples = Vec::new();
-    sample_raw(
-        &root.path.join("raw-before"),
-        files,
-        bytes_each,
-        &mut raw_samples,
-        &mut plain_samples,
-    )?;
-
-    fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
-    let workers = import_workers(files);
+    let mut import_samples = Vec::with_capacity(rounds);
+    let mut ceiling_samples = Vec::with_capacity(RAW_SAMPLES_PER_SIDE);
+    let mut copy_ceiling_samples = Vec::with_capacity(RAW_SAMPLES_PER_SIDE);
+    let mut resident_before_raw = Vec::with_capacity(rounds);
+    let mut resident_before_import = Vec::with_capacity(rounds);
+    let mut resident_before_copy_ceiling = Vec::with_capacity(RAW_SAMPLES_PER_SIDE);
+    let mut count_out = files;
+    let mut mismatched = 0;
     reset_copy_profile();
-    let cpu_before = process_cpu_time()?;
-    let started = Instant::now();
-    let (count_out, mismatched, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
-    let import_seconds = started.elapsed().as_secs_f64().max(1e-9);
-    let cpu_seconds = process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+    let mut cpu_seconds = 0.0;
+    let mut import_seconds_total = 0.0;
+    for round in 0..rounds {
+        resident_before_raw.push(resident_share(&source_paths));
+        sample_raw_once(
+            &root.path.join("raw"),
+            files,
+            bytes_each,
+            &mut raw_samples,
+            &mut plain_samples,
+        )?;
+
+        resident_before_import.push(resident_share(&source_paths));
+        fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
+        let cpu_before = process_cpu_time()?;
+        let started = Instant::now();
+        let (out, bad, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
+        let seconds = started.elapsed().as_secs_f64().max(1e-9);
+        cpu_seconds += process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+        import_seconds_total += seconds;
+        import_samples.push((imported_bytes as f64) / 1_000_000.0 / seconds);
+        // Every round must reconcile, so the report keeps the worst one.
+        count_out = count_out.min(out);
+        mismatched += bad;
+        // The destination was created by this process for the measurement.
+        // It is not a source. Removing it frees the disk for the next
+        // sample. The source directory stays, read-only, until the temp
+        // root drops.
+        fs::remove_dir_all(&dest).map_err(|err| format!("remove measured destination: {err}"))?;
+
+        if round % 2 == 0 {
+            ceiling_samples.push(ceiling_sample(
+                &root.path.join("ceiling"),
+                files,
+                bytes_each,
+                workers,
+            )?);
+            resident_before_copy_ceiling.push(resident_share(&source_paths));
+            copy_ceiling_samples.push(ceiling_sample_from(
+                &root.path.join("copy-ceiling"),
+                files,
+                bytes_each,
+                workers,
+                Some(&source_paths),
+            )?);
+        }
+    }
     let cores = thread::available_parallelism()
         .map(|cores| cores.get())
         .unwrap_or(1) as u64;
     let phases = copy_phases();
     let source_changed = sources_changed(&snaps)?;
-    // The destination was created by this process for the measurement. It is
-    // not a source. Removing it frees the disk for the raw write. The source
-    // directory stays, read-only, until the temp root drops.
-    fs::remove_dir_all(&dest).map_err(|err| format!("remove measured destination: {err}"))?;
-
-    sample_raw(
-        &root.path.join("raw-after"),
-        files,
-        bytes_each,
-        &mut raw_samples,
-        &mut plain_samples,
-    )?;
+    let ceiling_mb_s = median(&mut ceiling_samples.clone());
+    let copy_ceiling_mb_s = median(&mut copy_ceiling_samples.clone());
     let expected_bytes = files.saturating_mul(bytes_each);
-    let import_mb_s = (imported_bytes as f64) / 1_000_000.0 / import_seconds;
+    let import_mb_s = median(&mut import_samples.clone());
+    let import_seconds = (expected_bytes as f64) / 1_000_000.0 / import_mb_s.max(1e-9);
     let raw_mb_s = median(&mut raw_samples.clone());
     let (raw_fsync_mb_s, raw_fullfsync_mb_s) = raw_primitive_rates(raw_mb_s, &plain_samples);
     if !(raw_mb_s.is_finite() && raw_mb_s > 0.0 && import_mb_s.is_finite() && import_mb_s > 0.0) {
@@ -271,15 +351,27 @@ pub fn measure_throughput(
         raw_samples,
         phases,
         ratio: import_mb_s / raw_mb_s,
+        ceiling_mb_s,
+        ceiling_samples,
+        ceiling_ratio: ceiling_mb_s / raw_mb_s,
+        copy_ceiling_mb_s,
+        copy_ceiling_samples,
+        copy_ceiling_ratio: copy_ceiling_mb_s / raw_mb_s,
         count_in: files,
         count_out,
         mismatched,
         source_changed,
         workers: u64::try_from(workers).unwrap_or(0),
-        cpu_seconds,
+        verifiers: u64::try_from(albumen_ingest::pipelined_verifiers(workers)).unwrap_or(0),
+        rounds: u64::try_from(rounds).unwrap_or(0),
+        import_samples,
+        resident_before_raw,
+        resident_before_import,
+        resident_before_copy_ceiling,
+        cpu_seconds: cpu_seconds / rounds as f64,
         cores,
-        cpu_percent: cpu_seconds / (import_seconds * cores as f64) * 100.0,
-        cpu_seconds_per_1000: cpu_seconds * 1000.0 / (files as f64),
+        cpu_percent: cpu_seconds / (import_seconds_total.max(1e-9) * cores as f64) * 100.0,
+        cpu_seconds_per_1000: cpu_seconds / rounds as f64 * 1000.0 / (files as f64),
     })
 }
 
@@ -298,6 +390,13 @@ fn process_cpu_time() -> Result<std::time::Duration, String> {
     albumen_win::process_cpu_time().map_err(|err| format!("GetProcessTimes: {err}"))
 }
 
+/// Import lanes for this run: the worker pool on every system. Each lane
+/// keeps one file sync in flight, and its prefetch and verify threads
+/// overlap the read, hash, and read-back with it.
+fn import_lanes(files: u64) -> usize {
+    import_workers(files)
+}
+
 fn import_workers(files: u64) -> usize {
     let cpus = thread::available_parallelism()
         .map(|n| n.get())
@@ -307,38 +406,33 @@ fn import_workers(files: u64) -> usize {
 }
 
 fn import_parallel(snaps: &[Snap], dest: &Path, workers: usize) -> Result<(u64, u64, u64), String> {
-    let next = AtomicU64::new(0);
     let count_out = AtomicU64::new(0);
     let mismatched = AtomicU64::new(0);
     let imported_bytes = AtomicU64::new(0);
     let error: Mutex<Option<String>> = Mutex::new(None);
-    thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                enable_copy_profile_thread();
-                loop {
-                    if error_is_set(&error) {
-                        break;
-                    }
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(snap) = snaps.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
-                        break;
-                    };
-                    match import_one(snap, dest) {
-                        Ok(ImportOne::Stored(bytes)) => {
-                            count_out.fetch_add(1, Ordering::Relaxed);
-                            imported_bytes.fetch_add(bytes, Ordering::Relaxed);
-                        }
-                        Ok(ImportOne::Mismatch) => {
-                            mismatched.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(err) => {
-                            record_error(&error, err);
-                            break;
-                        }
-                    }
+    let sources: Vec<PathBuf> = snaps.iter().map(|snap| snap.path.clone()).collect();
+    // The pipeline starts its own threads and copies this thread's profile
+    // switch onto them.
+    enable_copy_profile_thread();
+    copy_verify_files_pipelined(&sources, dest, workers, |index, result| {
+        let snap = &snaps[index];
+        match result {
+            Ok(stored) => {
+                if stored.sha256 == snap.sha256
+                    && stored.byte_len == snap.len
+                    && stored.filename == snap.name
+                {
+                    count_out.fetch_add(1, Ordering::Relaxed);
+                    imported_bytes.fetch_add(stored.byte_len, Ordering::Relaxed);
+                } else {
+                    mismatched.fetch_add(1, Ordering::Relaxed);
                 }
-            });
+                true
+            }
+            Err(err) => {
+                record_error(&error, err.to_string());
+                false
+            }
         }
     });
     if let Some(err) = error
@@ -353,35 +447,6 @@ fn import_parallel(snaps: &[Snap], dest: &Path, workers: usize) -> Result<(u64, 
         mismatched.load(Ordering::Relaxed),
         imported_bytes.load(Ordering::Relaxed),
     ))
-}
-
-enum ImportOne {
-    Stored(u64),
-    Mismatch,
-}
-
-fn import_one(snap: &Snap, dest: &Path) -> Result<ImportOne, String> {
-    let asset = Asset::from_files(vec![AssetFile {
-        path: snap.path.clone(),
-        role: Role::Primary,
-    }])
-    .map_err(|err| err.to_string())?;
-    let report = copy_verify(&asset, &LocalStore::new(dest)).map_err(|err| err.to_string())?;
-    if report.files.len() != 1 {
-        return Ok(ImportOne::Mismatch);
-    }
-    let stored = &report.files[0];
-    if stored.sha256 != snap.sha256 || stored.byte_len != snap.len || stored.filename != snap.name {
-        return Ok(ImportOne::Mismatch);
-    }
-    Ok(ImportOne::Stored(stored.byte_len))
-}
-
-fn error_is_set(error: &Mutex<Option<String>>) -> bool {
-    error
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .is_some()
 }
 
 fn record_error(error: &Mutex<Option<String>>, err: String) {
@@ -514,20 +579,48 @@ enum RawSync {
     PosixFsync,
 }
 
-fn sample_raw(
+/// One honest raw sample and, on macOS, one plain `fsync` sample.
+fn sample_raw_once(
     dir: &Path,
     files: u64,
     bytes_each: u64,
     honest: &mut Vec<f64>,
     plain: &mut Vec<f64>,
 ) -> Result<(), String> {
-    for _ in 0..RAW_SAMPLES_PER_SIDE {
-        honest.push(raw_sample(dir, files, bytes_each, RawSync::Import)?);
-        if cfg!(target_vendor = "apple") {
-            plain.push(raw_sample(dir, files, bytes_each, RawSync::PosixFsync)?);
-        }
+    honest.push(raw_sample(dir, files, bytes_each, RawSync::Import)?);
+    if cfg!(target_vendor = "apple") {
+        plain.push(raw_sample(dir, files, bytes_each, RawSync::PosixFsync)?);
     }
     Ok(())
+}
+
+/// Share of the source pages that are in the page cache, from `vmtouch`
+/// in report mode. `vmtouch` with no flags only calls `mincore` on a
+/// read-only mapping: it neither reads the files nor faults pages in, and
+/// never writes. `None` when `vmtouch` is not installed or its output has
+/// no page count, as on Windows.
+fn resident_share(paths: &[PathBuf]) -> Option<f64> {
+    let dir = paths.first()?.parent()?;
+    let output = std::process::Command::new("vmtouch")
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_vmtouch_resident(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `Resident Pages: 1220/2441  4M/9M  50%` gives 1220 / 2441.
+fn parse_vmtouch_resident(text: &str) -> Option<f64> {
+    let line = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Resident Pages:"))?;
+    let (resident, total) = line.split_whitespace().next()?.split_once('/')?;
+    let resident: f64 = resident.parse().ok()?;
+    let total: f64 = total.parse().ok()?;
+    (total > 0.0).then(|| resident / total)
 }
 
 fn raw_sample(dir: &Path, files: u64, bytes_each: u64, kind: RawSync) -> Result<f64, String> {
@@ -652,6 +745,98 @@ fn raw_write(dir: &Path, files: u64, bytes_each: u64, kind: RawSync) -> Result<(
     Ok(())
 }
 
+/// One import-shaped raw sample on `workers` threads. Each file gets the
+/// import's durability calls, `File::sync_all` then `dest::sync_dir`, and
+/// nothing else.
+fn ceiling_sample(dir: &Path, files: u64, bytes_each: u64, workers: usize) -> Result<f64, String> {
+    ceiling_sample_from(dir, files, bytes_each, workers, None)
+}
+
+/// [`ceiling_sample`], optionally reading each file's bytes from
+/// `sources` first. The sources are only opened for reading.
+fn ceiling_sample_from(
+    dir: &Path,
+    files: u64,
+    bytes_each: u64,
+    workers: usize,
+    sources: Option<&[PathBuf]>,
+) -> Result<f64, String> {
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|err| format!("remove ceiling sample: {err}"))?;
+    }
+    fs::create_dir_all(dir).map_err(|err| format!("create ceiling dest: {err}"))?;
+    let next = AtomicU64::new(0);
+    let error: Mutex<Option<String>> = Mutex::new(None);
+    let started = Instant::now();
+    thread::scope(|scope| {
+        for _ in 0..workers.max(1) {
+            scope.spawn(|| {
+                let mut buf = vec![0u8; 1024 * 1024];
+                fill(&mut buf, 0);
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= files {
+                        break;
+                    }
+                    let path = dir.join(format!("ceiling-{index:04}.bin"));
+                    let result = (|| -> Result<(), String> {
+                        let mut file = open_new(&path).map_err(|err| err.to_string())?;
+                        if let Some(sources) = sources {
+                            let source = &sources[usize::try_from(index).unwrap_or(0)];
+                            let mut input = File::open(source)
+                                .map_err(|err| format!("read {}: {err}", source.display()))?;
+                            loop {
+                                let n = input
+                                    .read(&mut buf)
+                                    .map_err(|err| format!("read {}: {err}", source.display()))?;
+                                if n == 0 {
+                                    break;
+                                }
+                                file.write_all(&buf[..n]).map_err(|err| {
+                                    format!("ceiling write {}: {err}", path.display())
+                                })?;
+                            }
+                            sync_raw_file(&file, &path, RawSync::Import)?;
+                            drop(file);
+                            return sync_raw_dir(dir, RawSync::Import);
+                        }
+                        let mut left = bytes_each;
+                        while left > 0 {
+                            let n =
+                                usize::try_from(left.min(buf.len() as u64)).unwrap_or(buf.len());
+                            file.write_all(&buf[..n]).map_err(|err| {
+                                format!("ceiling write {}: {err}", path.display())
+                            })?;
+                            left -= n as u64;
+                        }
+                        sync_raw_file(&file, &path, RawSync::Import)?;
+                        drop(file);
+                        sync_raw_dir(dir, RawSync::Import)
+                    })();
+                    if let Err(err) = result {
+                        record_error(&error, err);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let seconds = started.elapsed().as_secs_f64().max(1e-9);
+    if let Some(err) = error
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+    {
+        return Err(err);
+    }
+    fs::remove_dir_all(dir).map_err(|err| format!("remove ceiling sample: {err}"))?;
+    let mb_s = (files.saturating_mul(bytes_each) as f64) / 1_000_000.0 / seconds;
+    if !mb_s.is_finite() || mb_s <= 0.0 {
+        return Err("a ceiling sample was not a positive number".to_string());
+    }
+    Ok(mb_s)
+}
+
 fn sync_raw_file(file: &File, path: &Path, kind: RawSync) -> Result<(), String> {
     match kind {
         RawSync::Import => file
@@ -745,6 +930,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vmtouch_resident_pages_parse() {
+        let text = "           Files: 1000\n     Directories: 1\n  Resident Pages: 1220/2441  4M/9M  50%\n         Elapsed: 0.01 seconds\n";
+        assert_eq!(parse_vmtouch_resident(text), Some(1220.0 / 2441.0));
+        assert_eq!(parse_vmtouch_resident("Resident Pages: 0/0  0/0"), None);
+        assert_eq!(parse_vmtouch_resident("nothing"), None);
+    }
+
+    #[test]
     fn ratio_gate_includes_exactly_eighty_percent() {
         assert!(ratio_passes(0.80));
         assert!(ratio_passes(0.7995));
@@ -795,6 +988,12 @@ mod tests {
             raw_samples: vec![600.0, 625.0, 650.0],
             phases: CopyPhases::default(),
             ratio: 0.448,
+            ceiling_mb_s: 600.0,
+            ceiling_samples: vec![600.0],
+            ceiling_ratio: 0.96,
+            copy_ceiling_mb_s: 500.0,
+            copy_ceiling_samples: vec![500.0],
+            copy_ceiling_ratio: 0.8,
             count_in: 1_000,
             count_out: 1_000,
             mismatched: 0,
@@ -804,6 +1003,12 @@ mod tests {
             cores: 4,
             cpu_percent: 5.6,
             cpu_seconds_per_1000: 4.0,
+            verifiers: 2,
+            rounds: 6,
+            import_samples: vec![480.0],
+            resident_before_raw: vec![Some(1.0)],
+            resident_before_import: vec![Some(0.5)],
+            resident_before_copy_ceiling: vec![None],
         };
         assert!(report.reconciled());
         assert!(!ratio_passes(report.ratio));
@@ -827,6 +1032,18 @@ mod tests {
         assert!(report.workers <= 2);
         assert_eq!(report.raw_sync, IMPORT_FILE_SYNC);
         assert_eq!(report.raw_samples.len(), RAW_SAMPLES_PER_SIDE * 2);
+        assert_eq!(report.import_samples.len(), RAW_SAMPLES_PER_SIDE * 2);
+        assert_eq!(
+            report.resident_before_import.len(),
+            RAW_SAMPLES_PER_SIDE * 2
+        );
+        assert_eq!(
+            report.resident_before_copy_ceiling.len(),
+            RAW_SAMPLES_PER_SIDE
+        );
+        for share in report.resident_before_import.iter().flatten() {
+            assert!((0.0..=1.0).contains(share));
+        }
         assert!(report.phases.total_ns() > 0, "{:?}", report.phases);
         #[cfg(target_vendor = "apple")]
         {
