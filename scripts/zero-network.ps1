@@ -6,12 +6,13 @@
 # left off, calling search with a metadata filter so ExifTool reads the files.
 # The search run is a second default-config process calling search by name.
 #
-# The observer is pktmon, filtered to albumen.exe, albumen-mcp.exe, and
-# perl.exe (ExifTool). A canary must show an external connect, a DNS sendto,
-# and a connect from a loopback bind toward an external address before those
-# commands are trusted. An outbound firewall block with a failure audit is
-# recorded for the same programs. Loopback bypasses Windows Firewall, so the
-# loopback proof is pktmon, not the firewall event.
+# windows-2025 pktmon has no process filter. A machine-wide capture would
+# include the runner. When --process-name is accepted, that filter is the
+# observer. Otherwise the observer is an outbound block for albumen.exe,
+# albumen-mcp.exe, and perl.exe (ExifTool), audited as Filtering Platform
+# failure events. The canary has to show a blocked connect to 203.0.113.5
+# and a blocked DNS send to that address on port 53. Windows Firewall does
+# not classify a loopback destination, and the script names that gap.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -104,7 +105,7 @@ $env:TMP = $tmp
 $etl = Join-Path $work 'capture.etl'
 $txt = Join-Path $work 'capture.txt'
 $rules = @()
-$auditBefore = $null
+$script:AuditsEnabled = @()
 
 function Clear-Pktmon {
     # Windows PowerShell treats pktmon's "not running" stderr as a terminating
@@ -192,18 +193,26 @@ $help
 }
 
 function Invoke-Canary {
+    $notes = New-Object System.Collections.Generic.List[string]
     $udp = New-Object System.Net.Sockets.UdpClient
     try {
-        [void]$udp.Send([byte[]](0), 1, '127.0.0.1', 53)
         [void]$udp.Send([byte[]](0), 1, '203.0.113.5', 53)
+        [void]$udp.Send([byte[]](0), 1, '127.0.0.1', 53)
+    } catch {
+        $notes.Add("dns: $($_.Exception.Message)")
     } finally {
         $udp.Close()
     }
     $external = New-Object System.Net.Sockets.TcpClient
     try {
         $task = $external.ConnectAsync('203.0.113.5', 9)
-        [void]$task.Wait(300)
+        if (-not $task.Wait(300)) {
+            $notes.Add('external: timed out')
+        } elseif ($task.IsFaulted) {
+            $notes.Add("external: $($task.Exception.GetBaseException().Message)")
+        }
     } catch {
+        $notes.Add("external: $($_.Exception.Message)")
     } finally {
         $external.Close()
     }
@@ -214,10 +223,62 @@ function Invoke-Canary {
     try {
         $bound.Bind((New-Object System.Net.IPEndPoint ([Net.IPAddress]::Loopback, 0)))
         $task = $bound.ConnectAsync('203.0.113.5', 9)
-        try { [void]$task.Wait(300) } catch { }
+        if (-not $task.Wait(300)) {
+            $notes.Add('loopback-external: timed out')
+        } elseif ($task.IsFaulted) {
+            $notes.Add("loopback-external: $($task.Exception.GetBaseException().Message)")
+        }
+    } catch {
+        $notes.Add("loopback-external: $($_.Exception.Message)")
     } finally {
         $bound.Close()
     }
+    return $notes
+}
+
+function Enable-FailureAudit([string]$Subcategory) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $before = (& auditpol /get /subcategory:"$Subcategory" 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            throw "auditpol could not read $Subcategory`n$before"
+        }
+        if ($before -notmatch 'Failure') {
+            $set = (& auditpol /set /subcategory:"$Subcategory" /failure:enable 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+                throw "auditpol could not enable failure auditing for $Subcategory`n$before`n$set"
+            }
+            $script:AuditsEnabled += $Subcategory
+        }
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Get-EventText($Event) {
+    $parts = New-Object System.Collections.Generic.List[string]
+    if ($Event.Message) { $parts.Add($Event.Message) }
+    foreach ($prop in $Event.Properties) { $parts.Add([string]$prop.Value) }
+    return ($parts -join "`n")
+}
+
+function Get-FilterEvents([datetime]$Since) {
+    $found = @()
+    foreach ($id in 5152, 5157) {
+        try {
+            $found += @(Get-WinEvent -FilterHashtable @{
+                LogName = 'Security'
+                Id = $id
+                StartTime = $Since
+            } -ErrorAction Stop)
+        } catch {
+            if ($_.Exception.Message -notmatch 'No events were found') {
+                throw "could not read the Filtering Platform audit log: $($_.Exception.Message)"
+            }
+        }
+    }
+    return @($found)
 }
 
 function Invoke-Albumen([string]$Name, [string]$Exe, [string[]]$ArgumentList, [string]$Stdin) {
@@ -254,41 +315,32 @@ function Assert-Mcp([string]$Label, [string]$Path, [string]$Expect) {
     Write-Output "zero-network: $Label completed"
 }
 
-try {
-    $filterHelp = & pktmon filter add --help 2>&1 | Out-String
-    if ($filterHelp -notmatch 'process-name') {
-        throw @"
-pktmon on this runner has no --process-name filter, so a capture cannot be
-limited to albumen.exe. A machine-wide capture would include the GitHub
-runner's own connections. pktmon filter add --help:
-$filterHelp
-"@
+function Add-BlockRule([string]$Program, [string[]]$RemoteAddress) {
+    $rule = "albumen-zero-network-$([guid]::NewGuid().ToString('n'))"
+    $params = @{
+        DisplayName = $rule
+        Direction = 'Outbound'
+        Action = 'Block'
+        Program = $Program
+        Profile = 'Any'
+        Enabled = $true
+        ErrorAction = 'Stop'
     }
+    if ($RemoteAddress) { $params.RemoteAddress = $RemoteAddress }
+    New-NetFirewallRule @params | Out-Null
+    $script:rules += $rule
+    return $rule
+}
 
-    $shell = Split-Path -Leaf ([Diagnostics.Process]::GetCurrentProcess().Path)
-    Start-Pktmon -ProcessNames $shell
-    Invoke-Canary
-    Start-Sleep -Milliseconds 500
-    $canaryText = Stop-PktmonText
-    Assert-Canary $canaryText
-
-    $programs = @($albumen, $mcp)
-    $perl = Get-Command perl.exe -ErrorAction SilentlyContinue
-    if ($perl) { $programs += $perl.Source }
-    foreach ($program in $programs) {
-        $rule = "albumen-zero-network-$([guid]::NewGuid().ToString('n'))"
-        New-NetFirewallRule -DisplayName $rule -Direction Outbound -Action Block -Program $program -Profile Any -Enabled True | Out-Null
-        $rules += $rule
+function Assert-SourceUnchanged {
+    $hashAfter = (Get-FileHash -Algorithm SHA256 -Path $source).Hash
+    $mtimeAfter = (Get-Item -LiteralPath $source).LastWriteTimeUtc.Ticks
+    if ($hashAfter -ne $hashBefore -or $mtimeAfter -ne $mtimeBefore) {
+        throw 'source bytes or mtime changed'
     }
-    $auditBefore = (& auditpol /get /subcategory:"Filtering Platform Connection" | Out-String)
-    $script:AuditChanged = $false
-    if ($auditBefore -notmatch 'Failure') {
-        & auditpol /set /subcategory:"Filtering Platform Connection" /failure:enable | Out-Null
-        $script:AuditChanged = $true
-    }
-    $started = Get-Date
+}
 
-    Start-Pktmon -ProcessNames albumen.exe,albumen-mcp.exe,perl.exe
+function Invoke-ObservedCommands {
     $scanOut = Invoke-Albumen 'scan' $albumen @('scan', $library, '--manifest', (Join-Path $outDir 'scan.jsonl')) $null
     $scanText = [IO.File]::ReadAllText($scanOut)
     if ($scanText -notmatch 'scanned ') { throw "scan did not report a count`n$scanText" }
@@ -296,46 +348,166 @@ $filterHelp
     Assert-Mcp 'index' $indexOut ''
     $searchOut = Invoke-Albumen 'search' $mcp @('--library', $library) $searchIn
     Assert-Mcp 'search' $searchOut 'IMG_0001.jpg'
-    Start-Sleep -Milliseconds 500
-    $cleanText = Stop-PktmonText
-    $hits = [regex]::Matches($cleanText, '\b(?:\d{1,3}\.){3}\d{1,3}\b|::')
-    if ($hits.Count -gt 0) {
-        throw "pktmon recorded network traffic from scan, index, or search`n$cleanText"
+}
+
+try {
+    $probePreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $probeText = (& pktmon filter add albumen-probe --process-name 'albumen.exe' 2>&1 | Out-String)
+    $probeOk = $LASTEXITCODE -eq 0 -and $probeText -notmatch 'invalid|unknown|error|fail'
+    $ErrorActionPreference = $probePreference
+    Clear-Pktmon
+    if (-not $probeOk) {
+        $ErrorActionPreference = 'Continue'
+        $usage = (& pktmon filter add 2>&1 | Out-String)
+        $ErrorActionPreference = $probePreference
+        $probeText = "$probeText`n$usage"
     }
 
-    Start-Sleep -Seconds 2
-    $events = @()
-    try {
-        $events = @(Get-WinEvent -FilterHashtable @{
-            LogName = 'Security'
-            Id = 5157
-            StartTime = $started.AddSeconds(-2)
-        } -ErrorAction Stop)
-    } catch {
-        if ($_.Exception.Message -notmatch 'No events were found') {
-            throw "could not read the Filtering Platform Connection audit log: $($_.Exception.Message)"
+    if ($probeOk) {
+        Write-Output 'zero-network: pktmon accepted --process-name'
+        $shell = Split-Path -Leaf ([Diagnostics.Process]::GetCurrentProcess().Path)
+        Start-Pktmon -ProcessNames $shell
+        [void](Invoke-Canary)
+        Start-Sleep -Milliseconds 500
+        $canaryText = Stop-PktmonText
+        Assert-Canary $canaryText
+
+        foreach ($program in @($albumen, $mcp)) {
+            [void](Add-BlockRule $program $null)
         }
-    }
-    $blocked = @($events | Where-Object {
-        $_.Message -match 'albumen\.exe|albumen-mcp\.exe|perl\.exe'
-    })
-    if ($blocked.Count -gt 0) {
-        throw "Windows Firewall audited a blocked connection from scan, index, or search`n$($blocked[0].Message)"
-    }
+        $perl = Get-Command perl.exe -ErrorAction SilentlyContinue
+        if ($perl) { [void](Add-BlockRule $perl.Source $null) }
+        Enable-FailureAudit 'Filtering Platform Connection'
+        $started = Get-Date
+        Start-Pktmon -ProcessNames albumen.exe,albumen-mcp.exe,perl.exe
+        Invoke-ObservedCommands
+        Start-Sleep -Milliseconds 500
+        $cleanText = Stop-PktmonText
+        $hits = [regex]::Matches($cleanText, '\b(?:\d{1,3}\.){3}\d{1,3}\b|::')
+        if ($hits.Count -gt 0) {
+            throw "pktmon recorded network traffic from scan, index, or search`n$cleanText"
+        }
+        Start-Sleep -Seconds 2
+        $events = @(Get-FilterEvents $started.AddSeconds(-2) | Where-Object {
+            $_.Id -eq 5157 -and $_.Message -match 'albumen\.exe|albumen-mcp\.exe|perl\.exe'
+        })
+        if ($events.Count -gt 0) {
+            throw "Windows Firewall audited a blocked connection from scan, index, or search`n$($events[0].Message)"
+        }
+        Assert-SourceUnchanged
+        Write-Output 'zero-network: windows pktmon process filter and firewall failure audit saw no packet and no blocked connection from scan, index, or search'
+    } else {
+        Write-Output 'zero-network: pktmon filter add has no process-name on this image, so the observer is the firewall audit'
+        $powershell = (Get-Process -Id $PID).Path
+        $loopbackRuleNote = ''
+        try {
+            [void](Add-BlockRule $powershell @('203.0.113.5', '127.0.0.1'))
+        } catch {
+            $loopbackRuleNote = $_.Exception.Message
+            [void](Add-BlockRule $powershell @('203.0.113.5'))
+        }
+        Enable-FailureAudit 'Filtering Platform Connection'
+        Enable-FailureAudit 'Filtering Platform Packet Drop'
+        $canaryStart = (Get-Date).AddSeconds(-2)
+        $canaryNotes = @(Invoke-Canary)
+        $canaryEvents = @()
+        for ($attempt = 0; $attempt -lt 10; $attempt++) {
+            Start-Sleep -Seconds 1
+            $canaryEvents = @(Get-FilterEvents $canaryStart | Where-Object {
+                $text = Get-EventText $_
+                ($text -match 'powershell\.exe' -and $text -match "Process ID:\s+$PID\b") -or
+                ($_.Properties.Count -gt 1 -and ([string]$_.Properties[0].Value) -eq "$PID" -and ([string]$_.Properties[1].Value) -match 'powershell\.exe')
+            })
+            $sawExternal = @($canaryEvents | Where-Object {
+                $text = Get-EventText $_
+                $text -match '203\.0\.113\.5' -and $text -notmatch 'Destination Port:\s+53\b' -and $text -notmatch '(?m)^53$'
+            })
+            $sawDns = @($canaryEvents | Where-Object {
+                $text = Get-EventText $_
+                $text -match '203\.0\.113\.5' -and ($text -match 'Destination Port:\s+53\b' -or $text -match '(?m)^53$')
+            })
+            if ($sawExternal.Count -gt 0 -and $sawDns.Count -gt 0) { break }
+        }
+        if ($sawExternal.Count -eq 0 -or $sawDns.Count -eq 0) {
+            $all = @(Get-FilterEvents $canaryStart)
+            $sample = ($all | Select-Object -First 1 | ForEach-Object { Get-EventText $_ }) -join "`n"
+            throw @"
+Windows Firewall did not audit the canary. External events: $($sawExternal.Count). DNS port 53 events: $($sawDns.Count). Matched powershell events: $($canaryEvents.Count). Events in the window: $($all.Count).
+Socket notes: $($canaryNotes -join '; ')
+pktmon filter add:
+$probeText
+Sample:
+$sample
+"@
+        }
+        $sawLoopbackExternal = @($canaryEvents | Where-Object {
+            $text = Get-EventText $_
+            $text -match '127\.0\.0\.1' -and $text -match '203\.0\.113\.5'
+        })
+        $sawLoopbackDns = @($canaryEvents | Where-Object {
+            $text = Get-EventText $_
+            $text -match '127\.0\.0\.1' -and $text -notmatch '203\.0\.113\.5' -and ($text -match 'Destination Port:\s+53\b' -or $text -match '(?m)^53$')
+        })
+        $canaryRule = $script:rules[-1]
+        Remove-NetFirewallRule -DisplayName $canaryRule -ErrorAction SilentlyContinue
+        $script:rules = @($script:rules | Where-Object { $_ -ne $canaryRule })
 
-    $hashAfter = (Get-FileHash -Algorithm SHA256 -Path $source).Hash
-    $mtimeAfter = (Get-Item -LiteralPath $source).LastWriteTimeUtc.Ticks
-    if ($hashAfter -ne $hashBefore -or $mtimeAfter -ne $mtimeBefore) {
-        throw 'source bytes or mtime changed'
+        foreach ($program in @($albumen, $mcp)) {
+            [void](Add-BlockRule $program $null)
+        }
+        $perl = Get-Command perl.exe -ErrorAction SilentlyContinue
+        if (-not $perl) {
+            throw 'perl.exe is not on PATH, so the ExifTool process cannot be named in a firewall rule'
+        }
+        [void](Add-BlockRule $perl.Source $null)
+        Start-Sleep -Seconds 1
+        $cleanStart = Get-Date
+        Invoke-ObservedCommands
+        $cleanEvents = @()
+        for ($attempt = 0; $attempt -lt 5; $attempt++) {
+            Start-Sleep -Seconds 1
+            $cleanEvents = @(Get-FilterEvents $cleanStart.AddSeconds(-2) | Where-Object {
+                (Get-EventText $_) -match 'albumen\.exe|albumen-mcp\.exe|perl\.exe'
+            })
+            if ($cleanEvents.Count -gt 0) { break }
+        }
+        if ($cleanEvents.Count -gt 0) {
+            throw "Windows Firewall audited a connection from scan, index, or search`n$($cleanEvents[0].Message)"
+        }
+        Assert-SourceUnchanged
+        Write-Output "zero-network: firewall audit saw $($sawExternal.Count) blocked connect(s) to 203.0.113.5 and $($sawDns.Count) blocked DNS send(s) to 203.0.113.5 port 53"
+        if ($sawLoopbackExternal.Count -gt 0) {
+            Write-Output 'zero-network: firewall audit saw a connect from 127.0.0.1 toward 203.0.113.5'
+        } else {
+            Write-Output @"
+zero-network: a connect from a 127.0.0.1 bind toward 203.0.113.5 produced no Filtering Platform event.
+Socket result: $($canaryNotes -join '; ')
+pktmon cannot attribute that attempt. pktmon filter add on this image:
+$probeText
+"@
+        }
+        if ($sawLoopbackDns.Count -gt 0) {
+            Write-Output 'zero-network: firewall audit saw a DNS send to 127.0.0.1 port 53'
+        } else {
+            $loopbackWhy = 'Windows Firewall does not classify loopback destinations, and pktmon has no process filter to attribute one.'
+            if ($loopbackRuleNote) {
+                $loopbackWhy = "The firewall refused a loopback remote address ($loopbackRuleNote). $loopbackWhy"
+            }
+            Write-Output "zero-network: a UDP send to 127.0.0.1 port 53 produced no Filtering Platform event. $loopbackWhy"
+        }
+        Write-Output 'zero-network: windows firewall failure audit saw no connection from scan, index, or search'
     }
-    Write-Output 'zero-network: windows pktmon process filter and firewall failure audit saw no packet and no blocked connection from scan, index, or search'
 } finally {
     Clear-Pktmon
-    foreach ($rule in $rules) {
+    foreach ($rule in $script:rules) {
         Remove-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue
     }
-    if ($script:AuditChanged) {
-        & auditpol /set /subcategory:"Filtering Platform Connection" /failure:disable | Out-Null
+    $restorePreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    foreach ($sub in $script:AuditsEnabled) {
+        & auditpol /set /subcategory:"$sub" /failure:disable 2>&1 | Out-Null
     }
+    $ErrorActionPreference = $restorePreference
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }

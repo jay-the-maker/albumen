@@ -30,7 +30,7 @@ The before/after snapshot is mtime, mode, and size. Access time is not part of i
 
 `scripts/no-unexpected-egress.sh` runs each binary in a user network namespace. The namespace has loopback and no route beyond it. The trace may show a connection only when the command was given that destination: `ALBUMEN_S3_ENDPOINT` for an S3 export, or the listen address for `albumen-receive --apply`. Every other address fails the run.
 
-`scripts/zero-network.sh` is the three-OS connection proof for default-config scan, the process-local index, and search. Linux straces network syscalls. macOS denies `network*` with `sandbox-exec`. Windows watches `pktmon` and a firewall failure audit. Any IPv4 or IPv6 attempt, including DNS and a connect from loopback toward an external address, fails the job. The library is synthetic. The source bytes and mtime stay as they were.
+`scripts/zero-network.sh` is the three-OS connection proof for default-config scan, the process-local index, and search. Linux straces network syscalls. macOS denies `network*` with `sandbox-exec`. Windows blocks `albumen.exe`, `albumen-mcp.exe`, and `perl.exe` and audits Filtering Platform failures, because `windows-2025` `pktmon` has no process filter. Any audited IPv4 or IPv6 attempt, including a DNS send to a non-loopback address, fails the job. A send to `127.0.0.1` is not classified by Windows Firewall, and the log names that gap. The library is synthetic. The source bytes and mtime stay as they were.
 
 Exit: the script prints `rung 2 exit: source copy unchanged` and the metadata diff is empty.
 
