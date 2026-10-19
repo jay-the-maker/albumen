@@ -20,7 +20,7 @@ Albumen is not a hosting service. Storage stays where you put it:
 
 - Local disk, NAS, SMB, SFTP, WebDAV, S3, and Backblaze B2, reached directly or through rclone.
 - Google Drive and Dropbox through the synced folder you already have. Albumen treats that folder as a filesystem.
-- iCloud is import-only. Apple does not offer a stable API that can write originals back without rewriting them.
+- An iCloud Photos download, export, or Photos library copy imports into the library you choose, with those originals kept bit-exact.
 
 Clients:
 
@@ -161,9 +161,9 @@ Details are in [docs/architecture.md](docs/architecture.md). What is not built y
 
 Albumen will be funded through GitHub Sponsors (profile pending), and no other platforms.
 
-## Not Immich, and not Ente
+## Apache-2.0 code in this tree
 
-Immich and Ente are useful and they are AGPL. Albumen may share ideas. It does not copy their code, or the code of other AGPL photo libraries. MinIO, used only as a CI process, is also AGPL and is not vendored.
+Albumen is Apache-2.0. Immich and Ente are useful AGPL photo libraries, and Albumen may share ideas with them. The code in this tree is Albumen's own. MinIO runs as a CI process and stays outside the tree.
 
 ## License
 
