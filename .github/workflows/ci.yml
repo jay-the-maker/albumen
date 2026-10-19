@@ -176,6 +176,18 @@ jobs:
           arch: x86_64
           script: scripts/android-emulator-connected.sh
 
+      # Android 14 adds Select photos. SelectedPhotosInstrumentedTest runs
+      # alone on a fresh install, then the same connected tests as API 30.
+      - name: MediaStore original and Select photos on an API 34 emulator
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 34
+          target: aosp_atd
+          arch: x86_64
+          script: |
+            bash scripts/android-emulator-selected-photos.sh
+            scripts/android-emulator-connected.sh
+
   ios:
     name: ios camera-roll skeleton
     runs-on: macos-14
