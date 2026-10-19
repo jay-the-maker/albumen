@@ -301,6 +301,18 @@ final class SimulatorBackupTests: XCTestCase {
         precondition(named == 0)
         return UInt16(bigEndian: got.sin_port)
     }
+
+    func testPairingFingerprintMismatchIsVisible() throws {
+        let code = try Pairing.parse(Pairing.exampleWithMember)
+        XCTAssertEqual(code.endpoint, "https://127.0.0.1:8443/")
+        XCTAssertEqual(code.member, String(repeating: "b", count: 64))
+        let wrong = String(repeating: "f", count: 64)
+        let sentence = try XCTUnwrap(Pairing.pin(expected: code.fingerprint, presented: wrong))
+        XCTAssertTrue(sentence.contains("fingerprint"))
+        XCTAssertTrue(sentence.contains("The copy did not start."))
+        XCTAssertFalse(sentence.contains(password))
+        XCTAssertNil(Pairing.pin(expected: code.fingerprint, presented: code.fingerprint))
+    }
 }
 
 private final class NoticeCatcher: NSObject, UNUserNotificationCenterDelegate {
@@ -705,18 +717,6 @@ private final class MismatchReceiver {
         _ = response.withCString { reply in
             write(client, reply, strlen(reply))
         }
-    }
-
-    func testPairingFingerprintMismatchIsVisible() throws {
-        let code = try Pairing.parse(Pairing.exampleWithMember)
-        XCTAssertEqual(code.endpoint, "https://127.0.0.1:8443/")
-        XCTAssertEqual(code.member, String(repeating: "b", count: 64))
-        let wrong = String(repeating: "f", count: 64)
-        let sentence = try XCTUnwrap(Pairing.pin(expected: code.fingerprint, presented: wrong))
-        XCTAssertTrue(sentence.contains("fingerprint"))
-        XCTAssertTrue(sentence.contains("The copy did not start."))
-        XCTAssertFalse(sentence.contains(self.password))
-        XCTAssertNil(Pairing.pin(expected: code.fingerprint, presented: code.fingerprint))
     }
 
     private func contentLength(_ header: String) -> Int {
