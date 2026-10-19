@@ -46,10 +46,19 @@ pub const DEFAULT_THROUGHPUT_BYTES: u64 = 5_000_000;
 /// Product target for import MB/s divided by raw MB/s. CI prints the ratio
 /// and does not fail below this. See `docs/performance-budgets.md`.
 pub const THROUGHPUT_RATIO_FLOOR: f64 = 0.80;
-/// Product target for import CPU: at most this percent of the machine while
-/// 1,000 photos import. Report only. The definition is
+/// The earlier import CPU target: at most this percent of the machine while
+/// 1,000 photos import. Now printed as context next to CPU seconds per GB,
+/// because it moves with disk speed. The definition is
 /// [`ThroughputReport::cpu_percent`].
 pub const CPU_PERCENT_TARGET: f64 = 10.0;
+
+/// Scored team target for CPU seconds per GB imported (10^9 bytes; copy,
+/// both SHA-256 passes, fsync, and read-back included). Report only. The
+/// derivation is in docs/performance-budgets.md.
+pub const CPU_SECONDS_PER_GB_TARGET: f64 = 2.0;
+/// Team regression gate for CPU seconds per GB imported: the import
+/// throughput job fails above it on any leg.
+pub const CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
 /// Upper bound on import workers. The pool is also limited by the CPU count
 /// and by the number of files.
 pub const MAX_IMPORT_WORKERS: usize = 8;
@@ -139,6 +148,14 @@ pub struct ThroughputReport {
     pub resident_before_raw: Vec<Option<f64>>,
     pub resident_before_import: Vec<Option<f64>>,
     pub resident_before_copy_ceiling: Vec<Option<f64>>,
+    /// `cpu_seconds / (bytes / 10^9)`: CPU seconds per GB imported, per
+    /// round. Unlike `cpu_percent`, it does not move with disk speed.
+    pub cpu_seconds_per_gb: f64,
+    /// The CPU has the SHA-256 instructions `sha2` checks for (SHA-NI on
+    /// x86_64, SHA2 on aarch64).
+    pub sha_hw: bool,
+    /// In-memory SHA-256 rate on one thread, for the same `sha2` build.
+    pub sha256_mb_s: f64,
 }
 
 impl ThroughputReport {
@@ -167,7 +184,7 @@ impl ThroughputReport {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "leg": self.leg,
             "files": self.files,
             "bytes_each": self.bytes_each,
@@ -211,7 +228,18 @@ impl ThroughputReport {
             "cpu_seconds_per_1000": self.cpu_seconds_per_1000,
             "cpu_percent_target": CPU_PERCENT_TARGET,
             "cpu_percent_met": self.cpu_percent <= CPU_PERCENT_TARGET,
-        })
+        });
+        // A second step keeps the json! macro under its recursion limit.
+        value["cpu_seconds_per_gb"] = json!(self.cpu_seconds_per_gb);
+        value["cpu_seconds_per_gb_target"] = json!(CPU_SECONDS_PER_GB_TARGET);
+        value["cpu_seconds_per_gb_gate"] = json!(CPU_SECONDS_PER_GB_GATE);
+        value["cpu_seconds_per_gb_gate_passed"] = json!(cpu_gate_passes(self.cpu_seconds_per_gb));
+        value["cpu_seconds_per_gb_met"] =
+            json!(self.cpu_seconds_per_gb <= CPU_SECONDS_PER_GB_TARGET);
+        value["phase_cpu_ms_per_round"] = phase_cpu_ms(self);
+        value["sha_hw"] = json!(self.sha_hw);
+        value["sha256_mb_s"] = json!(self.sha256_mb_s);
+        value
     }
 }
 
@@ -236,7 +264,20 @@ pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
             report.source_changed
         ));
     }
+    if !cpu_gate_passes(report.cpu_seconds_per_gb) {
+        problems.push(format!(
+            "import CPU {:.3} CPU seconds per GB is above the {:.1} regression gate",
+            report.cpu_seconds_per_gb, CPU_SECONDS_PER_GB_GATE
+        ));
+    }
     problems
+}
+
+/// The CPU gate passes at or below [`CPU_SECONDS_PER_GB_GATE`], compared at
+/// three decimals, as the job prints it.
+pub fn cpu_gate_passes(cpu_seconds_per_gb: f64) -> bool {
+    cpu_seconds_per_gb.is_finite()
+        && (cpu_seconds_per_gb * 1000.0).round() <= (CPU_SECONDS_PER_GB_GATE * 1000.0).round()
 }
 
 pub fn ratio_passes(ratio: f64) -> bool {
@@ -372,6 +413,9 @@ pub fn measure_throughput(
         cores,
         cpu_percent: cpu_seconds / (import_seconds_total.max(1e-9) * cores as f64) * 100.0,
         cpu_seconds_per_1000: cpu_seconds / rounds as f64 * 1000.0 / (files as f64),
+        cpu_seconds_per_gb: cpu_seconds / rounds as f64 / ((expected_bytes.max(1) as f64) / 1e9),
+        sha_hw: sha_hw(),
+        sha256_mb_s: sha256_mb_s(),
     })
 }
 
@@ -679,6 +723,8 @@ fn phase_ms(phases: &CopyPhases) -> Value {
         "readback_read": ns_to_ms(phases.readback_read_ns),
         "readback_hash": ns_to_ms(phases.readback_hash_ns),
         "dir_sync": ns_to_ms(phases.dir_sync_ns),
+        "preflight": ns_to_ms(phases.preflight_ns),
+        "metadata": ns_to_ms(phases.metadata_ns),
     })
 }
 
@@ -691,7 +737,99 @@ fn phase_share(phases: &CopyPhases) -> Value {
         "readback_read": phases.share(phases.readback_read_ns),
         "readback_hash": phases.share(phases.readback_hash_ns),
         "dir_sync": phases.share(phases.dir_sync_ns),
+        "preflight": phases.share(phases.preflight_ns),
+        "metadata": phases.share(phases.metadata_ns),
     })
+}
+
+/// Thread CPU per phase for one round, in milliseconds. The counters sum
+/// every round's import threads.
+fn phase_cpu_ms(report: &ThroughputReport) -> Value {
+    let rounds = report.rounds.max(1) as f64;
+    let mut map = serde_json::Map::new();
+    for (name, ns) in report.phases.cpu_named() {
+        map.insert(name.to_string(), json!(ns_to_ms(ns) / rounds));
+    }
+    Value::Object(map)
+}
+
+/// Thread CPU per phase for one round in milliseconds, then `untimed`: the
+/// process CPU of the round that no phase counted (thread hand-offs, the
+/// harness).
+pub fn phase_cpu_line(report: &ThroughputReport) -> String {
+    let rounds = report.rounds.max(1) as f64;
+    let phases = report.phases;
+    let mut parts: Vec<String> = phases
+        .cpu_named()
+        .iter()
+        .map(|(name, ns)| format!("{name}:{:.0}", ns_to_ms(*ns) / rounds))
+        .collect();
+    let untimed = (report.cpu_seconds * 1000.0 - ns_to_ms(phases.cpu_total_ns()) / rounds).max(0.0);
+    parts.push(format!("untimed:{untimed:.0}"));
+    parts.join(",")
+}
+
+/// The same runtime check `sha2` 0.10 makes before it takes its hardware
+/// path: `sha`, `sse2`, `ssse3`, and `sse4.1` on x86_64 (SHA-NI), and
+/// `sha2` on aarch64. The aarch64 path exists only with the `asm` feature,
+/// which `albumen-ingest` turns on for aarch64.
+fn sha_hw() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("sha")
+            && std::arch::is_x86_feature_detected!("sse2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("sha2")
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
+
+/// Hash 256 MB already in memory on one thread. Software SHA-256 runs near
+/// 200-500 MB/s; the hardware instructions run near 1,500-2,500 MB/s.
+fn sha256_mb_s() -> f64 {
+    let buf = vec![0x5au8; 8 * 1024 * 1024];
+    let rounds = 32;
+    let started = Instant::now();
+    let mut hasher = Sha256::new();
+    for _ in 0..rounds {
+        hasher.update(&buf);
+    }
+    let digest = hasher.finalize();
+    let seconds = started.elapsed().as_secs_f64().max(1e-9);
+    std::hint::black_box(digest);
+    (buf.len() * rounds) as f64 / 1_000_000.0 / seconds
+}
+
+/// Markdown scorecard for the CI step summary: CPU seconds per GB against
+/// its team gate and scored team target, with `cpu_percent` as context.
+pub fn cpu_scorecard(report: &ThroughputReport) -> String {
+    let mark = |met: bool| if met { "met" } else { "not met" };
+    format!(
+        "| import CPU ({leg}) | value | team target | |\n|---|---|---|---|\n\
+         | CPU seconds per GB imported | {gb:.2} | ≤ {gb_target:.1} scored | {gb_met} |\n\
+         | CPU seconds per GB, regression gate | {gb:.2} | ≤ {gb_gate:.1} (fails the job) | {gate_met} |\n\
+         | cpu_percent (CPU ÷ (wall × {cores} cores)), context | {pct:.1}% | | |\n\
+         | CPU seconds per 1,000 photos | {per_1000:.2} | | |\n\
+         | hardware SHA-256 | {sha_hw} ({sha_mb_s:.0} MB/s) | | |\n",
+        leg = report.leg,
+        gb = report.cpu_seconds_per_gb,
+        gb_target = CPU_SECONDS_PER_GB_TARGET,
+        gb_met = mark(report.cpu_seconds_per_gb <= CPU_SECONDS_PER_GB_TARGET),
+        gb_gate = CPU_SECONDS_PER_GB_GATE,
+        gate_met = mark(cpu_gate_passes(report.cpu_seconds_per_gb)),
+        cores = report.cores,
+        pct = report.cpu_percent,
+        per_1000 = report.cpu_seconds_per_1000,
+        sha_hw = report.sha_hw,
+        sha_mb_s = report.sha256_mb_s,
+    )
 }
 
 fn ns_to_ms(ns: u64) -> f64 {
@@ -707,14 +845,16 @@ pub fn optional_rate(rate: Option<f64>) -> String {
 
 pub fn phase_share_line(phases: &CopyPhases) -> String {
     format!(
-        "source_read:{:.3},hash:{:.3},write:{:.3},file_sync:{:.3},readback_read:{:.3},readback_hash:{:.3},dir_sync:{:.3}",
+        "source_read:{:.3},hash:{:.3},write:{:.3},file_sync:{:.3},readback_read:{:.3},readback_hash:{:.3},dir_sync:{:.3},preflight:{:.3},metadata:{:.3}",
         phases.share(phases.source_read_ns),
         phases.share(phases.hash_ns),
         phases.share(phases.write_ns),
         phases.share(phases.file_sync_ns),
         phases.share(phases.readback_read_ns),
         phases.share(phases.readback_hash_ns),
-        phases.share(phases.dir_sync_ns)
+        phases.share(phases.dir_sync_ns),
+        phases.share(phases.preflight_ns),
+        phases.share(phases.metadata_ns)
     )
 }
 
@@ -930,6 +1070,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_cpu_gate_passes_the_measured_legs_and_fails_above_three() {
+        // #112 on 2026-10-19: ubuntu-24.04, ubuntu-26.04, windows-2025, macos-14.
+        for measured in [1.863, 2.790, 2.932, 1.935] {
+            assert!(cpu_gate_passes(measured), "{measured}");
+        }
+        assert!(cpu_gate_passes(3.0));
+        assert!(cpu_gate_passes(3.0004));
+        assert!(!cpu_gate_passes(3.001));
+        assert!(!cpu_gate_passes(f64::NAN));
+    }
+
+    #[test]
     fn vmtouch_resident_pages_parse() {
         let text = "           Files: 1000\n     Directories: 1\n  Resident Pages: 1220/2441  4M/9M  50%\n         Elapsed: 0.01 seconds\n";
         assert_eq!(parse_vmtouch_resident(text), Some(1220.0 / 2441.0));
@@ -1003,6 +1155,9 @@ mod tests {
             cores: 4,
             cpu_percent: 5.6,
             cpu_seconds_per_1000: 4.0,
+            cpu_seconds_per_gb: 0.8,
+            sha_hw: true,
+            sha256_mb_s: 2000.0,
             verifiers: 2,
             rounds: 6,
             import_samples: vec![480.0],

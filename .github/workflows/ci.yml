@@ -104,7 +104,7 @@ jobs:
 
       - name: ffmpeg for the synthetic Live Photo
         shell: bash
-        run: scripts/ensure-ffmpeg.sh
+        run: bash scripts/ensure-ffmpeg.sh
 
       - name: Round-trip originals through the local filesystem and MinIO
         shell: bash
@@ -318,6 +318,10 @@ jobs:
             df -h "${GITHUB_WORKSPACE}" || true
           fi
           mkdir -p "${ALBUMEN_THROUGHPUT_DIR}"
+          # The bench appends the import CPU scorecard to the step summary.
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            export ALBUMEN_THROUGHPUT_SCORECARD="${GITHUB_STEP_SUMMARY}"
+          fi
           cargo run --release --locked -p albumen-bench -- --throughput | tee "${RUNNER_TEMP}/throughput.json"
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
