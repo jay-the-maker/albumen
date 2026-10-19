@@ -9,6 +9,7 @@
 
 pub mod io;
 pub mod metadata;
+pub mod mount;
 pub mod page;
 pub mod tools;
 

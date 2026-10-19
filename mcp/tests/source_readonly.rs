@@ -240,7 +240,17 @@ fn call(client: &mut Client, id: i64, name: &str, arguments: Value) -> (bool, Va
 }
 
 fn exercise(library: &Path, upload_from: &Path, outside: &Path, read_only_library: bool) {
-    let mut reading = Client::start(library, &["--enable-export", "--enable-upload"]);
+    fs::create_dir_all(outside).unwrap();
+    let destination = outside.to_str().unwrap();
+    let mut reading = Client::start(
+        library,
+        &[
+            "--enable-export",
+            "--enable-upload",
+            "--destination",
+            destination,
+        ],
+    );
     handshake(&mut reading);
     let (err, body) = call(&mut reading, 2, "search", json!({"query": "IMG"}));
     assert!(!err, "{body}");
@@ -280,7 +290,16 @@ fn exercise(library: &Path, upload_from: &Path, outside: &Path, read_only_librar
         return;
     }
 
-    let mut writing = Client::start(library, &["--enable-export", "--enable-upload", "--apply"]);
+    let mut writing = Client::start(
+        library,
+        &[
+            "--enable-export",
+            "--enable-upload",
+            "--apply",
+            "--destination",
+            destination,
+        ],
+    );
     handshake(&mut writing);
     let copy = outside.join("copy");
     let (err, body) = call(
@@ -296,7 +315,15 @@ fn exercise(library: &Path, upload_from: &Path, outside: &Path, read_only_librar
     assert!(copy.join("trip/IMG.jpg").is_file(), "{body}");
     let library_for_upload = outside.join("uploaded");
     fs::create_dir(&library_for_upload).unwrap();
-    let mut uploader = Client::start(&library_for_upload, &["--enable-upload", "--apply"]);
+    let mut uploader = Client::start(
+        library,
+        &[
+            "--enable-upload",
+            "--apply",
+            "--destination",
+            library_for_upload.to_str().unwrap(),
+        ],
+    );
     handshake(&mut uploader);
     let (err, body) = call(
         &mut uploader,

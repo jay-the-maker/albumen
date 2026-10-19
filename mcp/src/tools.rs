@@ -15,10 +15,12 @@ use albumen_ingest::{
 use serde_json::{json, Value};
 
 use crate::metadata::{self, Filters, GeoBox};
+use crate::mount::{self, is_within};
 use crate::page::{Hit, Page};
 
 pub struct Library {
     root: PathBuf,
+    destination: Option<PathBuf>,
     pub enable_export: bool,
     pub enable_upload: bool,
     pub apply: bool,
@@ -31,12 +33,29 @@ impl Library {
         enable_export: bool,
         enable_upload: bool,
         apply: bool,
+        destination: Option<PathBuf>,
     ) -> Result<Self, String> {
         if !root.is_dir() {
             return Err(format!("library is not a directory: {}", root.display()));
         }
+        let destination = if enable_export || enable_upload {
+            let destination = destination.ok_or_else(|| {
+                "--enable-export and --enable-upload require --destination, a directory on a different mount from --library".to_string()
+            })?;
+            if !destination.is_dir() {
+                return Err(format!(
+                    "destination is not a directory: {}",
+                    destination.display()
+                ));
+            }
+            mount::require_separate_destination(&root, &destination)?;
+            Some(destination)
+        } else {
+            destination
+        };
         Ok(Self {
             root,
+            destination,
             enable_export,
             enable_upload,
             apply,
@@ -224,6 +243,8 @@ impl Library {
         let source = SourceRoot::open(&self.root).map_err(show)?;
         if !to.starts_with("s3://") {
             source.refuse_destination(Path::new(to)).map_err(show)?;
+            self.require_on_destination(Path::new(to))?;
+            self.require_on_destination(&manifest)?;
         }
         source.refuse_destination(&manifest).map_err(show)?;
         if !self.apply {
@@ -265,12 +286,12 @@ impl Library {
                 .collect::<Vec<_>>();
             return Ok(json!({
                 "dry_run": true,
-                "into": self.root.display().to_string(),
+                "into": self.write_root()?.display().to_string(),
                 "files": files,
                 "network": "none",
             }));
         }
-        let report = copy_verify(&asset, &LocalStore::new(&self.root)).map_err(show)?;
+        let report = copy_verify(&asset, &LocalStore::new(self.write_root()?)).map_err(show)?;
         let files = report
             .files
             .iter()
@@ -288,6 +309,24 @@ impl Library {
             })
             .collect::<Vec<_>>();
         Ok(json!({"files": files}))
+    }
+
+    fn write_root(&self) -> Result<&Path, String> {
+        self.destination.as_deref().ok_or_else(|| {
+            "--enable-export and --enable-upload require --destination, a directory on a different mount from --library".to_string()
+        })
+    }
+
+    fn require_on_destination(&self, path: &Path) -> Result<(), String> {
+        let destination = self.write_root()?;
+        if is_within(destination, path)? {
+            return Ok(());
+        }
+        Err(format!(
+            "refusing to write {} because it is not on the --destination mount {}",
+            path.display(),
+            destination.display()
+        ))
     }
 }
 
@@ -646,7 +685,7 @@ fn browse_def() -> Value {
 fn export_def() -> Value {
     json!({
         "name": "export",
-        "description": "Copy the library, sidecars, and pairs to a directory or s3://bucket/prefix with copy_verify. Skips identical files. Never overwrites. Does not modify the library. Returns a plan and writes nothing unless albumen-mcp was started with --apply or --execute.",
+        "description": "Copy the library, sidecars, and pairs to a directory on --destination, or to an s3:// prefix, with copy_verify. Skips identical files. Never overwrites. Does not modify the library. Returns a plan and writes nothing unless albumen-mcp was started with --apply or --execute.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -662,11 +701,11 @@ fn export_def() -> Value {
 fn upload_def() -> Value {
     json!({
         "name": "upload",
-        "description": "Copy a file and its discovered sidecars and pairs into the library with copy_verify. Never overwrites. Does not modify or remove the source. Returns a plan and writes nothing unless albumen-mcp was started with --apply or --execute.",
+        "description": "Copy a file and its discovered sidecars and pairs into --destination with copy_verify. Never overwrites. Does not modify the library or the source. Returns a plan and writes nothing unless albumen-mcp was started with --apply or --execute.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Primary file to copy into the library"}
+                "path": {"type": "string", "description": "Primary file to copy into --destination"}
             },
             "required": ["path"],
             "additionalProperties": false
@@ -684,7 +723,7 @@ mod tests {
         for index in 0..25 {
             fs::write(root.path().join(format!("f{index:02}.jpg")), b"x").unwrap();
         }
-        let library = Library::new(root.path().to_path_buf(), false, false, false).unwrap();
+        let library = Library::new(root.path().to_path_buf(), false, false, false, None).unwrap();
         let seen = collect_pages(&library, "browse", 10);
         assert_eq!(seen.len(), 25, "{seen:?}");
         let mut unique = seen.clone();

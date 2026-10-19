@@ -220,7 +220,18 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     let source_jpeg = snapshot(&outside.join("photo.jpg"));
     let source_xmp = snapshot(&outside.join("photo.xmp"));
 
-    let mut client = Client::start(&library, &["--enable-export", "--enable-upload", "--apply"]);
+    let dest = root.path().join("export");
+    fs::create_dir(&dest).unwrap();
+    let mut client = Client::start(
+        &library,
+        &[
+            "--enable-export",
+            "--enable-upload",
+            "--apply",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
+    );
     handshake(&mut client);
     let names = tool_names(&client.request(2, "tools/list", json!({})));
     assert_eq!(
@@ -234,7 +245,7 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     );
     assert!(!names.iter().any(|name| name == "delete"));
 
-    fs::write(library.join("photo.xmp"), b"occupied").unwrap();
+    fs::write(dest.join("photo.xmp"), b"occupied").unwrap();
     let (is_error, body) = tool_body(&client.request(
         3,
         "tools/call",
@@ -242,10 +253,11 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     ));
     assert!(is_error, "{body}");
     assert!(!library.join("photo.jpg").exists());
-    assert_eq!(fs::read(library.join("photo.xmp")).unwrap(), b"occupied");
+    assert!(!dest.join("photo.jpg").exists());
+    assert_eq!(fs::read(dest.join("photo.xmp")).unwrap(), b"occupied");
     assert_eq!(snapshot(&outside.join("photo.jpg")), source_jpeg);
     assert_eq!(snapshot(&outside.join("photo.xmp")), source_xmp);
-    fs::remove_file(library.join("photo.xmp")).unwrap();
+    fs::remove_file(dest.join("photo.xmp")).unwrap();
 
     let (is_error, body) = tool_body(&client.request(
         4,
@@ -263,8 +275,9 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
         uploaded,
         vec!["photo.jpg".to_string(), "photo.xmp".to_string()]
     );
-    assert_eq!(fs::read(library.join("photo.jpg")).unwrap(), b"still");
-    assert_eq!(fs::read(library.join("photo.xmp")).unwrap(), b"sidecar");
+    assert_eq!(fs::read(dest.join("photo.jpg")).unwrap(), b"still");
+    assert_eq!(fs::read(dest.join("photo.xmp")).unwrap(), b"sidecar");
+    assert!(!library.join("photo.jpg").exists());
     assert_eq!(snapshot(&outside.join("photo.jpg")), source_jpeg);
     assert_eq!(snapshot(&outside.join("photo.xmp")), source_xmp);
     assert_eq!(snapshot(&library.join("trip/IMG_0001.jpg")), kept);
@@ -276,10 +289,10 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     ));
     assert!(is_error, "{body}");
     assert!(body.as_str().unwrap().contains("refusing to overwrite"));
-    assert_eq!(fs::read(library.join("photo.jpg")).unwrap(), b"still");
+    assert_eq!(fs::read(dest.join("photo.jpg")).unwrap(), b"still");
+    assert!(!library.join("photo.jpg").exists());
     assert_eq!(snapshot(&outside.join("photo.jpg")), source_jpeg);
 
-    let dest = root.path().join("export");
     let (is_error, body) = tool_body(&client.request(
         6,
         "tools/call",
@@ -295,7 +308,7 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     assert_eq!(snapshot(&library.join("trip/IMG_0001.jpg")), kept);
     assert_eq!(snapshot(&outside.join("photo.jpg")), source_jpeg);
 
-    let exported_mtime = fs::metadata(dest.join("photo.jpg"))
+    let exported_mtime = fs::metadata(dest.join("trip/IMG_0001.jpg"))
         .unwrap()
         .modified()
         .unwrap();
@@ -306,16 +319,16 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     ));
     assert!(!is_error, "{body}");
     assert_eq!(
-        fs::metadata(dest.join("photo.jpg"))
+        fs::metadata(dest.join("trip/IMG_0001.jpg"))
             .unwrap()
             .modified()
             .unwrap(),
         exported_mtime
     );
 
-    let mut tampered = fs::read(dest.join("photo.jpg")).unwrap();
+    let mut tampered = fs::read(dest.join("trip/IMG_0001.jpg")).unwrap();
     tampered[0] ^= 0xff;
-    fs::write(dest.join("photo.jpg"), &tampered).unwrap();
+    fs::write(dest.join("trip/IMG_0001.jpg"), &tampered).unwrap();
     let (is_error, body) = tool_body(&client.request(
         8,
         "tools/call",
@@ -323,7 +336,7 @@ fn enabled_upload_and_export_copy_verify_without_touching_sources() {
     ));
     assert!(is_error, "{body}");
     assert!(body.as_str().unwrap().contains("refusing to overwrite"));
-    assert_eq!(fs::read(dest.join("photo.jpg")).unwrap(), tampered);
+    assert_eq!(fs::read(dest.join("trip/IMG_0001.jpg")).unwrap(), tampered);
     assert_eq!(snapshot(&library.join("trip/IMG_0001.jpg")), kept);
     client.close();
 }
@@ -353,7 +366,17 @@ fn enabled_export_to_s3_verifies_and_leaves_the_library() {
     let to = format!("s3://{bucket}/{prefix}");
     let manifest = root.path().join("manifest.txt");
 
-    let mut client = Client::start(&library, &["--enable-export", "--execute"]);
+    let destination = root.path().join("destination");
+    fs::create_dir(&destination).unwrap();
+    let mut client = Client::start(
+        &library,
+        &[
+            "--enable-export",
+            "--execute",
+            "--destination",
+            destination.to_str().unwrap(),
+        ],
+    );
     handshake(&mut client);
     let names = tool_names(&client.request(2, "tools/list", json!({})));
     assert_eq!(
@@ -527,6 +550,48 @@ fn lens_and_keyword_search_reads_a_sidecar() {
     assert_eq!(names_before.len(), names_after.len());
 }
 
+#[test]
+fn write_flags_refuse_the_library_mount() {
+    let root = tempfile::tempdir().unwrap();
+    let library = root.path().join("library");
+    let inside = library.join("nested");
+    let separate = root.path().join("destination");
+    fs::create_dir_all(&inside).unwrap();
+    fs::create_dir(&separate).unwrap();
+    let bin = env!("CARGO_BIN_EXE_albumen-mcp");
+    for destination in [library.to_str().unwrap(), inside.to_str().unwrap()] {
+        let output = Command::new(bin)
+            .arg("--library")
+            .arg(&library)
+            .arg("--enable-upload")
+            .arg("--destination")
+            .arg(destination)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{destination}");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(err.contains("refusing to start"), "{err}");
+    }
+    let missing = Command::new(bin)
+        .arg("--library")
+        .arg(&library)
+        .arg("--enable-export")
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--destination"));
+    let mut client = Client::start(
+        &library,
+        &[
+            "--enable-export",
+            "--destination",
+            separate.to_str().unwrap(),
+        ],
+    );
+    handshake(&mut client);
+    client.close();
+}
+
 fn search_paths(client: &mut Client, id: i64, arguments: Value) -> Vec<String> {
     let (is_error, body) = tool_body(&client.request(
         id,
@@ -552,7 +617,17 @@ fn quarantine_is_unreachable_from_the_mcp_server() {
     let kept = snapshot(&source);
     let trash = root.path().join("trash");
 
-    for extra in [&[][..], &["--enable-export", "--enable-upload"][..]] {
+    let destination = root.path().join("destination");
+    fs::create_dir(&destination).unwrap();
+    let destination = destination.to_str().unwrap();
+    let read_only: &[&str] = &[];
+    let writing: &[&str] = &[
+        "--enable-export",
+        "--enable-upload",
+        "--destination",
+        destination,
+    ];
+    for extra in [read_only, writing] {
         let mut client = Client::start(&library, extra);
         handshake(&mut client);
         let names = tool_names(&client.request(2, "tools/list", json!({})));
