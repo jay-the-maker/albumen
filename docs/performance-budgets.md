@@ -12,7 +12,7 @@ Cold start, the first thumbnail, scroll, and backup CPU and battery are targets 
 | Time to first thumbnail (app first paint) | ≤ 1.0 second on a 380,000-item library: the ceiling for the app's first painted thumbnail, from launch. Team target. |
 | First thumbnail (library scale) | ≤ 300 ms at 380,000 items: `albumen-mcp` `thumbnail`, request to bytes and spawn to bytes, measured by the `library scale` job. Team target. |
 | Scroll | ≥ 60 FPS on a 380,000-item library, which is a p95 frame time ≤ 16.7 ms |
-| Import CPU | ≤ 2.0 CPU seconds per GB imported on every leg, scored; the `import throughput` job fails above 3.0 CPU seconds per GB on any leg. `cpu_percent` is reported next to it as context. Team targets. Status: Partial (ubuntu-24.04 and macos-14 meet 2.0 today). See [Import CPU](#import-cpu). |
+| Import CPU | ≤ 2.0 normalized CPU seconds per GB imported on every leg, scored; the `import throughput` job fails above 3.0 normalized CPU seconds per GB on any leg. Only the two hash phases are normalized, to a 1,800 MB/s SHA-256 reference. Raw CPU seconds per GB and `cpu_percent` are reported next to it. Team targets. Status: Partial until every leg is at or under 2.0. See [Import CPU](#import-cpu). |
 | Backup CPU | Average ≤ 25% of one core across a background backup. A hash may use one core. It does not fan out across every core. |
 | Backup battery | Backup does not run on battery by default. Once a client can measure drain, screen-off backup stays ≤ 5% battery per hour. |
 
@@ -291,8 +291,14 @@ The `import throughput` job reports the CPU of the 1,000-photo, 5 GB import, and
 
 Both numbers below are team targets, not requirements from Jay:
 
-- **Scored target: ≤ 2.0 CPU seconds per GB on every leg** (10 CPU seconds per 1,000 five-megabyte photos). Status: **Partial**. ubuntu-24.04 and macos-14 meet it today; ubuntu-26.04 and windows-2025 do not.
-- **Regression gate: ≤ 3.0 CPU seconds per GB on every leg.** The job fails above it. The gate reads `cpu_seconds_per_gb` from the same job and the same rounds it reports.
+- **Scored target: ≤ 2.0 normalized CPU seconds per GB on every leg** (10 CPU seconds per 1,000 five-megabyte photos). Status: **Partial** until every leg is at or under 2.0 normalized.
+- **Regression gate: ≤ 3.0 normalized CPU seconds per GB on every leg.** The job fails above it. The gate reads its numbers from the same job and the same rounds it reports.
+
+**Normalization.** Runner CPUs differ, and SHA-256 is the work that varies most with them. The job therefore measures its own one-thread in-memory SHA-256 rate (`sha256_mb_s`) and rescales only the two hash phases, `hash` and `readback_hash`, to a 1,800 MB/s reference:
+
+`normalized = raw − hash + hash × sha256_mb_s / 1800`
+
+Here `hash` is those two phases' thread CPU per GB. Every other phase stays as measured. The job prints both `cpu_seconds_per_gb` (raw) and `cpu_seconds_per_gb_normalized`. The gate and the scored target use the normalized number. Without a usable rate, the raw number is used.
 
 **`cpu_percent`** stays in the report as context: the same CPU time divided by (import wall time × logical cores), times 100. It is no longer the target because it moves with disk speed: the same work on a disk twice as fast scores twice the percent. The earlier 10 percent target is printed beside it for comparison.
 

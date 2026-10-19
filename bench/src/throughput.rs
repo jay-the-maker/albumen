@@ -56,9 +56,12 @@ pub const CPU_PERCENT_TARGET: f64 = 10.0;
 /// both SHA-256 passes, fsync, and read-back included). Report only. The
 /// derivation is in docs/performance-budgets.md.
 pub const CPU_SECONDS_PER_GB_TARGET: f64 = 2.0;
-/// Team regression gate for CPU seconds per GB imported: the import
-/// throughput job fails above it on any leg.
+/// Team regression gate for normalized CPU seconds per GB imported: the
+/// import throughput job fails above it on any leg.
 pub const CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
+/// Reference one-thread in-memory SHA-256 rate the hash phases are
+/// normalized to, in MB/s.
+pub const SHA256_REFERENCE_MB_S: f64 = 1800.0;
 /// Upper bound on import workers. The pool is also limited by the CPU count
 /// and by the number of files.
 pub const MAX_IMPORT_WORKERS: usize = 8;
@@ -151,6 +154,11 @@ pub struct ThroughputReport {
     /// `cpu_seconds / (bytes / 10^9)`: CPU seconds per GB imported, per
     /// round. Unlike `cpu_percent`, it does not move with disk speed.
     pub cpu_seconds_per_gb: f64,
+    /// [`Self::cpu_seconds_per_gb`] with only the hash and read-back hash
+    /// phases rescaled to a [`SHA256_REFERENCE_MB_S`] runner: their thread
+    /// CPU times `sha256_mb_s / 1800`. Everything else stays as measured.
+    /// The gate and the scored target use this number.
+    pub cpu_seconds_per_gb_normalized: f64,
     /// The CPU has the SHA-256 instructions `sha2` checks for (SHA-NI on
     /// x86_64, SHA2 on aarch64).
     pub sha_hw: bool,
@@ -233,9 +241,12 @@ impl ThroughputReport {
         value["cpu_seconds_per_gb"] = json!(self.cpu_seconds_per_gb);
         value["cpu_seconds_per_gb_target"] = json!(CPU_SECONDS_PER_GB_TARGET);
         value["cpu_seconds_per_gb_gate"] = json!(CPU_SECONDS_PER_GB_GATE);
-        value["cpu_seconds_per_gb_gate_passed"] = json!(cpu_gate_passes(self.cpu_seconds_per_gb));
+        value["cpu_seconds_per_gb_normalized"] = json!(self.cpu_seconds_per_gb_normalized);
+        value["sha256_reference_mb_s"] = json!(SHA256_REFERENCE_MB_S);
+        value["cpu_seconds_per_gb_gate_passed"] =
+            json!(cpu_gate_passes(self.cpu_seconds_per_gb_normalized));
         value["cpu_seconds_per_gb_met"] =
-            json!(self.cpu_seconds_per_gb <= CPU_SECONDS_PER_GB_TARGET);
+            json!(self.cpu_seconds_per_gb_normalized <= CPU_SECONDS_PER_GB_TARGET);
         value["phase_cpu_ms_per_round"] = phase_cpu_ms(self);
         value["sha_hw"] = json!(self.sha_hw);
         value["sha256_mb_s"] = json!(self.sha256_mb_s);
@@ -264,10 +275,13 @@ pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
             report.source_changed
         ));
     }
-    if !cpu_gate_passes(report.cpu_seconds_per_gb) {
+    if !cpu_gate_passes(report.cpu_seconds_per_gb_normalized) {
         problems.push(format!(
-            "import CPU {:.3} CPU seconds per GB is above the {:.1} regression gate",
-            report.cpu_seconds_per_gb, CPU_SECONDS_PER_GB_GATE
+            "import CPU {:.3} normalized CPU seconds per GB (raw {:.3}, sha256_mb_s {:.0}) is above the {:.1} regression gate",
+            report.cpu_seconds_per_gb_normalized,
+            report.cpu_seconds_per_gb,
+            report.sha256_mb_s,
+            CPU_SECONDS_PER_GB_GATE
         ));
     }
     problems
@@ -376,6 +390,8 @@ pub fn measure_throughput(
     if !(raw_mb_s.is_finite() && raw_mb_s > 0.0 && import_mb_s.is_finite() && import_mb_s > 0.0) {
         return Err("import or raw throughput was not a positive number".to_string());
     }
+    let gb = (expected_bytes.max(1) as f64) / 1e9;
+    let sha_rate = sha256_mb_s();
     Ok(ThroughputReport {
         leg: leg.to_string(),
         files,
@@ -413,10 +429,36 @@ pub fn measure_throughput(
         cores,
         cpu_percent: cpu_seconds / (import_seconds_total.max(1e-9) * cores as f64) * 100.0,
         cpu_seconds_per_1000: cpu_seconds / rounds as f64 * 1000.0 / (files as f64),
-        cpu_seconds_per_gb: cpu_seconds / rounds as f64 / ((expected_bytes.max(1) as f64) / 1e9),
+        cpu_seconds_per_gb: cpu_seconds / rounds as f64 / gb,
         sha_hw: sha_hw(),
-        sha256_mb_s: sha256_mb_s(),
+        sha256_mb_s: sha_rate,
+        cpu_seconds_per_gb_normalized: normalized_cpu_seconds_per_gb(
+            cpu_seconds / rounds as f64 / gb,
+            hash_cpu_ns(&phases) as f64 / 1e9 / rounds as f64 / gb,
+            sha_rate,
+        ),
     })
+}
+
+/// Thread CPU of the two SHA-256 phases, hash and read-back hash, summed.
+fn hash_cpu_ns(phases: &albumen_ingest::CopyPhases) -> u64 {
+    phases
+        .cpu_named()
+        .iter()
+        .filter(|(name, _)| matches!(*name, "hash" | "readback_hash"))
+        .fold(0u64, |sum, (_, ns)| sum.saturating_add(*ns))
+}
+
+/// `raw - hash + hash * sha256_mb_s / 1800`: the hash phases' CPU as it
+/// would be on a runner whose one-thread SHA-256 runs at 1,800 MB/s. A
+/// runner that hashes slower is not charged for its slower CPU; one that
+/// hashes faster gets no credit for it. Without a usable rate the raw
+/// number is returned.
+pub fn normalized_cpu_seconds_per_gb(raw: f64, hash: f64, sha256_mb_s: f64) -> f64 {
+    if !(sha256_mb_s.is_finite() && sha256_mb_s > 0.0 && hash.is_finite()) {
+        return raw;
+    }
+    raw - hash + hash * sha256_mb_s / SHA256_REFERENCE_MB_S
 }
 
 /// User plus system CPU time of this process, all threads.
@@ -813,17 +855,19 @@ pub fn cpu_scorecard(report: &ThroughputReport) -> String {
     let mark = |met: bool| if met { "met" } else { "not met" };
     format!(
         "| import CPU ({leg}) | value | team target | |\n|---|---|---|---|\n\
-         | CPU seconds per GB imported | {gb:.2} | ≤ {gb_target:.1} scored | {gb_met} |\n\
-         | CPU seconds per GB, regression gate | {gb:.2} | ≤ {gb_gate:.1} (fails the job) | {gate_met} |\n\
+         | CPU seconds per GB, normalized to {sha_ref:.0} MB/s SHA-256 | {norm:.2} | ≤ {gb_target:.1} scored, ≤ {gb_gate:.1} gate (fails the job) | scored {gb_met}, gate {gate_met} |\n\
+         | CPU seconds per GB, raw | {gb:.2} | | |\n\
          | cpu_percent (CPU ÷ (wall × {cores} cores)), context | {pct:.1}% | | |\n\
          | CPU seconds per 1,000 photos | {per_1000:.2} | | |\n\
          | hardware SHA-256 | {sha_hw} ({sha_mb_s:.0} MB/s) | | |\n",
         leg = report.leg,
         gb = report.cpu_seconds_per_gb,
         gb_target = CPU_SECONDS_PER_GB_TARGET,
-        gb_met = mark(report.cpu_seconds_per_gb <= CPU_SECONDS_PER_GB_TARGET),
+        norm = report.cpu_seconds_per_gb_normalized,
+        sha_ref = SHA256_REFERENCE_MB_S,
+        gb_met = mark(report.cpu_seconds_per_gb_normalized <= CPU_SECONDS_PER_GB_TARGET),
         gb_gate = CPU_SECONDS_PER_GB_GATE,
-        gate_met = mark(cpu_gate_passes(report.cpu_seconds_per_gb)),
+        gate_met = mark(cpu_gate_passes(report.cpu_seconds_per_gb_normalized)),
         cores = report.cores,
         pct = report.cpu_percent,
         per_1000 = report.cpu_seconds_per_1000,
@@ -1070,6 +1114,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalizing_rescales_only_the_hash_phases() {
+        // 2026-10-19, #119 ubuntu-24.04: raw 3.188, hash phases 10.574 s
+        // per 5 GB round, SHA-256 1,337 MB/s.
+        let hash = 10.574 / 5.0;
+        let norm = normalized_cpu_seconds_per_gb(3.188, hash, 1337.0);
+        assert!((norm - (3.188 - hash + hash * 1337.0 / 1800.0)).abs() < 1e-12);
+        assert!(norm < 3.0, "{norm}");
+        // At the reference rate nothing moves.
+        assert_eq!(normalized_cpu_seconds_per_gb(2.5, 1.0, 1800.0), 2.5);
+        // A faster runner is charged up to the reference.
+        assert!(normalized_cpu_seconds_per_gb(2.5, 1.0, 2400.0) > 2.5);
+        // Without a rate the raw number stands.
+        assert_eq!(normalized_cpu_seconds_per_gb(2.5, 1.0, 0.0), 2.5);
+    }
+
+    #[test]
     fn the_cpu_gate_passes_the_measured_legs_and_fails_above_three() {
         // #112 on 2026-10-19: ubuntu-24.04, ubuntu-26.04, windows-2025, macos-14.
         for measured in [1.863, 2.790, 2.932, 1.935] {
@@ -1156,6 +1216,7 @@ mod tests {
             cpu_percent: 5.6,
             cpu_seconds_per_1000: 4.0,
             cpu_seconds_per_gb: 0.8,
+            cpu_seconds_per_gb_normalized: 0.8,
             sha_hw: true,
             sha256_mb_s: 2000.0,
             verifiers: 2,
