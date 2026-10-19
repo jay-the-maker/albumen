@@ -54,11 +54,11 @@ No CC0, CC-BY, or public-domain HEIC plus MOV pair with one shared content ident
 
 The downloaded HEIC and ProRAW above still have no IPTC group. The IPTC Photo Metadata reference JPEG at https://iptc.org/std/photometadata/examples/IPTC-PhotometadataRef-Std2025.1.jpg does contain IPTC, and its copyright notice is `Copyright (Notice) 2025.1 IPTC - www.iptc.org`. That is not CC0, CC-BY, or public domain, so it is not a fixture.
 
-`scripts/write-iptc-core.sh` copies `fixtures/jpeg-gps/IMG_0001.jpg` and `fixtures/heic/IMG_0002.heic` and writes IPTC Core with ExifTool 13.59. The originals stay as they were. The copies are committed at `fixtures/iptc/` and the script has to reproduce these SHA-256 values:
+`scripts/write-iptc-core.sh` copies `fixtures/jpeg-gps/IMG_0001.jpg` and `fixtures/heic/IMG_0002.heic` and writes IPTC Core with ExifTool 13.59. The originals stay as they were. The copies are committed as `IMG_0010.jpg` and `IMG_0011.heic` because the corpus round-trip stores by filename and must not collide with `IMG_0001.jpg` or `IMG_0002.heic`. The script has to reproduce these SHA-256 values:
 
 | File | SHA-256 |
 | --- | --- |
-| `fixtures/iptc/IMG_0001.jpg` | `2f9307265d29e613457a8b434467cb8c57cfebacb5b15c8d082038cfdafabded` |
-| `fixtures/iptc/IMG_0002.heic` | `c724675f291a91aa073d19ef830d58ff33cb9b8f3fe2511fcbec91d849f0e21b` |
+| `fixtures/iptc/IMG_0010.jpg` | `2f9307265d29e613457a8b434467cb8c57cfebacb5b15c8d082038cfdafabded` |
+| `fixtures/iptc/IMG_0011.heic` | `c724675f291a91aa073d19ef830d58ff33cb9b8f3fe2511fcbec91d849f0e21b` |
 
 The fields are by-line `Albumen Project`, caption `Synthetic CC0 fixture. Not a photograph.`, keywords `albumen` and `cc0`, city `Fixture City`, country `Fixture Country`, and copyright notice `CC0 1.0 Universal`. `XMP-iptcCore:CountryCode` is `XC` and `XMP-iptcCore:Location` is `Synthetic location`. The same XMP fields are written on both files. A HEIC has no IPTC box, so the HEIC stores the JPEG's IIM records as EXIF `IPTC-NAA`. ExifTool `-a -G1` reports that block in the `IPTC` group and the core namespace as `XMP-iptcCore`. Dates written into the packet are `2012:06:15 10:30:00`, so the bytes do not depend on the clock.

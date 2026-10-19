@@ -49,7 +49,7 @@ fn iptc_core_is_deterministic_and_survives_ingest_and_export() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    for (name, sha) in [("IMG_0001.jpg", JPEG_SHA), ("IMG_0002.heic", HEIC_SHA)] {
+    for (name, sha) in [("IMG_0010.jpg", JPEG_SHA), ("IMG_0011.heic", HEIC_SHA)] {
         let fresh = generated.path().join(name);
         let committed = repo_path("fixtures/iptc").join(name);
         assert_eq!(

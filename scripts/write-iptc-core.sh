@@ -31,8 +31,10 @@ native() {
   fi
 }
 
-cp "$root/fixtures/jpeg-gps/IMG_0001.jpg" "$dest/IMG_0001.jpg"
-cp "$root/fixtures/heic/IMG_0002.heic" "$dest/IMG_0002.heic"
+# The corpus round-trip stores by filename. These copies must not reuse
+# IMG_0001.jpg or IMG_0002.heic.
+cp "$root/fixtures/jpeg-gps/IMG_0001.jpg" "$dest/IMG_0010.jpg"
+cp "$root/fixtures/heic/IMG_0002.heic" "$dest/IMG_0011.heic"
 
 # Dates are fixed so the XMP packet does not pick up the clock.
 exiftool -overwrite_original -m \
@@ -55,12 +57,12 @@ exiftool -overwrite_original -m \
   -XMP-photoshop:Country="Fixture Country" \
   -XMP-iptcCore:CountryCode=XC \
   -XMP-iptcCore:Location="Synthetic location" \
-  "$(native "$dest/IMG_0001.jpg")" >/dev/null
+  "$(native "$dest/IMG_0010.jpg")" >/dev/null
 
 # HEIC has no IPTC IIM box. The same records are stored as EXIF IPTC-NAA,
 # which ExifTool reads back in the IPTC group. The block is the JPEG's IIM,
 # passed on stdin so a Windows path is not part of the write.
-exiftool -iptc -b "$(native "$dest/IMG_0001.jpg")" >"$dest/iptc.bin"
+exiftool -iptc -b "$(native "$dest/IMG_0010.jpg")" >"$dest/iptc.bin"
 exiftool -overwrite_original -m \
   -EXIF:IPTC-NAA"<=-" \
   -EXIF:ModifyDate="2012:06:15 10:30:00" \
@@ -75,5 +77,5 @@ exiftool -overwrite_original -m \
   -XMP-photoshop:Country="Fixture Country" \
   -XMP-iptcCore:CountryCode=XC \
   -XMP-iptcCore:Location="Synthetic location" \
-  "$(native "$dest/IMG_0002.heic")" <"$dest/iptc.bin" >/dev/null
+  "$(native "$dest/IMG_0011.heic")" <"$dest/iptc.bin" >/dev/null
 rm -f "$dest/iptc.bin"
