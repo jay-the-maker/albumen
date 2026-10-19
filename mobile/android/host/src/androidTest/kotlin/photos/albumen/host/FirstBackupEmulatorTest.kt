@@ -54,6 +54,7 @@ import java.util.concurrent.TimeUnit
  * `X-Albumen-Sha256` must show the same non-blank failure on the status
  * screen and in notification [BackupNotifier.NOTIFICATION_ID]. Those checks
  * block until the status file and the notification record the failure, then
+ * until that pass has ended and its foreground notification is gone, then
  * until a resume shows that failure on the screen. The first resume can still
  * be the permission decision. The wait is bounded by the same deadline.
  */
@@ -332,6 +333,11 @@ class FirstBackupEmulatorTest {
     private fun awaitFailure(context: Context, scenario: ActivityScenario<HostActivity>, marker: String): Surfaced {
         val deadline = SystemClock.elapsedRealtime() + FAILURE_WAIT_MS
         awaitPublished(context, marker, deadline)
+        // Read the surfaces only after the pass has ended. WorkManager then
+        // stops the foreground service and cancels its notification ID. When
+        // that ID was also the status ID, the failure vanished here, and the
+        // test passed only when it read the notification before the pass ended.
+        awaitPassEnded(context, deadline)
         var screen = ""
         var notification = ""
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -350,6 +356,32 @@ class FirstBackupEmulatorTest {
             "failure was not surfaced. screen: $screen\nnotification: $notification\n" +
                 "store: ${BackupStatusStore.read(context)}\nwork: ${workState(context)}",
         )
+    }
+
+    /**
+     * The failing pass has ended once its WorkInfo leaves RUNNING or its run
+     * attempt count rises (the test scheduler may start the retry at once).
+     */
+    private fun awaitPassEnded(context: Context, deadline: Long) {
+        val manager = WorkManager.getInstance(context)
+        fun current(): WorkInfo? = manager.getWorkInfosForUniqueWork(BackupSchedule.FIRST_NAME)
+            .get(10, TimeUnit.SECONDS)
+            .firstOrNull()
+        var info = current()
+        while (info != null && info.state == WorkInfo.State.RUNNING && info.runAttemptCount < 1 &&
+            SystemClock.elapsedRealtime() < deadline
+        ) {
+            SystemClock.sleep(50)
+            info = current()
+        }
+        if (info == null || (info.state == WorkInfo.State.RUNNING && info.runAttemptCount < 1)) {
+            throw AssertionError(
+                "first failing pass had not ended at the bound. work: ${info?.state} store: ${BackupStatusStore.read(context)}",
+            )
+        }
+        // stopForeground runs on the service's main thread after the state change.
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        SystemClock.sleep(PASS_END_SETTLE_MS)
     }
 
     private fun awaitPublished(context: Context, marker: String, deadline: Long) {
@@ -509,5 +541,8 @@ class FirstBackupEmulatorTest {
 
         /** Upper bound on each wait so a missed file event is checked again. The wait returns early on a signal. */
         const val SIGNAL_SLICE_MS = 500L
+
+        /** Lets the foreground service finish stopping before the notification is read. */
+        const val PASS_END_SETTLE_MS = 1_000L
     }
 }

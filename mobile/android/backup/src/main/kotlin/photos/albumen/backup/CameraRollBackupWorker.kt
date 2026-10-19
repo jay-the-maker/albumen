@@ -22,8 +22,10 @@ class CameraRollBackupWorker(
 ) : CoroutineWorker(context, params) {
     override suspend fun getForegroundInfo(): ForegroundInfo {
         val notification = BackupNotifier.ongoing(applicationContext)
+        // Not NOTIFICATION_ID: WorkManager cancels this ID when the pass ends,
+        // and that would take the failure status down with it.
         return ForegroundInfo(
-            BackupNotifier.NOTIFICATION_ID,
+            BackupNotifier.ONGOING_NOTIFICATION_ID,
             notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
         )
