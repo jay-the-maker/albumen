@@ -132,9 +132,16 @@ async fn listen_inner(
         Some(addr) => Some(ftp::spawn(addr, library, settings.user, settings.password).await?),
         None => None,
     };
-    for addr in [webdav, sftp, ftp].into_iter().flatten() {
-        record_listen(&library_path, addr)?;
-    }
+    let bound: Vec<SocketAddr> = [webdav, sftp, ftp].into_iter().flatten().collect();
+    tokio::task::spawn_blocking(move || {
+        for addr in bound {
+            record_listen(&library_path, addr)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(std::io::Error::other)
+    .and_then(|result: std::io::Result<()>| result)?;
     Ok((Listening { webdav, sftp, ftp }, session))
 }
 
