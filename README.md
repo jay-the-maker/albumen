@@ -102,6 +102,16 @@ albumen import-takeout --from ~/Downloads/takeout --to ~/library --report ~/take
 
 The design note is [docs/importers/takeout.md](docs/importers/takeout.md).
 
+## iCloud Photos
+
+`albumen import-icloud` copies an iCloud Photos download, a Photos export, or a copy of a Photos library. The source is opened read-only. Originals and edited versions stay bit-exact. Live Photo pairs and AAE/XMP sidecars are kept. A capture time read from a sidecar stays in the reconciliation report and is not written into an original. The command exits non-zero unless the count in equals the count out and every SHA-256 matches.
+
+```bash
+albumen import-icloud --from ~/Pictures/Photos\ Library.photoslibrary --to ~/library --report ~/icloud-report.jsonl
+```
+
+The design note is [docs/importers/icloud.md](docs/importers/icloud.md).
+
 ## Read-only macOS trial
 
 `albumen scan <dir> --manifest <out>` walks a library without opening it for write and records path, size, mtime, SHA-256, pairs, sidecars, and key metadata in a JSONL manifest. If the size or mtime changes while a file is read, that line also records `drift` with the before and after values, and the source file is left as it is. The manifest has to resolve outside the library. Run the same command again to resume. `albumen verify-manifest` re-hashes a scan manifest and reports drift. The exact commands for a subset of a large volume are in [docs/trial-macos.md](docs/trial-macos.md).

@@ -6,7 +6,7 @@ Sane defaults, no account, and no nags are hard rules. The pull request template
 
 ## Steps today
 
-`albumen import-takeout` copies a Google Takeout download. It does not modify the archives. The first camera backup that exists is `albumen-receive`. It stores a file only after `copy_verify`. It does not delete the source you uploaded.
+`albumen import-takeout` copies a Google Takeout download. `albumen import-icloud` copies an iCloud Photos download, export, or Photos library copy. Neither command modifies the source. The first camera backup that exists is `albumen-receive`. It stores a file only after `copy_verify`. It does not delete the source you uploaded.
 
 With Rust 1.94 or newer already installed (CI uses 1.99.1), the path is five steps:
 

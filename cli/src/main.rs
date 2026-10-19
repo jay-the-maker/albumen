@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `albumen export`, `albumen import-takeout`, `albumen scan`, and
-//! `albumen verify-manifest`.
+//! `albumen export`, `albumen import-takeout`, `albumen import-icloud`,
+//! `albumen scan`, and `albumen verify-manifest`.
 //!
 //! Export is `copy_verify` across a library. It does not modify sources and
-//! it does not overwrite a destination that differs. Takeout import streams
-//! zip and tgz parts read-only. Scan only reads the source and writes a JSONL
-//! manifest outside that tree.
+//! it does not overwrite a destination that differs. Takeout and iCloud
+//! import read the download or library and copy into a directory you choose.
+//! Scan only reads the source and writes a JSONL manifest outside that tree.
 
 // IngestError is the library's error. The CLI prints it; it does not reshape it.
 #![allow(clippy::result_large_err)]
@@ -15,15 +15,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use albumen_ingest::{
-    export_tree, import_takeout, parse_manifest, scan_tree, verify_scan_manifest, verify_tree,
-    write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
+    export_tree, import_icloud, import_takeout, parse_manifest, scan_tree, verify_scan_manifest,
+    verify_tree, write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config,
+    S3Store,
 };
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "albumen",
-    about = "Bit-exact photo library export, Takeout import, and read-only scan"
+    about = "Bit-exact photo library export, Takeout import, iCloud import, and read-only scan"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -72,6 +73,23 @@ enum Command {
         #[arg(long)]
         to: PathBuf,
         /// JSONL reconciliation report, outside the archives and the library.
+        #[arg(long)]
+        report: PathBuf,
+    },
+    /// Copy an iCloud Photos download, export, or Photos library.
+    ///
+    /// The source is opened read-only. Originals, edited versions, Live Photo
+    /// pairs, and AAE/XMP sidecars are copy-verified. A capture time read from
+    /// a sidecar stays in the report and is not written into an original.
+    /// The command exits non-zero when the reconciliation report does not match.
+    ImportIcloud {
+        /// Export directory, `.photoslibrary` bundle, or one `.zip`/`.tgz` download.
+        #[arg(long)]
+        from: PathBuf,
+        /// Destination library. Must not overlap the source.
+        #[arg(long)]
+        to: PathBuf,
+        /// JSONL reconciliation report, outside the source and the library.
         #[arg(long)]
         report: PathBuf,
     },
@@ -124,6 +142,17 @@ fn run() -> Result<(), IngestError> {
         }
         Command::ImportTakeout { from, to, report } => {
             let outcome = import_takeout(&from, &to, &report)?;
+            println!(
+                "imported {} files ({} in) to {}",
+                outcome.count_out,
+                outcome.count_in,
+                to.display()
+            );
+            println!("report {}", report.display());
+            Ok(())
+        }
+        Command::ImportIcloud { from, to, report } => {
+            let outcome = import_icloud(&from, &to, &report)?;
             println!(
                 "imported {} files ({} in) to {}",
                 outcome.count_out,
