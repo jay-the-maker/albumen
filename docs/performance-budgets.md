@@ -241,7 +241,7 @@ The `library scale` workflow (`scripts/library-scale.py`) reports the first inde
 
 ### Before the index
 
-These are the walk-based numbers from before the index, when every search walked and statted the whole library. Same generator, 380,000 items, 200 fixed queries, seed 380000. Every leg that finished, and a local Linux run, built the same library: `paths_sha256` `ec8ac920ee080c9d23c40c8a0a3110b3f255ef133109314336635852eda1886e`. Cold start here is spawn to `initialize` and `tools/list`, which needed no work before the index existed. Process start to first answer was one full walk.
+These are the walk-based numbers from before the index, when every search walked and statted the whole library. Same generator, 380,000 items, 200 fixed queries, seed 380000. Every leg, and a local Linux run, built the same library: `paths_sha256` `ec8ac920ee080c9d23c40c8a0a3110b3f255ef133109314336635852eda1886e`. Cold start here is spawn to `initialize` and `tools/list`, which needed no work before the index existed. Process start to first answer was one full walk.
 
 | Leg | Run | Cold start | Process start to first answer | Search p50 | Search p95 | Peak memory |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -249,6 +249,6 @@ These are the walk-based numbers from before the index, when every search walked
 | `ubuntu-24.04` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623) | 2.1 ms | 5,313.7 ms | 5,268.2 ms | 5,459.8 ms | 5.6 MiB |
 | `macos-14` | [39244175785](https://github.com/jay-the-maker/albumen/actions/runs/39244175785) | 21.4 ms | 12,897.5 ms | 10,151.1 ms | 13,228.3 ms | 6.0 MiB |
 | `macos-14` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623) | 28.8 ms | 18,185.9 ms | 10,867.1 ms | 14,131.4 ms | 5.9 MiB |
-| `windows-2025` | [job 118035984598](https://github.com/jay-the-maker/albumen/actions/runs/39245400623/job/118035984598) | still running at 2026-10-19T05:50 PT | | | | |
+| `windows-2025` | [39245400623](https://github.com/jay-the-maker/albumen/actions/runs/39245400623/job/118035984598) | 9.1 ms | 27,114.3 ms | 26,280.8 ms | 27,645.0 ms | 6.4 MiB |
 
 The 2,000-item smoke pass on `windows-2025` measured a search p95 of 192.2 ms with the walk. With the index, search p95 is 25 ms on `ubuntu-24.04`, 17 ms on `macos-14`, and 40 ms on `windows-2025`.
