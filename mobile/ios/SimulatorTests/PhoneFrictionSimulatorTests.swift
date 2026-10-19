@@ -79,10 +79,11 @@ final class PhoneFrictionSimulatorTests: XCTestCase {
 
     private func percentEncode(_ text: String) -> String {
         var out = ""
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         for byte in text.utf8 {
             let value = Int(byte)
             let scalar = UnicodeScalar(value)!
-            if CharacterSet.alphanumerics.contains(scalar) || "-._~".contains(scalar) {
+            if unreserved.contains(scalar) {
                 out.append(Character(scalar))
             } else {
                 out.append(String(format: "%%%02X", value))
