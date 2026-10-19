@@ -156,8 +156,10 @@ The agent guide is [AGENTS.md](AGENTS.md). `albumen-mcp` speaks MCP over stdio. 
 
 ```bash
 albumen-mcp --library ./library
-albumen-mcp --library ./library --enable-export --enable-upload
+albumen-mcp --library ./library --destination ./destination --enable-export --enable-upload
 ```
+
+`--destination` is required with those flags. It must be a directory that is not the library and not another mount of that same directory.
 
 Details are in [docs/architecture.md](docs/architecture.md). What is not built yet is listed in [ROADMAP.md](ROADMAP.md).
 

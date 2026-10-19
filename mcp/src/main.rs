@@ -37,6 +37,9 @@ struct Cli {
     /// Same as `--apply`.
     #[arg(long)]
     execute: bool,
+    /// Writable directory for export and upload. Required with `--enable-export` or `--enable-upload`. Must not be the library mount.
+    #[arg(long)]
+    destination: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -46,6 +49,7 @@ fn main() -> ExitCode {
         cli.enable_export,
         cli.enable_upload,
         cli.apply || cli.execute,
+        cli.destination,
     ) {
         Ok(library) => library,
         Err(err) => {

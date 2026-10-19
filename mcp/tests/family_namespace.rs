@@ -68,18 +68,20 @@ fn upload_refuses_a_family_library_and_keeps_originals() {
     let library = &planted.library;
     let incoming = tmp.path().join("incoming.txt");
     fs::write(&incoming, b"mcp-upload").unwrap();
-    let tools = Library::new(library.clone(), true, true, true).unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let tools = Library::new(library.clone(), true, true, true, Some(outside.clone())).unwrap();
     let err = tools
         .call("upload", &json!({"path": incoming.display().to_string()}))
         .unwrap_err();
     assert!(err.contains("family library"), "{err}");
-    let dry = Library::new(library.clone(), true, true, false).unwrap();
+    let dry = Library::new(library.clone(), true, true, false, Some(outside.clone())).unwrap();
     let err = dry
         .call("upload", &json!({"path": incoming.display().to_string()}))
         .unwrap_err();
     assert!(err.contains("family library"), "{err}");
     let nested = library.join("members");
-    let err = Library::new(nested, false, true, true)
+    let err = Library::new(nested, false, true, true, Some(outside))
         .unwrap()
         .call("upload", &json!({"path": incoming.display().to_string()}))
         .unwrap_err();
