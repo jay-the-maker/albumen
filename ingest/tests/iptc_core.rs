@@ -38,14 +38,18 @@ fn iptc_core_is_deterministic_and_survives_ingest_and_export() {
 
     let generated = tempfile::tempdir().unwrap();
     let script = repo_path("scripts/write-iptc-core.sh");
-    let output = Command::new("bash")
+    let bash = bash_program();
+    let output = Command::new(&bash)
         .arg(&script)
         .arg(generated.path())
         .output()
-        .unwrap_or_else(|err| panic!("run {}: {err}", script.display()));
+        .unwrap_or_else(|err| panic!("run {} {}: {err}", bash.display(), script.display()));
     assert!(
         output.status.success(),
-        "write-iptc-core failed: {}",
+        "write-iptc-core failed via {} (status {:?})\nstdout:\n{}\nstderr:\n{}",
+        bash.display(),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -122,6 +126,26 @@ fn require_iptc_core(dump: &Value, path: &Path) {
     assert_eq!(map["IPTC:CopyrightNotice"], "CC0 1.0 Universal");
     assert_eq!(map["XMP-iptcCore:CountryCode"], "XC");
     assert_eq!(map["XMP-iptcCore:Location"], "Synthetic location");
+}
+
+/// Git for Windows, not `C:\Windows\System32\bash.exe`.
+///
+/// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
+/// Bash when the test process is a Windows binary, and it exits before the
+/// writer runs.
+fn bash_program() -> PathBuf {
+    if cfg!(windows) {
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    PathBuf::from("bash")
 }
 
 fn repo_path(relative: &str) -> PathBuf {

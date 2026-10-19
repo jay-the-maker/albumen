@@ -3,6 +3,7 @@
 # Image-ExifTool 13.59 produces the same bytes on every run. The SHA-256 pins
 # are in tests/fixtures/LICENSES.md and fixtures/SHA256SUMS.
 set -euo pipefail
+trap 'echo "write-iptc-core.sh failed: status $? line ${BASH_LINENO[0]:-?}" >&2' ERR
 
 dest="${1:?usage: write-iptc-core.sh DIR}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
