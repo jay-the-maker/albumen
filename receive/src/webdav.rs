@@ -102,6 +102,11 @@ async fn handle(
         .await;
     }
     let length = content_length.unwrap_or(0);
+    // URLSession waits for this before it sends the body. A client that already
+    // sent the bytes is left alone.
+    if method == "PUT" && expects_continue(&head) && (leftover.len() as u64) < length {
+        socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+    }
     if leftover.len() as u64 > length {
         return write_status(&mut socket, 400, "bad body", &[]).await;
     }
@@ -381,6 +386,15 @@ async fn write_status(
     }
     text.push_str("\r\n");
     socket.write_all(text.as_bytes()).await
+}
+
+fn expects_continue(head: &str) -> bool {
+    head.split("\r\n").any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("expect")
+                && value.to_ascii_lowercase().contains("100-continue")
+        })
+    })
 }
 
 fn percent_decode(text: &str) -> String {

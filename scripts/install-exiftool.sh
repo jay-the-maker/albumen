@@ -48,7 +48,21 @@ fi
 mkdir -p "$CACHE"
 
 if [[ ! -f "$TARBALL" ]] || ! sha256_ok "$SHA256" "$TARBALL"; then
-  curl -fsSL -o "${TARBALL}.partial" "$URL"
+  # SourceForge sometimes drops the TLS stream mid-body. The SHA-256 check
+  # below still refuses a partial or replaced tarball.
+  downloaded=0
+  for _ in 1 2 3 4 5; do
+    if curl -fsSL -o "${TARBALL}.partial" "$URL"; then
+      downloaded=1
+      break
+    fi
+    rm -f "${TARBALL}.partial"
+    sleep 2
+  done
+  if [[ "$downloaded" -ne 1 ]]; then
+    echo "ExifTool download failed: ${URL}" >&2
+    exit 1
+  fi
   check_sha256 "$SHA256" "${TARBALL}.partial"
   mv "${TARBALL}.partial" "$TARBALL"
 fi

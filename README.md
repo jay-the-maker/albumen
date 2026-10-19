@@ -30,6 +30,8 @@ Clients:
 
 The backup apps call the same ingest path as a drag-and-drop import. They do not recompress on the way in.
 
+Linux, Windows, and macOS are first-class for the ingest tools. `albumen platform-dirs` prints the native config and data directories and creates nothing. The receiver can read its password from the Keychain, Windows Credential Manager, or the Secret Service, and it can write a launchd, systemd, or Task Scheduler definition. Each of those is opt-in. See [docs/platforms.md](docs/platforms.md).
+
 ## Install from source
 
 The toolchain in CI is Rust 1.99.1. The workspace asks for 1.94 or newer. Metadata search needs ExifTool on `PATH`. `scripts/install-exiftool.sh` downloads Image-ExifTool 13.59 and checks its SHA-256. It does not use a distro package.

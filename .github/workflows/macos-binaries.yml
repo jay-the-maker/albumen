@@ -1,3 +1,6 @@
+# The filename stays macos-binaries.yml. Keyless cosign certificates name this
+# file, and docs/release-verify.md matches that path. The job builds Linux,
+# Windows, and macOS archives. It does not move the release tag.
 name: macos-binaries
 
 on:
@@ -16,20 +19,49 @@ permissions:
   attestations: write
 
 jobs:
-  macos-arm64:
-    name: albumen macOS arm64 binaries
-    runs-on: macos-14
-    timeout-minutes: 60
+  binaries:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: albumen-linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: albumen-linux-aarch64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: albumen-windows-x86_64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: albumen-windows-aarch64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            artifact: albumen-macos-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: albumen-macos-x86_64
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.target }}
 
       - uses: sigstore/cosign-installer@v3.8.2
 
       - name: Build release binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/albumen"
@@ -37,45 +69,58 @@ jobs:
           export CARGO_PROFILE_RELEASE_INCREMENTAL=false
           export CARGO_PROFILE_RELEASE_DEBUG=false
           export CARGO_PROFILE_RELEASE_STRIP=symbols
-          cargo build --release --locked -p albumen -p albumen-mcp -p albumen-receive
+          cargo build --release --locked --target "$TARGET" -p albumen -p albumen-mcp -p albumen-receive
 
-      - name: Package albumen, albumen-mcp, and albumen-receive
-        run: |
-          stage="$(mktemp -d)"
-          cp target/release/albumen target/release/albumen-mcp target/release/albumen-receive "$stage/"
-          (
-            cd "$stage"
-            shasum -a 256 albumen albumen-mcp albumen-receive > SHA256SUMS
-            tar -czf "$GITHUB_WORKSPACE/albumen-macos-arm64.tar.gz" albumen albumen-mcp albumen-receive SHA256SUMS
-            cp albumen albumen-mcp albumen-receive "$GITHUB_WORKSPACE/"
-          )
-          shasum -a 256 albumen-macos-arm64.tar.gz > albumen-macos-arm64.tar.gz.sha256
+      - name: Package the archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: bash scripts/package-release.sh "$TARGET" "$ARTIFACT"
 
       - name: Sign the binaries and the tarball
+        shell: bash
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
         run: |
-          for file in albumen albumen-mcp albumen-receive albumen-macos-arm64.tar.gz; do
-            cosign sign-blob --yes --bundle "${file}.bundle" "$file"
+          shopt -s nullglob
+          for file in albumen albumen.exe albumen-mcp albumen-mcp.exe albumen-receive albumen-receive.exe "${ARTIFACT}.tar.gz"; do
+            [ -f "$file" ] || continue
+            cosign sign-blob --yes --bundle "${ARTIFACT}.$(basename "$file").bundle" "$file"
           done
 
-      - uses: actions/attest-build-provenance@v2
+      - name: Attest Unix binaries
+        if: runner.os != 'Windows'
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
             albumen
             albumen-mcp
             albumen-receive
-            albumen-macos-arm64.tar.gz
+            ${{ matrix.artifact }}.tar.gz
+
+      - name: Attest Windows binaries
+        if: runner.os == 'Windows'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            albumen.exe
+            albumen-mcp.exe
+            albumen-receive.exe
+            ${{ matrix.artifact }}.tar.gz
 
       - name: Upload to the GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release || github.ref_name }}
+          ARTIFACT: ${{ matrix.artifact }}
         run: |
-          gh release upload "$TAG" \
-            albumen-macos-arm64.tar.gz \
-            albumen-macos-arm64.tar.gz.sha256 \
-            albumen.bundle \
-            albumen-mcp.bundle \
-            albumen-receive.bundle \
-            albumen-macos-arm64.tar.gz.bundle \
+          shopt -s nullglob
+          files=("${ARTIFACT}.tar.gz" "${ARTIFACT}.tar.gz.sha256")
+          for bundle in "${ARTIFACT}".*.bundle; do
+            files+=("$bundle")
+          done
+          gh release upload "$TAG" "${files[@]}" \
             --repo "${{ github.repository }}" \
             --clobber

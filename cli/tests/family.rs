@@ -137,7 +137,8 @@ fn member_cannot_alter_another_members_originals_through_the_cli() {
     ]);
     assert!(ok, "{text}");
 
-    let mtime = UNIX_EPOCH + Duration::new(1_400_000_111, 123_456_789);
+    // 100 ns aligned so NTFS stores this exact tick. The equality below stays exact.
+    let mtime = UNIX_EPOCH + Duration::new(1_400_000_111, 123_456_700);
     let photo = tmp.path().join("note.txt");
     let sidecar = tmp.path().join("note.xmp");
     stamp(&photo, b"synthetic-family-original", mtime);

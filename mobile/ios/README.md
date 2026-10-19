@@ -9,6 +9,7 @@ The background session PUTs the file to `albumen-receive` and sends `X-Albumen-M
 ```bash
 swift test --package-path mobile/ios
 scripts/ios-xcode.sh
+scripts/ios-simulator.sh
 ```
 
-`scripts/ios-xcode.sh` needs Xcode. CI runs it on `macos-14` only, with code signing off. The app is not published to a store.
+`scripts/ios-xcode.sh` needs Xcode. CI runs it on `macos-14` only, with code signing off. `scripts/ios-simulator.sh` is the simulator job on that same runner. It launches `AlbumenSimulatorHost` so the test can reach a loopback receiver. That host is not the camera-roll app. The app is not published to a store.

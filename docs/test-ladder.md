@@ -1,5 +1,7 @@
 # Test ladder
 
+**Draft.** This page is the safety ladder as it stands. A row marked **planned** is not enforced yet. Do not treat a planned row as a green job.
+
 Safety comes before a scan of a machine that holds the only copy. Each rung has to be green before the next one is a place to learn something. Sources are read-only, forever. A destination that resolves inside a source, or is the same path, is refused. There is no override. `copy_verify_quarantine` cannot target a source.
 
 `chmod a-w` is not a substitute for a sandbox. It is an extra check inside rung 1.
@@ -8,7 +10,7 @@ Safety comes before a scan of a machine that holds the only copy. Each rung has 
 
 Entry: a pull request, or a local `cargo test` of this tree.
 
-What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, and `macos-14`. The corpus is the CC0 fixtures. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
+What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, `macos-14`, `windows-2025`, and `windows-latest`. `windows-2025` is the pinned Windows image. `windows-latest` is the moving image beside it. The corpus is the CC0 fixtures. The Windows legs also cover paths longer than 260 characters, case-insensitive name collisions, reserved device names, NTFS alternate data streams, and 100 ns modification times. The in-process scale tests, including the million-item page test that does not create a million inodes, run on every leg. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
 
 `scripts/check-dest-writes.py` fails the job if production code creates, writes, renames, or removes a file outside `ingest/src/dest.rs`. The bench harness is not part of that scan. It writes synthetic timing files and does not open a user archive.
 
@@ -26,13 +28,15 @@ The before/after snapshot is mtime, mode, and size. Access time is not part of i
 
 `scripts/scan-no-network.sh` is the CI form of the same idea on Ubuntu. It straces `albumen scan` and an `albumen-receive` dry-run and fails if the trace contains a socket call or a write, unlink, rename, truncate, chmod, xattr set, or `utimensat` under the source. It then repeats the scan inside the seccomp container. ExifTool is a child of scan and has to succeed with sockets denied.
 
+`scripts/no-unexpected-egress.sh` runs each binary in a user network namespace. The namespace has loopback and no route beyond it. The trace may show a connection only when the command was given that destination: `ALBUMEN_S3_ENDPOINT` for an S3 export, or the listen address for `albumen-receive --apply`. Every other address fails the run.
+
 Exit: the script prints `rung 2 exit: source copy unchanged` and the metadata diff is empty.
 
-## Rung 3 — generated million-item tree on macos-14
+## Rung 3 — generated million-item tree on macOS, Windows, and Linux
 
 Entry: rungs 1 and 2 are green.
 
-`cli/tests/raid_scale.rs` is `#[ignore]` so an ordinary `cargo test`, and a pull request, does not create a million inodes. A million files hung the pull-request job, so [`.github/workflows/raid-scale.yml`](../.github/workflows/raid-scale.yml) runs it on `workflow_dispatch` and a weekly schedule. The job timeout is 180 minutes. The command is:
+`cli/tests/raid_scale.rs` is `#[ignore]` so an ordinary `cargo test`, and a pull request, does not create a million inodes. A million files hung the pull-request job, so [`.github/workflows/raid-scale.yml`](../.github/workflows/raid-scale.yml) runs it on `workflow_dispatch` and a weekly schedule. The job timeout is 180 minutes. The runner today is `macos-14` only. The command is:
 
 ```bash
 cargo test --release --locked -p albumen --test raid_scale -- --ignored --nocapture --test-threads=1
@@ -44,22 +48,24 @@ Scan writes the manifest outside the tree. Verify hashes the tree again. The bef
 
 Exit: the ignored test passes on the scheduled or manual `macos-14` job and the snapshot diff is empty. A pull request does not wait for this rung.
 
-## Rung 4 — optional owner Mac
+**Planned:** the same generated tree on a Linux runner and on a Windows runner. Those jobs are not in the workflow. Until they are, rung 3 is enforced on macOS only.
 
-Entry: rungs 1–3 are green. This rung is not run in CI.
+## Rung 4 — last rung, owner Mac
 
-Use a dedicated non-admin macOS user, or a VM. Work on a **copied** folder, not the live volume. Keep the copy read-only from the process's point of view. Take the network away with `scripts/macos-readonly-sandbox.sh` (a `sandbox-exec` profile) or with pf or LuLu. The profile allows reads and allows writes only in the manifest's parent directory. It refuses a manifest that resolves inside the source. `chmod a-w` does not replace that profile.
+The procedure is [trial-macos.md](trial-macos.md).
 
-The commands are the same shape as a scan of a volume, aimed at the copy:
+Gated: run on an owner's machine only after rungs 1-3 are green and with the owner's explicit approval. CI macOS runners are the default place this runs.
 
-```bash
-ditto "/Volumes/RAID/Photos/2024" "$HOME/albumen-trial/copy"
-scripts/macos-readonly-sandbox.sh \
-  "$HOME/albumen-trial/copy" \
-  "$HOME/albumen-trial/scan.jsonl"
-albumen verify-manifest \
-  --manifest "$HOME/albumen-trial/scan.jsonl" \
-  --against "$HOME/albumen-trial/copy"
-```
+Use a dedicated non-admin user. Scan a copied folder, not the original volume. Take the network away with `scripts/macos-readonly-sandbox.sh`. Mount the copy read-only (`mount -u -o rdonly,noatime`, a read-only APFS snapshot, or a read-only disk image) so a read cannot change access time. macOS has no `O_NOATIME`. Without that mount, a read may update atime. Bytes, mtime, and xattrs are still left unchanged. `chmod a-w` does not replace the mount or the sandbox profile.
 
-Exit: the copy's bytes, mtime, and xattrs match the snapshot taken before the scan. macOS may update atime. The live volume was not the path that was scanned.
+Exit: the mounted copy's bytes, mtime, xattrs, and access time match the snapshot taken before the scan. The original volume was not the path that was scanned.
+
+## Rung 5 — Windows sandbox
+
+Entry: rungs 1–4 are green. This rung runs on a Windows machine. It is not a GitHub-hosted job.
+
+Use Windows Sandbox, or a container with the network off. Windows Sandbox is a disposable desktop. The configuration [scripts/windows-sandbox.wsb](../scripts/windows-sandbox.wsb) sets `<Networking>Disable</Networking>` and maps a copied folder read-only. `scripts/windows-sandbox.ps1` copies `fixtures/` (or `-Corpus`) into a fresh directory and writes that configuration next to the copy. It does not mount the original path.
+
+Inside the sandbox, run `albumen scan` and `albumen verify-manifest` against the mapped copy. The manifest is written outside the mapped folder. Compare the copy's bytes, modification time, and alternate data streams with the snapshot taken before the scan. A container with `--network none` is the same rung when Windows Sandbox is not available.
+
+Exit: the script prints `rung 5 exit: source copy unchanged`. The live library was not the path that was scanned.

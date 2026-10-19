@@ -1265,7 +1265,7 @@ mod tests {
         assert_eq!(stats.files, 1);
         assert_eq!(fs::read(&path).unwrap(), b"alphabet");
         let left = fs::symlink_metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(left, new_mtime);
+        assert!(crate::mtime::mtime_matches(new_mtime, left));
         let line: ScanLine = serde_json::from_str(
             fs::read_to_string(&manifest)
                 .unwrap()
@@ -1276,9 +1276,15 @@ mod tests {
         .unwrap();
         let drift = line.drift.expect("manifest records drift");
         assert_eq!(drift.before.bytes, b"alpha".len() as u64);
-        assert_eq!(drift.before.mtime_ns, to_unix_nanos_string(mtime));
+        assert!(crate::mtime::mtime_matches(
+            mtime,
+            crate::mtime::from_unix_nanos_string(&drift.before.mtime_ns, "a.txt").unwrap()
+        ));
         assert_eq!(drift.after.bytes, b"alphabet".len() as u64);
-        assert_eq!(drift.after.mtime_ns, to_unix_nanos_string(new_mtime));
+        assert!(crate::mtime::mtime_matches(
+            new_mtime,
+            crate::mtime::from_unix_nanos_string(&drift.after.mtime_ns, "a.txt").unwrap()
+        ));
         assert_eq!(line.bytes, drift.before.bytes);
         assert_eq!(line.mtime_ns, drift.before.mtime_ns);
     }

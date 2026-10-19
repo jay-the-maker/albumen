@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::error::IngestError;
@@ -45,50 +45,60 @@ pub(crate) fn last_dir_sync() -> DirSyncKind {
     }
 }
 
+fn opened(path: &Path) -> PathBuf {
+    crate::platform::io_path(path)
+}
+
 pub fn create_dir_all(path: &Path) -> Result<(), IngestError> {
-    match fs::create_dir_all(path) {
+    let opened = opened(path);
+    match fs::create_dir_all(&opened) {
         Ok(()) => Ok(()),
         // Windows can deny CreateDirectory on a directory that already exists,
         // including the process temp root. The directory is there.
-        Err(_) if path.is_dir() => Ok(()),
+        Err(_) if opened.is_dir() || path.is_dir() => Ok(()),
         Err(err) => Err(IngestError::io(path, err)),
     }
 }
 
 pub fn create_file(path: &Path) -> Result<File, IngestError> {
-    File::create(path).map_err(|err| IngestError::io(path, err))
+    let opened = opened(path);
+    File::create(&opened).map_err(|err| IngestError::io(path, err))
 }
 
 pub fn open_new(path: &Path) -> Result<File, IngestError> {
+    let opened = opened(path);
     OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(&opened)
         .map_err(|err| IngestError::io(path, err))
 }
 
 pub fn open_append(path: &Path) -> Result<File, IngestError> {
+    let opened = opened(path);
     OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(&opened)
         .map_err(|err| IngestError::io(path, err))
 }
 
 pub fn open_read_write(path: &Path) -> Result<File, IngestError> {
+    let opened = opened(path);
     OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)
+        .open(&opened)
         .map_err(|err| IngestError::io(path, err))
 }
 
 pub fn remove_file(path: &Path) -> Result<(), IngestError> {
-    fs::remove_file(path).map_err(|err| IngestError::io(path, err))
+    let opened = opened(path);
+    fs::remove_file(&opened).map_err(|err| IngestError::io(path, err))
 }
 
 pub fn remove_file_best_effort(path: &Path) {
-    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(opened(path));
 }
 
 #[cfg(windows)]
@@ -98,7 +108,30 @@ pub fn rename(from: &Path, to: &Path) -> Result<(), IngestError> {
 
 #[cfg(not(windows))]
 pub fn rename(from: &Path, to: &Path) -> Result<(), IngestError> {
-    fs::rename(from, to).map_err(|err| IngestError::io(to, err))
+    let from_opened = opened(from);
+    let to_opened = opened(to);
+    fs::rename(&from_opened, &to_opened).map_err(|err| IngestError::io(to, err))
+}
+
+/// `file:stream` for one named NTFS stream. The file portion uses `\\?\` when needed.
+pub fn stream_path(file: &Path, stream: &str) -> PathBuf {
+    let mut name = opened(file).into_os_string();
+    name.push(":");
+    name.push(stream);
+    PathBuf::from(name)
+}
+
+pub fn open_stream(file: &Path, stream: &str) -> Result<File, IngestError> {
+    let path = stream_path(file, stream);
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|err| IngestError::io(path, err))
+}
+
+pub fn remove_stream(file: &Path, stream: &str) {
+    let _ = fs::remove_file(stream_path(file, stream));
 }
 
 pub fn set_len(file: &File, path: &Path, len: u64) -> Result<(), IngestError> {
@@ -129,7 +162,7 @@ pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
 
 #[cfg(not(windows))]
 pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
-    let dir = File::open(path).map_err(|err| IngestError::io(path, err))?;
+    let dir = File::open(opened(path)).map_err(|err| IngestError::io(path, err))?;
     dir.sync_all().map_err(|err| IngestError::io(path, err))?;
     note_dir_sync(DirSyncKind::Unix);
     Ok(())
@@ -137,12 +170,19 @@ pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
 
 #[cfg(windows)]
 fn sync_dir_windows(path: &Path) -> Result<(), IngestError> {
-    match flush_dir(path) {
+    // `opened` adds `\\?\` when the directory needs the extended path.
+    // `MOVEFILE_WRITE_THROUGH` names the directory twice and does not replace it.
+    let directory = opened(path);
+    match flush_dir(&directory) {
         Ok(()) => {
             note_dir_sync(DirSyncKind::Flush);
             Ok(())
         }
-        Err(flush_err) => match move_file_ex(path, path, MOVEFILE_WRITE_THROUGH) {
+        Err(flush_err) => match albumen_win::move_file_ex(
+            &directory,
+            &directory,
+            albumen_win::MOVEFILE_WRITE_THROUGH,
+        ) {
             Ok(()) => {
                 note_dir_sync(DirSyncKind::WriteThrough);
                 Ok(())
@@ -157,19 +197,24 @@ fn sync_dir_windows(path: &Path) -> Result<(), IngestError> {
 
 #[cfg(windows)]
 fn rename_durable(from: &Path, to: &Path) -> Result<(), IngestError> {
-    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    match move_file_ex(from, to, flags) {
+    // Durable replace: `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`.
+    // If that call fails, the rename still uses `fs::rename`, then the parent
+    // directory is flushed. A warning is logged only when both calls fail.
+    let from_opened = opened(from);
+    let to_opened = opened(to);
+    let flags = albumen_win::MOVEFILE_REPLACE_EXISTING | albumen_win::MOVEFILE_WRITE_THROUGH;
+    match albumen_win::move_file_ex(&from_opened, &to_opened, flags) {
         Ok(()) => {
             note_dir_sync(DirSyncKind::WriteThrough);
             Ok(())
         }
         Err(move_err) => {
-            fs::rename(from, to).map_err(|err| IngestError::io(to, err))?;
+            fs::rename(&from_opened, &to_opened).map_err(|err| IngestError::io(to, err))?;
             let parent = to
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
-            match flush_dir(parent) {
+            match flush_dir(&opened(parent)) {
                 Ok(()) => {
                     note_dir_sync(DirSyncKind::Flush);
                     Ok(())
@@ -193,10 +238,6 @@ fn warn_dir(path: &Path, flush_err: &std::io::Error, move_err: &std::io::Error) 
 }
 
 #[cfg(windows)]
-const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
-#[cfg(windows)]
-const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
-#[cfg(windows)]
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
 #[cfg(windows)]
@@ -208,35 +249,6 @@ fn flush_dir(path: &Path) -> Result<(), std::io::Error> {
         .open(path)?;
     // `sync_all` is `FlushFileBuffers` on Windows.
     file.sync_all()
-}
-
-#[cfg(windows)]
-#[allow(unsafe_code)]
-fn move_file_ex(from: &Path, to: &Path, flags: u32) -> Result<(), std::io::Error> {
-    use std::os::windows::ffi::OsStrExt;
-    let from_wide: Vec<u16> = from
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let to_wide: Vec<u16> = to
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: both buffers are valid, null-terminated UTF-16, and live for the call.
-    let moved = unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-extern "system" {
-    fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
 }
 
 /// Write a new file and, on Unix, restrict it to the owner.
@@ -266,9 +278,10 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), IngestError> {
 }
 
 pub fn set_mtime(path: &Path, mtime: SystemTime) -> Result<(), IngestError> {
+    let opened = opened(path);
     let file = OpenOptions::new()
         .write(true)
-        .open(path)
+        .open(&opened)
         .map_err(|err| IngestError::io(path, err))?;
     file.set_times(std::fs::FileTimes::new().set_modified(mtime))
         .map_err(|err| IngestError::io(path, err))?;

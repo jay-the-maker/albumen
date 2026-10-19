@@ -12,7 +12,7 @@ The iOS tree has a host app and a background upload extension. This note is the 
 
 ## iOS background upload
 
-`mobile/ios/Albumen.xcodeproj` is the host app and the `AlbumenBackgroundUpload` extension. CI builds both on `macos-14` with `scripts/ios-xcode.sh`. The job does not sign the app and does not publish it. A signing identity is not in this repository. The path is [mobile-ios-backup.md](mobile-ios-backup.md).
+`mobile/ios/Albumen.xcodeproj` is the host app and the `AlbumenBackgroundUpload` extension. CI builds both on `macos-14` with `scripts/ios-xcode.sh`. The job does not sign the app and does not publish it. A signing identity is not in this repository. A separate `macos-14` job runs the simulator checks in [mobile-ios-backup.md](mobile-ios-backup.md): a verified copy on loopback `albumen-receive` within 5 minutes of setup, byte-identical GPS EXIF, and a down receiver and a SHA-256 mismatch on the status store and as a local notification.
 
 The host and the extension share the app group `group.photos.albumen`. That group holds the queue of asset identifiers, the newest creation time already queued, and the status file. The receiver password is in the Keychain. When the build expands `AlbumenKeychainAccessGroup`, both targets use that access group. The password is not written into either `Info.plist`, the queue, or the PUT request. The session delegate answers the receiver's Basic challenge from the Keychain.
 
