@@ -36,7 +36,7 @@ mod takeout;
 pub use checksum::{sha256_file, sha256_hex};
 pub use copy_profile::{
     enable_thread as enable_copy_profile_thread, reset as reset_copy_profile,
-    snapshot as copy_phases, CopyPhases, PHASE_NAMES as COPY_PHASE_NAMES,
+    snapshot as copy_phases, write_calls, CopyPhases, PHASE_NAMES as COPY_PHASE_NAMES,
 };
 pub use discover::{discover, Asset, AssetFile, Role};
 pub use error::IngestError;

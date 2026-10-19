@@ -227,3 +227,64 @@ fn add(phase: Phase, start: Option<Tic>) {
     WALL_NS[phase as usize].fetch_add(wall, Ordering::Relaxed);
     CPU_NS[phase as usize].fetch_add(cpu, Ordering::Relaxed);
 }
+
+static WRITE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WRITE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Write variant for the macOS write study, from `ALBUMEN_WRITE_VARIANT`:
+/// `base` (one write of the whole file), `prealloc` (reserve the final
+/// size first), or `chunkN` (writes of N MiB). A measurement knob only.
+fn write_variant() -> (bool, Option<usize>) {
+    static VARIANT: std::sync::OnceLock<(bool, Option<usize>)> = std::sync::OnceLock::new();
+    *VARIANT.get_or_init(|| {
+        let text = std::env::var("ALBUMEN_WRITE_VARIANT").unwrap_or_default();
+        let prealloc = text.contains("prealloc");
+        let chunk = text
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .find_map(|part| part.strip_prefix("chunk"))
+            .and_then(|mib| mib.parse::<usize>().ok())
+            .filter(|mib| *mib > 0)
+            .map(|mib| mib * 1024 * 1024);
+        (prealloc, chunk)
+    })
+}
+
+/// Write `data` into the new file `output`, counting the write calls.
+pub(crate) fn write_payload(
+    output: &std::fs::File,
+    data: &[u8],
+    dest: &std::path::Path,
+) -> Result<(), crate::error::IngestError> {
+    use std::io::Write;
+    let (prealloc, chunk) = write_variant();
+    if prealloc {
+        albumen_win::preallocate(output, data.len() as u64)
+            .map_err(|err| crate::error::IngestError::io(dest, err))?;
+    }
+    let mut writer = output;
+    let mut rest = data;
+    while !rest.is_empty() {
+        let take = chunk.unwrap_or(rest.len()).min(rest.len());
+        let n = writer
+            .write(&rest[..take])
+            .map_err(|err| crate::error::IngestError::io(dest, err))?;
+        if n == 0 {
+            return Err(crate::error::IngestError::io(
+                dest,
+                std::io::Error::from(std::io::ErrorKind::WriteZero),
+            ));
+        }
+        WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+        WRITE_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        rest = &rest[n..];
+    }
+    Ok(())
+}
+
+/// Write calls and bytes counted by the prefetched write path so far.
+pub fn write_calls() -> (u64, u64) {
+    (
+        WRITE_CALLS.load(Ordering::Relaxed),
+        WRITE_BYTES.load(Ordering::Relaxed),
+    )
+}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::checksum::{copy_hashed, sha256_file, sha256_readback, sha256_slice, to_hex};
@@ -235,10 +235,7 @@ pub fn store_prefetched(
         mtime,
         |_, output, dest| {
             let write_at = crate::copy_profile::tic();
-            let mut writer = output;
-            writer
-                .write_all(&data)
-                .map_err(|err| IngestError::io(dest, err))?;
+            crate::copy_profile::write_payload(output, &data, dest)?;
             crate::copy_profile::add_write(write_at);
             Ok(sha256)
         },
@@ -499,10 +496,7 @@ fn write_prefetched(
         mtime,
         |_, output, dest| {
             let write_at = crate::copy_profile::tic();
-            let mut writer = output;
-            writer
-                .write_all(&data)
-                .map_err(|err| IngestError::io(dest, err))?;
+            crate::copy_profile::write_payload(output, &data, dest)?;
             crate::copy_profile::add_write(write_at);
             Ok(sha256)
         },
