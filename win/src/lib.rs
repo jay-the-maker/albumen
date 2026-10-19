@@ -213,3 +213,16 @@ pub fn raw_stream_names(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     let _ = path;
     Ok(Vec::new())
 }
+
+/// Ask macOS not to keep this file's written pages in the buffer cache
+/// (`F_NOCACHE`). Writes then go to the device without the extra copy into
+/// cached pages. It is only a cache hint: the bytes, the fsync, and a later
+/// read are unchanged. Elsewhere it does nothing.
+pub fn uncached_writes(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        rustix::fs::fcntl_nocache(file, true)?;
+    }
+    let _ = file;
+    Ok(())
+}

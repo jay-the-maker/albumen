@@ -79,10 +79,18 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     let filename = file_name_str(source)?;
     check_filename(&filename)?;
     let mtime = mtime_of(source)?;
-    store_checked(source, &filename, dest_dir, mtime, |root, output, dest| {
-        let input = root.open_read(source)?;
-        copy_hashed(input, output, source, dest)
-    })
+    let root = SourceRoot::open(parent_dir(source))?;
+    store_checked(
+        &root,
+        source,
+        &filename,
+        dest_dir,
+        mtime,
+        |root, output, dest| {
+            let input = root.open_read(source)?;
+            copy_hashed(input, output, source, dest)
+        },
+    )
 }
 
 /// Files at or under this size are read into memory by [`prefetch_source`].
@@ -96,6 +104,7 @@ pub const PREFETCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// match the digest before the file is reported stored.
 #[derive(Debug)]
 pub struct PrefetchedSource {
+    root: SourceRoot,
     source: PathBuf,
     filename: String,
     mtime: std::time::SystemTime,
@@ -132,6 +141,7 @@ fn prefetch_source_into(
 /// [`ReadSource::hashed`] turns it into a [`PrefetchedSource`], so nothing
 /// can be written without the digest of exactly these bytes.
 struct ReadSource {
+    root: SourceRoot,
     source: PathBuf,
     filename: String,
     mtime: std::time::SystemTime,
@@ -146,6 +156,7 @@ impl ReadSource {
         let sha256 = sha256_slice(&self.data);
         crate::copy_profile::add_hash(hash_at);
         PrefetchedSource {
+            root: self.root,
             source: self.source,
             filename: self.filename,
             mtime: self.mtime,
@@ -166,12 +177,15 @@ fn read_source_into(source: &Path, mut data: Vec<u8>) -> Result<Option<ReadSourc
     let filename = file_name_str(source)?;
     check_filename(&filename)?;
     let root = SourceRoot::open(parent_dir(source))?;
-    let mtime = mtime_of(source)?;
     let mut input = root.open_read(source)?;
-    let len = input
+    // One fstat of the open handle gives both the length and the mtime.
+    let meta = input
         .metadata()
-        .map_err(|err| IngestError::io(source, err))?
-        .len();
+        .map_err(|err| IngestError::io(source, err))?;
+    let mtime = meta
+        .modified()
+        .map_err(|err| IngestError::io(source, err))?;
+    let len = meta.len();
     if len > PREFETCH_MAX_BYTES {
         return Ok(None);
     }
@@ -187,6 +201,7 @@ fn read_source_into(source: &Path, mut data: Vec<u8>) -> Result<Option<ReadSourc
         return Ok(None);
     }
     Ok(Some(ReadSource {
+        root,
         source: source.to_path_buf(),
         filename,
         mtime,
@@ -205,21 +220,29 @@ pub fn store_prefetched(
     dest_dir: &Path,
 ) -> Result<VerifiedObject, IngestError> {
     let PrefetchedSource {
+        root,
         source,
         filename,
         mtime,
         data,
         sha256,
     } = prefetched;
-    store_checked(&source, &filename, dest_dir, mtime, |_, output, dest| {
-        let write_at = crate::copy_profile::tic();
-        let mut writer = output;
-        writer
-            .write_all(&data)
-            .map_err(|err| IngestError::io(dest, err))?;
-        crate::copy_profile::add_write(write_at);
-        Ok(sha256)
-    })
+    store_checked(
+        &root,
+        &source,
+        &filename,
+        dest_dir,
+        mtime,
+        |_, output, dest| {
+            let write_at = crate::copy_profile::tic();
+            let mut writer = output;
+            writer
+                .write_all(&data)
+                .map_err(|err| IngestError::io(dest, err))?;
+            crate::copy_profile::add_write(write_at);
+            Ok(sha256)
+        },
+    )
 }
 
 /// Read-back threads used by [`copy_verify_files_pipelined`] for `lanes`
@@ -461,21 +484,29 @@ fn write_prefetched(
     dest_dir: &Path,
 ) -> (Result<Pending, IngestError>, Vec<u8>) {
     let PrefetchedSource {
+        root,
         source,
         filename,
         mtime,
         data,
         sha256,
     } = prefetched;
-    let written = write_synced(&source, &filename, dest_dir, mtime, |_, output, dest| {
-        let write_at = crate::copy_profile::tic();
-        let mut writer = output;
-        writer
-            .write_all(&data)
-            .map_err(|err| IngestError::io(dest, err))?;
-        crate::copy_profile::add_write(write_at);
-        Ok(sha256)
-    });
+    let written = write_synced(
+        &root,
+        &source,
+        &filename,
+        dest_dir,
+        mtime,
+        |_, output, dest| {
+            let write_at = crate::copy_profile::tic();
+            let mut writer = output;
+            writer
+                .write_all(&data)
+                .map_err(|err| IngestError::io(dest, err))?;
+            crate::copy_profile::add_write(write_at);
+            Ok(sha256)
+        },
+    );
     (written, data)
 }
 
@@ -483,6 +514,7 @@ fn write_prefetched(
 /// sync, read-back, and directory sync. `write` puts the bytes in `output`
 /// and returns the SHA-256 of what it wrote.
 fn store_checked<W>(
+    root: &SourceRoot,
     source: &Path,
     filename: &str,
     dest_dir: &Path,
@@ -492,7 +524,7 @@ fn store_checked<W>(
 where
     W: FnOnce(&SourceRoot, &fs::File, &Path) -> Result<[u8; 32], IngestError>,
 {
-    let verified = write_synced(source, filename, dest_dir, mtime, write)?.verify()?;
+    let verified = write_synced(root, source, filename, dest_dir, mtime, write)?.verify()?;
     let dir_at = crate::copy_profile::tic();
     dest::sync_dir(dest_dir)?;
     crate::copy_profile::add_dir_sync(dir_at);
@@ -502,6 +534,7 @@ where
 /// Checks, write, streams, mtime, and file sync. The read-back and the
 /// directory sync are left to the caller.
 fn write_synced<W>(
+    root: &SourceRoot,
     source: &Path,
     filename: &str,
     dest_dir: &Path,
@@ -513,7 +546,8 @@ where
 {
     let preflight_at = crate::copy_profile::tic();
     let filename = filename.to_string();
-    let root = SourceRoot::open(parent_dir(source))?;
+    // The caller opened `root` for this file. The destination is checked
+    // against it here, for this file, every time.
     let dest = dest_dir.join(&filename);
     root.refuse_destinations(&[dest_dir, &dest])?;
     dest::create_dir_all(dest_dir)?;
@@ -529,20 +563,28 @@ where
             destination: dest.display().to_string(),
         });
     }
-    if crate::platform::io_path(&dest).exists() {
-        return Err(IngestError::AlreadyExists {
-            filename: filename.clone(),
-            destination: dest.display().to_string(),
-        });
-    }
-
+    // `create_new` is the existence check: it never opens or replaces a
+    // path that is already there. The guard is armed only once this call
+    // created the file, so a failed open never removes anything.
+    let output = match dest::open_new(&dest) {
+        Err(IngestError::Io { source: err, .. })
+            if err.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            return Err(IngestError::AlreadyExists {
+                filename: filename.clone(),
+                destination: dest.display().to_string(),
+            });
+        }
+        other => other?,
+    };
     let guard = RemoveOnDrop {
         path: dest.clone(),
         armed: true,
     };
-    let output = dest::open_new(&dest)?;
+    // A cache hint for macOS only; a refusal changes nothing else.
+    let _ = albumen_win::uncached_writes(&output);
     crate::copy_profile::add_preflight(preflight_at);
-    let sha256 = write(&root, &output, &dest)?;
+    let sha256 = write(root, &output, &dest)?;
     // Streams land before the mtime is set. The write handle stays open so
     // the fsync below covers the bytes this handle wrote and the mtime.
     let metadata_at = crate::copy_profile::tic();
@@ -955,6 +997,31 @@ mod tests {
         let err = copy_verify_file(&source, &dest).unwrap_err();
         assert!(matches!(err, IngestError::AlreadyExists { .. }));
         assert_eq!(fs::read(dest.join("a.jpg")).unwrap(), b"one");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_at_the_destination_is_refused_and_kept() {
+        // `create_new` refuses the link. The import must not remove it.
+        let tmp = Tmp::new();
+        let src = tmp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "a.jpg", b"one", fixed_mtime());
+        let dest = tmp.path().join("out");
+        fs::create_dir(&dest).unwrap();
+        let link = dest.join("a.jpg");
+        std::os::unix::fs::symlink(tmp.path().join("missing"), &link).unwrap();
+        for result in [
+            copy_verify_file(&source, &dest),
+            store_prefetched(prefetch_source(&source).unwrap().unwrap(), &dest),
+        ] {
+            assert!(matches!(result, Err(IngestError::AlreadyExists { .. })));
+            assert!(fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+        assert!(!tmp.path().join("missing").exists());
     }
 
     #[test]
