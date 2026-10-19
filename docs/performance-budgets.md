@@ -252,3 +252,13 @@ These are the walk-based numbers from before the index, when every search walked
 | `windows-2025` | [job 118035984598](https://github.com/jay-the-maker/albumen/actions/runs/39245400623/job/118035984598) | still running at 2026-10-19T05:50 PT | | | | |
 
 The 2,000-item smoke pass on `windows-2025` measured a search p95 of 192.2 ms with the walk. With the index, search p95 is 25 ms on `ubuntu-24.04`, 17 ms on `macos-14`, and 40 ms on `windows-2025`.
+
+## First thumbnail at 380,000 items
+
+`albumen-mcp` has a `thumbnail` tool. It reads one library JPEG through the read-only source root, decodes it in memory, scales it to fit 256 px (or `size`), and returns a new JPEG as base64. The original is not changed. Thumbnails are cached outside the library: `--thumbnail-dir`, else `ALBUMEN_THUMBNAIL_DIR`, else `thumbnails` in the platform data directory. A directory inside the library is refused. The cache key includes the original's size and modification time.
+
+The `library scale` workflow places 32 copies of the CC0 fixture `fixtures/jpeg-gps/IMG_0001.jpg` (640 × 480) at fixed positions among the 380,000 stub items. A fresh `albumen-mcp` with the saved index and an empty thumbnail cache asks for one of them. The job reports the time from that request to the decoded thumbnail bytes and the time from process spawn to those bytes, both against a 300 ms target, then the other 31 cold and all 32 from the cache. Report only.
+
+## Import CPU
+
+The `import throughput` job reports `cpu_percent` for the 1,000-photo import against a 10 percent target. Definition: process CPU time (user plus system, all threads, measured around the timed `copy_verify` import only) divided by (import wall time × logical cores), times 100. 100 means every core was busy for the whole import. CPU time is `CLOCK_PROCESS_CPUTIME_ID` on Linux and macOS and `GetProcessTimes` on Windows; cores are `std::thread::available_parallelism`. The job also prints `cpu_seconds_per_1000`, the CPU seconds spent per 1,000 imported photos. Report only.

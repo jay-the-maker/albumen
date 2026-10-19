@@ -20,6 +20,7 @@ These are the tools in `mcp/src/tools.rs`:
 | --- | --- | --- |
 | `search` | always | Read files and XMP/AAE sidecars. Filter on path, capture date, camera, lens, GPS box, keyword, caption. |
 | `browse` | always | List files under an optional relative prefix. Reads only. |
+| `thumbnail` | always | Return a small JPEG preview of one library JPEG. Reads the original only; previews are cached outside the library. |
 | `export` | `--enable-export` | `copy_verify` the library to a directory on `--destination`, or to an `s3://` prefix, when the process was started with `--apply` or `--execute`. Otherwise it returns a plan. Does not overwrite. Does not modify the library. A path on the library mount is refused. |
 | `upload` | `--enable-upload` | `copy_verify` a file and its discovered sidecars and pairs into `--destination` when the process was started with `--apply` or `--execute`. Otherwise it returns a plan. Does not modify the library or the source. |
 
