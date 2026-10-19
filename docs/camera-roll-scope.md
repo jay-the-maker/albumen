@@ -35,6 +35,6 @@ CI compiles the host and unit-tests the gate. It does not click the system permi
 
 If a grant is revoked later, the worker stops before the next read and says why. It still does not show a dialog. A checksum mismatch, a refused PUT, and a read error are written to the same status file. An empty pass is not a blank screen.
 
-Android 14's selected-photos grant (`READ_MEDIA_VISUAL_USER_SELECTED`) is not handled. The library does not open the photo picker.
+On Android 14 and newer the host also requests `READ_MEDIA_VISUAL_USER_SELECTED`, so a **Select photos** answer is reported as that grant. `CameraRoll.isSelectedOnly` sees it without full images and video access. `PermissionGate` then returns `SELECTED_ONLY` with `allowAll`. The screen shows "You chose Select photos, so Albumen can see only some of your camera roll…" and one **Allow all** button, which asks for full access again. Nothing is enqueued and nothing is read. `CameraRoll.permissionBlock` returns the same line to the worker before every pass and every item. The library does not open the photo picker, and there is no selected-only backup mode.
 
 The receiver password stays in Keystore-backed storage. The permission flow does not put it in the permission request or in WorkManager input.
