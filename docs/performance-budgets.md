@@ -296,6 +296,18 @@ Both numbers below are team targets, not requirements from Jay:
 - **Scored target: ≤ 2.0 normalized CPU seconds per GB on every leg, median of 6 rounds** (10 CPU seconds per 1,000 five-megabyte photos). Status: **Partial** until every leg is at or under 2.0 normalized.
 - **Regression gate: best of 6 rounds ≤ 3.0 normalized CPU seconds per GB on every leg; on Linux and Windows the median must also be ≤ 3.0.** On macOS the median and spread are printed and scored but not gated. The job fails above the gate. The gate reads its numbers from the same job and the same rounds it reports.
 
+**Known red: macOS, until the re-baseline is decided.** The `import throughput (macos-14)` job is expected to fail on main. The device read-back (#124) stays, and the gate is not changed here. Every other leg stays at 3.0. Measured best and median of 6 rounds, normalized CPU seconds per GB, with the device read-back in place:
+
+| run | code | best | median | import MB/s |
+|---|---|---|---|---|
+| main CI at 7e5e81e | main 7e5e81e (#124) | 3.179 | 3.368 | not recorded |
+| #133 first commit CI | #133 allocate only | 3.254 | 3.543 | not recorded |
+| [39323798045](https://github.com/jay-the-maker/albumen/actions/runs/39323798045) | #133 preallocate, size, stage | 2.668 | 3.716 | 290 |
+| [39326336468](https://github.com/jay-the-maker/albumen/actions/runs/39326336468) | main 07ca26d (#133) | 3.087 | 3.091 | 368 |
+| [39326399251](https://github.com/jay-the-maker/albumen/actions/runs/39326399251) | #135 on 07ca26d (resolve once) | 2.864 | 2.937 | 411 |
+
+The proposal: gate macOS on the best of 6 rounds at **3.2** with the device read-back included, which covers the highest best round on current main code (3.087) with a 0.1 margin. Every other leg stays at 3.0 best and 3.0 median. The 2.0 scored target and Partial status do not change. Until that is decided, a red macOS throughput job on main is this known issue, not a new regression, when its best round is at or under 3.2.
+
 **Normalization.** Runner CPUs differ, and SHA-256 is the work that varies most with them. The job therefore measures its own one-thread in-memory SHA-256 rate (`sha256_mb_s`) and rescales only the two hash phases, `hash` and `readback_hash`, to a 1,800 MB/s reference:
 
 `normalized = raw − hash + hash × sha256_mb_s / 1800`
