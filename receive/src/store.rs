@@ -396,10 +396,18 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Persist the directory entry after a sidecar or tombstone rename.
+///
+/// The file is already fsynced. On Windows, opening a directory can return
+/// access denied, including a library created under the process temp root.
+/// The rename has already landed, so that denial is not a failed write.
 fn sync_dir(dir: &Path) -> Result<(), String> {
-    File::open(dir)
-        .and_then(|file| file.sync_all())
-        .map_err(|err| err.to_string())
+    match File::open(dir).and_then(|file| file.sync_all()) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 #[cfg(test)]
