@@ -245,6 +245,7 @@ impl Library {
             source.refuse_destination(Path::new(to)).map_err(show)?;
             self.require_on_destination(Path::new(to))?;
             self.require_on_destination(&manifest)?;
+            albumen_ingest::family::refuse_shared_write_root(Path::new(to)).map_err(show)?;
         }
         source.refuse_destination(&manifest).map_err(show)?;
         if !self.apply {
@@ -271,6 +272,8 @@ impl Library {
     }
 
     fn upload(&self, arguments: &Value) -> Result<Value, String> {
+        albumen_ingest::family::refuse_shared_write_root(&self.root).map_err(show)?;
+        albumen_ingest::family::refuse_shared_write_root(self.write_root()?).map_err(show)?;
         let path = PathBuf::from(required_string(arguments, "path")?);
         let asset = discover(&path).map_err(show)?;
         if !self.apply {

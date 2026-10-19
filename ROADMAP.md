@@ -32,7 +32,7 @@ Test idea: an offline/no-account restore test. `cli/tests/offline_restore.rs` is
 
 ## Family library
 
-Not built. A design for a shared library on storage the family already has, with no server the owner runs, is [docs/design/family-sharing.md](docs/design/family-sharing.md). Each member has an append-only namespace. Originals stay bit-exact under `copy_verify`. A hide is per viewer and leaves the other member's files in place.
+`albumen family` stores each member's originals under `members/<member-id>/` on a local directory or an S3 prefix. The member id is an Ed25519 public key. Logs are append-only and signed. `family manifest` merges them into the shared album view, and `family manifest --key --apply` appends a signed snapshot. Invite, join, and admit use a one-time token and do not create an account. Revoke and hide are log records. They leave the other member's bytes, mtime, and sidecars in place. `albumen export`, `albumen-mcp` upload, and `albumen-receive` refuse a destination inside that library. The full rules, including key rotation and sealing, stay in [docs/design/family-sharing.md](docs/design/family-sharing.md). Rotation, sealing, and the rclone prefix are not in this slice.
 
 ## Live Photo playback
 

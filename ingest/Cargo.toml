@@ -13,7 +13,9 @@ albumen-win = { path = "../win" }
 aws-credential-types = "1"
 directories = "6"
 aws-sdk-s3 = "1"
+ed25519-dalek = "2.1.1"
 flate2 = "1"
+getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
