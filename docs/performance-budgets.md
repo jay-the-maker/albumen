@@ -50,9 +50,29 @@ These are the product bars on a 380,000-item library. CI does not fail a job for
 | --- | --- |
 | Search, warm | p50 ≤ 500 ms and p95 ≤ 1.5 s |
 | Import | ≥ 100 MB/s on a local SSD, and ≥ 20 items/s for originals of about 5 MB |
-| Import vs raw write | Target ≥ 80% of a same-disk durable write for 1,000 files of about 5 MB |
+| Import vs raw write | Target ≥ 80% of a same-disk durable write for 1,000 files of about 5 MB, on `ubuntu-24.04`, `ubuntu-26.04`, and `windows-2025` |
+| Import vs copy ceiling (`macos-14`) | Team target: import ≥ 90% of the copy ceiling measured in the same job, under per-file plus directory `F_FULLFSYNC`. The ratio to the raw write is still reported. |
 
 1 MB is 1,000,000 bytes. 100 MB/s of 5 MB files is 20 items/s. The 80% bar is import MB/s divided by a raw write that uses the same per-file `fsync` and directory `fsync`. It is measured below. The absolute 100 MB/s bar stays a product target. CI does not fail a ratio below 0.80. A per-leg regression gate, when one is recorded, is a separate check and is not this 80% bar.
+
+### macOS target: 90% of the same-job copy ceiling
+
+This is a team target, adopted by the XO on 2026-10-19. It is not a product requirement from Jay.
+
+On `macos-14`, the import target is **import MB/s at 90% or more of the copy ceiling measured in the same job**, under the current durability: `F_FULLFSYNC` on every file and on its directory. The copy ceiling uses the import's workers and syncs and reads each source once, with no hash and no read-back. The import throughput job prints it as `copy_ceiling_mb_s` and `copy_ceiling_ratio`, added in [#110](https://github.com/jay-the-maker/albumen/pull/110), which is on main. The other legs keep the 0.80-of-raw target. The macOS ratio to the raw write is still printed and is kept in the table below.
+
+Why the target changed: on `macos-14` the copy ceiling swung between 0.72 and 1.07 of the raw write across runners, and the sources were often not in the page cache, so 0.80 of raw could sit above what one read plus the required syncs can reach.
+
+| run | commit | sampling | raw MB/s (`F_FULLFSYNC`) | import MB/s | import / raw | copy ceiling MB/s | copy ceiling / raw | **import / copy ceiling** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [39259267570](https://github.com/jay-the-maker/albumen/actions/runs/39259267570) | c401adb | single import | 557.637 | 302.937 | 0.5433 | 595.083 | 1.0672 | 0.509 |
+| [39262347854](https://github.com/jay-the-maker/albumen/actions/runs/39262347854) | cf42e75 | single import | 706.932 | 381.610 | 0.5398 | 509.054 | 0.7201 | 0.750 |
+| [39265120601](https://github.com/jay-the-maker/albumen/actions/runs/39265120601) | 60d6745 | 6 interleaved rounds | 552.450 | 328.938 | 0.5954 | 435.168 | 0.7877 | 0.756 |
+| [#110 checks](https://github.com/jay-the-maker/albumen/pull/110/checks) | d37b6f2 | 6 interleaved rounds | 575.409 | 350.927 | 0.6099 | 488.676 | 0.8493 | 0.718 |
+
+Every run reconciled 100 percent. In the interleaved runs, `vmtouch` found 0 to 67 percent of the source pages in the page cache before each macOS import, while both Ubuntu legs were at 100 percent. `macos-14` is at about 72 to 76 percent of its copy ceiling, so this target is still open there.
+
+The durability calls, both SHA-256 passes, the destination read-back, the raw sample, and the 100 percent reconciliation gate are unchanged.
 
 ## Camera RAW verify
 
