@@ -33,7 +33,7 @@ These are not library ceilings. Each one protects the first principle or refuses
 | Symlink refusal | refuse to follow | none | A symlink can point at a file outside the library. Following it would copy or hash bytes the user did not put in the tree. |
 | Scratch name in a temp path | 80 characters of the filename | `ALBUMEN_SCRATCH_NAME_CHARS` | Only the local temp path is shortened. The stored object keeps the original filename. |
 
-Checksum verification, write-once mtime, and the refusal to overwrite a different file are first-principle checks. They are not size limits.
+Checksum verification, write-once mtime, and the refusal to overwrite a different file are first-principle checks. They are not size limits. A read-only scan is in that set: it does not write a source timestamp back. If size or mtime changes while a file is read, the manifest line keeps the before and after values.
 
 ## What is not a ceiling
 
