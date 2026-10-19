@@ -60,11 +60,66 @@ class PermissionGateTest {
     fun selectedPhotosGrantIsNotEnough() {
         val grants = mapOf(
             "android.permission.READ_MEDIA_VISUAL_USER_SELECTED" to true,
+            Manifest.permission.READ_MEDIA_IMAGES to false,
+            Manifest.permission.READ_MEDIA_VIDEO to false,
             Manifest.permission.ACCESS_MEDIA_LOCATION to true,
         )
-        val decision = PermissionGate.decide(34, grants)
+        val calls = mutableListOf<Triple<String, String, String>>()
+        val decision = HostSession.onPermissionResult(34, grants, "https://albumen.example", "camera", "secret") { endpoint, user, password ->
+            calls.add(Triple(endpoint, user, password))
+        }
         assertFalse(decision.enqueue)
         assertFalse(decision.backupFinished)
+        assertTrue(decision.allowAll)
+        assertEquals(PermissionGate.SELECTED_ONLY, decision.message)
+        assertTrue(decision.message.contains("Select photos"))
+        assertTrue(decision.message.contains("Allow all"))
+        assertTrue(decision.message.contains("whole camera roll"))
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
+    fun selectedPhotosWithoutLocationStillOffersAllowAll() {
+        val grants = mapOf(
+            "android.permission.READ_MEDIA_VISUAL_USER_SELECTED" to true,
+            Manifest.permission.ACCESS_MEDIA_LOCATION to false,
+        )
+        val decision = PermissionGate.decide(35, grants)
+        assertFalse(decision.enqueue)
+        assertFalse(decision.backupFinished)
+        assertTrue(decision.allowAll)
+        assertEquals(PermissionGate.SELECTED_ONLY, decision.message)
+    }
+
+    @Test
+    fun selectedPhotosNameBeforeApi34IsAnOrdinaryDenial() {
+        val grants = mapOf(
+            "android.permission.READ_MEDIA_VISUAL_USER_SELECTED" to true,
+            Manifest.permission.ACCESS_MEDIA_LOCATION to true,
+        )
+        val decision = PermissionGate.decide(33, grants)
+        assertFalse(decision.enqueue)
+        assertFalse(decision.allowAll)
+        assertEquals(PermissionGate.MEDIA_DENIED, decision.message)
+    }
+
+    @Test
+    fun fullGrantOnApi34EnqueuesEvenWithTheSelectedPhotosFlag() {
+        val grants = mapOf(
+            "android.permission.READ_MEDIA_VISUAL_USER_SELECTED" to true,
+            Manifest.permission.READ_MEDIA_IMAGES to true,
+            Manifest.permission.READ_MEDIA_VIDEO to true,
+            Manifest.permission.ACCESS_MEDIA_LOCATION to true,
+        )
+        val secret = "receiver-password-not-for-the-permission-request"
+        val calls = mutableListOf<Triple<String, String, String>>()
+        val decision = HostSession.onPermissionResult(34, grants, "https://albumen.example", "camera", secret) { endpoint, user, password ->
+            calls.add(Triple(endpoint, user, password))
+        }
+        assertTrue(decision.enqueue)
+        assertFalse(decision.allowAll)
+        assertEquals(1, calls.size)
+        assertFalse(grants.keys.any { it.contains(secret) })
     }
 
     @Test
@@ -120,9 +175,14 @@ class PermissionGateTest {
     }
 
     @Test
-    fun activityLaunchesOnlyTheRequiredPermissions() {
+    fun activityLaunchesTheRequestedPermissionsAndOffersAllowAll() {
         val activity = File("src/main/kotlin/photos/albumen/host/HostActivity.kt").readText()
-        assertTrue(activity.contains("requestPermissions.launch(CameraRoll.requiredPermissions())"))
+        assertTrue(activity.contains("CameraRoll.requiredPermissions()"))
+        assertTrue(activity.contains("CameraRoll.requestedPermissions()"))
+        assertTrue(activity.contains("requestPermissions.launch(permissions)"))
+        assertTrue(activity.contains("allowAllShown = decision.allowAll"))
+        assertFalse(activity.contains("PickVisualMedia"))
+        assertFalse(activity.contains("ACTION_PICK_IMAGES"))
         assertTrue(activity.contains("HostSession.onPermissionResult"))
         assertTrue(activity.contains("BackupStatusStore.read"))
         assertTrue(activity.contains("BackupSchedule.FIRST_RUN_MESSAGE"))
