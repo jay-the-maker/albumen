@@ -10,12 +10,16 @@ import photos.albumen.backup.CameraRoll
  *
  * Images or video denied: do not enqueue. Media granted and location denied:
  * MediaStore would strip GPS, so the backup is not started and is not finished.
- * The receiver password is not an input to this decision.
+ * Select photos on Android 14 and newer: the backup waits for full access and
+ * the host offers Allow all. The receiver password is not an input to this
+ * decision.
  */
 data class PermissionDecision(
     val enqueue: Boolean,
     val backupFinished: Boolean,
     val message: String,
+    /** Show the one Allow all action that asks again for full access. */
+    val allowAll: Boolean = false,
 )
 
 object PermissionGate {
@@ -23,6 +27,7 @@ object PermissionGate {
         "Images and video access was denied. Backup was not started."
     const val LOCATION_DENIED =
         "Location access was denied, so MediaStore would strip GPS. That copy is not a complete original. Backup was not started and is not finished."
+    const val SELECTED_ONLY = CameraRoll.SELECTED_ONLY_BLOCK
     const val GRANTED =
         "Media and location access were granted. Backup can run."
 
@@ -31,6 +36,14 @@ object PermissionGate {
         val media = required.filter { it != Manifest.permission.ACCESS_MEDIA_LOCATION }
         val mediaGranted = media.isNotEmpty() && media.all { grants[it] == true }
         if (!mediaGranted) {
+            if (CameraRoll.isSelectedOnly(sdkInt) { grants[it] == true }) {
+                return PermissionDecision(
+                    enqueue = false,
+                    backupFinished = false,
+                    message = SELECTED_ONLY,
+                    allowAll = true,
+                )
+            }
             return PermissionDecision(enqueue = false, backupFinished = false, message = MEDIA_DENIED)
         }
         if (grants[Manifest.permission.ACCESS_MEDIA_LOCATION] != true) {

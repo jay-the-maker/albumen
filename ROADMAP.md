@@ -70,7 +70,7 @@ Shipped as `albumen export` and `albumen verify-manifest`. The command copy-veri
 
 Shipped as `mobile/android/host`. The host reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor` in mode `"r"`. `ACCESS_MEDIA_LOCATION` is required, because without it MediaStore would strip GPS and the backup does not start. A motion photo is copied whole. The first WorkManager job runs on a network and is aimed at a verified copy within 5 minutes of setup. Later jobs run while the phone is idle, charging, and on a network. A killed pass resumes from a progress file of URI, size, and modified time. The upload counts when `X-Albumen-Sha256` matches, and a mismatch is retried and shown. The receiver password is in Keystore-backed storage. WorkManager input does not contain it. Nothing in the camera roll is deleted or updated. The debug APK is not published to a store. See [docs/mobile-android-backup.md](docs/mobile-android-backup.md).
 
-Still open: Android 14 selected-photos (`READ_MEDIA_VISUAL_USER_SELECTED`) is not a grant. The library does not open the photo picker.
+On Android 14 and newer, choosing **Select photos** is recognized. The host says that Albumen backs up the whole camera roll, shows one **Allow all** button back to full access, and starts the backup once full access is granted. The worker checks the access level before every pass and every item, so a later change to selected photos stops before the next read and shows the same line. An API 34 emulator leg runs this beside API 30. A selected-only backup mode is not built. That is a product decision.
 
 ## Connectors
 

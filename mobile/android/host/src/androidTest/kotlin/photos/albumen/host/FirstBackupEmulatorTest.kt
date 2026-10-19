@@ -467,7 +467,9 @@ class FirstBackupEmulatorTest {
         scenario.onActivity { activity ->
             val content = activity.findViewById<ViewGroup>(android.R.id.content)
             val scroll = content.getChildAt(0) as ViewGroup
-            val view = scroll.getChildAt(0) as TextView
+            // The status text is first in the column; the Allow all button follows it.
+            val column = scroll.getChildAt(0) as ViewGroup
+            val view = column.getChildAt(0) as TextView
             text = view.text?.toString().orEmpty()
         }
         return text
