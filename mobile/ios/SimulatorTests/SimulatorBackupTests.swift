@@ -206,7 +206,12 @@ final class SimulatorBackupTests: XCTestCase {
         // The failure line follows the summary. Room is the limit less the summary, a newline, and an ellipsis.
         let room = BackupNotice.maxBodyLength - summary.utf16.count - 2
         let shown = line.utf16.count <= room ? String(line) : String(line.prefix(room))
-        XCTAssertTrue(notification.contains(marker), "notification missing [\(marker)]. notification: \(notification)")
+        // The hash-mismatch marker is the whole line, so it is held to the same room.
+        let markerShown = marker.utf16.count <= room ? marker : String(marker.prefix(room))
+        XCTAssertTrue(
+            notification.contains(markerShown),
+            "notification missing [\(markerShown)]. notification: \(notification)"
+        )
         XCTAssertTrue(
             notification.contains(shown),
             "notification missing the status line [\(shown)]. notification: \(notification)"
