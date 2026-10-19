@@ -251,7 +251,7 @@ impl Library {
             return export_plan(&source, to, &manifest);
         }
         let dest = open_target(to)?;
-        let entries = export_tree(&self.root, dest.as_ref()).map_err(show)?;
+        let entries = export_tree(&source, dest.as_ref()).map_err(show)?;
         if !to.starts_with("s3://") {
             if let Ok(relative) = manifest.strip_prefix(to) {
                 let relative = relative_text(relative);

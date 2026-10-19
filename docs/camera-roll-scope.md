@@ -12,7 +12,7 @@ The iOS tree has a host app and a background upload extension. This note is the 
 
 ## iOS background upload
 
-`mobile/ios/Albumen.xcodeproj` is the host app and the `AlbumenBackgroundUpload` extension. CI builds both on `macos-14` with `scripts/ios-xcode.sh`. The job does not sign the app and does not publish it. A signing identity is not in this repository. The path is [mobile-ios-backup.md](mobile-ios-backup.md).
+`mobile/ios/Albumen.xcodeproj` is the host app and the `AlbumenBackgroundUpload` extension. CI builds both on `macos-14` with `scripts/ios-xcode.sh`. The job does not sign the app and does not publish it. A signing identity is not in this repository. A separate `macos-14` job runs the simulator checks in [mobile-ios-backup.md](mobile-ios-backup.md): a verified copy on loopback `albumen-receive` within 5 minutes of setup, byte-identical GPS EXIF, and a down receiver and a SHA-256 mismatch on the status store and as a local notification.
 
 The host and the extension share the app group `group.photos.albumen`. That group holds the queue of asset identifiers, the newest creation time already queued, and the status file. The receiver password is in the Keychain. When the build expands `AlbumenKeychainAccessGroup`, both targets use that access group. The password is not written into either `Info.plist`, the queue, or the PUT request. The session delegate answers the receiver's Basic challenge from the Keychain.
 
@@ -31,7 +31,7 @@ The manifest already caps `READ_EXTERNAL_STORAGE` at `maxSdkVersion` 32. A unit 
 
 If images or video are denied, the host does not enqueue the worker. If media is granted and location is denied, MediaStore would strip GPS, so that copy is not a complete original. The host says so, does not enqueue, and does not treat the backup as finished. The worker checks the same permissions again before it reads. A missing location grant is written to the status file and posted as a notification. The worker does not delete or update the MediaStore row.
 
-CI compiles the host and unit-tests the gate. It does not click the system permission dialog. The emulator job grants the permissions with `GrantPermissionRule` and checks a synthetic JPEG.
+CI compiles the host and unit-tests the gate. It does not click the system permission dialog. The emulator job grants the permissions with `GrantPermissionRule`, checks a synthetic JPEG, and checks that the first verified copy lands within 5 minutes of setup. A down receiver and a SHA-256 mismatch show on the status screen and as a notification.
 
 If a grant is revoked later, the worker stops before the next read and says why. It still does not show a dialog. A checksum mismatch, a refused PUT, and a read error are written to the same status file. An empty pass is not a blank screen.
 

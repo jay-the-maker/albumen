@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use crate::error::IngestError;
 
 pub fn sha256_file(path: &Path) -> Result<[u8; 32], IngestError> {
-    let file = File::open(path).map_err(|err| IngestError::io(path, err))?;
+    let file =
+        File::open(crate::platform::io_path(path)).map_err(|err| IngestError::io(path, err))?;
     sha256_reader(file, path)
 }
 

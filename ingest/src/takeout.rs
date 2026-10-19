@@ -24,7 +24,7 @@ use zip::ZipArchive;
 
 use crate::checksum::{sha256_file, sha256_reader, to_hex};
 use crate::dest;
-use crate::discover::{check_filename, file_name_str};
+use crate::discover::{check_filename, file_name_str, takeout_json_sidecar_names};
 use crate::error::IngestError;
 use crate::local::{copy_verify_file, copy_verify_reader};
 use crate::source::{parent_dir, SourceRoot};
@@ -1226,12 +1226,6 @@ fn kind_of(relative: &Path) -> &'static str {
     }
 }
 
-/// UTF-16 code units kept before `.json`. Takeout's longest JSON name is 51
-/// units, and the five units of `.json` are never cut. A `(N)` duplicate
-/// marker is appended after this cut, so a numbered name can pass 51.
-const TAKEOUT_JSON_STEM_UNITS: usize = 46;
-const SUPPLEMENTAL_SUFFIX: &str = ".supplemental-metadata";
-
 struct PartnerIndex {
     /// `{directory}\n{json name in ascii lowercase}` → media file name.
     partners: HashMap<String, String>,
@@ -1359,75 +1353,8 @@ fn build_partner_index(members: &[String]) -> PartnerIndex {
     }
 }
 
-/// Supplemental and legacy JSON names Takeout would write for `media`.
-///
-/// The supplemental form is `{name}.supplemental-metadata`, cut to 46 UTF-16
-/// code units, then `.json`. A `(N)` before the media extension is removed
-/// from that stem and written after the cut, and the marker itself is not
-/// cut. The legacy form is the same cut of `{name}` alone. `-edited` stays
-/// in the media name, so an edited file pairs with its own JSON and does not
-/// take the original's.
 fn expected_json_names(media: &str) -> [String; 2] {
-    let (core, duplicate) = split_duplicate_marker(media);
-    [
-        json_name(&core, SUPPLEMENTAL_SUFFIX, &duplicate),
-        json_name(&core, "", &duplicate),
-    ]
-}
-
-fn json_name(core: &str, supplemental: &str, duplicate: &str) -> String {
-    let mut middle = String::with_capacity(core.len() + supplemental.len());
-    middle.push_str(core);
-    middle.push_str(supplemental);
-    let clipped = clip_utf16(&middle, TAKEOUT_JSON_STEM_UNITS);
-    let mut name = String::with_capacity(clipped.len() + duplicate.len() + 5);
-    name.push_str(&clipped);
-    name.push_str(duplicate);
-    name.push_str(".json");
-    name
-}
-
-fn clip_utf16(value: &str, units: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in value.chars() {
-        let width = ch.len_utf16();
-        if used + width > units {
-            break;
-        }
-        out.push(ch);
-        used += width;
-    }
-    out
-}
-
-/// `(N)` immediately before the last extension, as in `IMG_1234(1).jpg`.
-/// Returns the name with that marker moved out, and the marker `(N)`.
-fn split_duplicate_marker(media: &str) -> (String, String) {
-    let (stem, extension) = match media.rfind('.') {
-        Some(dot) if dot > 0 && !media[dot + 1..].is_empty() => (&media[..dot], &media[dot..]),
-        _ => (media, ""),
-    };
-    if let Some(open) = trailing_paren_number(stem) {
-        let duplicate = &stem[open..];
-        let core_stem = &stem[..open];
-        if !core_stem.is_empty() {
-            return (format!("{core_stem}{extension}"), duplicate.to_string());
-        }
-    }
-    (media.to_string(), String::new())
-}
-
-fn trailing_paren_number(stem: &str) -> Option<usize> {
-    if !stem.ends_with(')') {
-        return None;
-    }
-    let open = stem.rfind('(')?;
-    let inner = &stem[open + 1..stem.len() - 1];
-    if inner.is_empty() || !inner.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    Some(open)
+    takeout_json_sidecar_names(media)
 }
 
 fn write_albumen_sidecars(
@@ -3320,6 +3247,174 @@ mod tests {
         let summary = lines.last().unwrap();
         assert_eq!(summary["count_in"], summary["count_out"]);
         assert!(summary["unmatched"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn synthetic_gate_fixture_round_trips_and_discover_pairs_json() {
+        let tmp = Tmp::new();
+        let from = tmp.path().join("takeout");
+        let to = tmp.path().join("library");
+        let report = tmp.path().join("report.jsonl");
+        fs::create_dir(&from).unwrap();
+
+        let long = format!("{}.jpg", "n".repeat(43));
+        assert_eq!(long.chars().count(), 47);
+        let long_json_name = expected_json_names(&long)[0].clone();
+        assert_ne!(long_json_name, format!("{long}.json"));
+        let jpeg = b"\xff\xd8\xff\xdb synthetic-gate-jpeg";
+        let edited = b"\xff\xd8\xff\xdb synthetic-gate-edited";
+        let heic = b"synthetic-gate-heic";
+        let mov = b"synthetic-gate-mov";
+        let clip = b"synthetic-gate-clip";
+        let long_bytes = b"synthetic-gate-truncated-47";
+        let orphan_media = b"synthetic-gate-orphan-media";
+        let plain_json = taken_json("IMG_0001.jpg", "1590000000", "1600000000");
+        let edited_json = taken_json("IMG_0001-edited.jpg", "1590000001", "1600000001");
+        let live_json = taken_json("IMG_LIVE.HEIC", "1590000002", "1600000002");
+        let clip_json = taken_json("CLIP.mp4", "1590000003", "1600000003");
+        let long_json = taken_json(&long, "1590000004", "1600000004");
+        let orphan_json = br#"{"title":"synthetic album"}"#.to_vec();
+        assert!(!jpeg.windows(10).any(|window| window == b"1590000000"));
+
+        let zip_path = from.join("takeout-001.zip");
+        let tgz_path = from.join("takeout-002.tgz");
+        write_zip(
+            &zip_path,
+            CompressionMethod::Stored,
+            &[
+                ("Takeout/Album/IMG_0001.jpg", jpeg.as_slice()),
+                ("Takeout/Album/IMG_0001-edited.jpg", edited.as_slice()),
+                ("Takeout/Album/IMG_LIVE.HEIC", heic.as_slice()),
+                ("Takeout/Album/IMG_LIVE.MOV", mov.as_slice()),
+                ("Takeout/Album/CLIP.mp4", clip.as_slice()),
+                (&format!("Takeout/Album/{long}"), long_bytes.as_slice()),
+                ("Takeout/Album/ORPHAN.jpg", orphan_media.as_slice()),
+            ],
+        );
+        write_tgz(
+            &tgz_path,
+            &[
+                ("Takeout/Album/IMG_0001.jpg.json", plain_json.as_slice()),
+                (
+                    "Takeout/Album/IMG_0001-edited.jpg.supplemental-metadata.json",
+                    edited_json.as_slice(),
+                ),
+                (
+                    "Takeout/Album/IMG_LIVE.HEIC.supplemental-metadata.json",
+                    live_json.as_slice(),
+                ),
+                (
+                    "Takeout/Album/CLIP.mp4.supplemental-metadata.json",
+                    clip_json.as_slice(),
+                ),
+                (
+                    &format!("Takeout/Album/{long_json_name}"),
+                    long_json.as_slice(),
+                ),
+                ("Takeout/Album/metadata.json", orphan_json.as_slice()),
+            ],
+            1_590_000_000,
+        );
+        let zip_before = fs::read(&zip_path).unwrap();
+        let tgz_before = fs::read(&tgz_path).unwrap();
+
+        let outcome = import_takeout(&from, &to, &report).unwrap();
+        assert_eq!(outcome.count_in, outcome.count_out);
+        assert_eq!(outcome.mismatched, 0);
+        assert!(outcome.unmatched >= 1);
+        assert_eq!(fs::read(&zip_path).unwrap(), zip_before);
+        assert_eq!(fs::read(&tgz_path).unwrap(), tgz_before);
+        assert!(!from.join("Takeout").exists());
+        assert_eq!(
+            fs::read(to.join("Takeout/Album/IMG_0001.jpg")).unwrap(),
+            jpeg
+        );
+        assert_eq!(
+            fs::read(to.join("Takeout/Album/IMG_0001.jpg.json")).unwrap(),
+            plain_json
+        );
+        assert_eq!(
+            fs::read(to.join(format!("Takeout/Album/{long_json_name}"))).unwrap(),
+            long_json
+        );
+        assert!(!to.join("Takeout/Album/IMG_0001.jpg.xmp").exists());
+
+        let album = to.join("Takeout/Album");
+        let sidecar: serde_json::Value =
+            serde_json::from_slice(&fs::read(album.join("IMG_0001.jpg.albumen.json")).unwrap())
+                .unwrap();
+        assert_eq!(sidecar["photoTakenTime"], "1590000000");
+        let stored_mtime = mtime_of(&album.join("IMG_0001.jpg")).unwrap();
+        let stored_secs = stored_mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_ne!(stored_secs, 1_590_000_000);
+
+        let lines = report_lines(&report);
+        for member in [
+            "Takeout/Album/IMG_0001.jpg",
+            "Takeout/Album/IMG_0001-edited.jpg",
+            "Takeout/Album/IMG_LIVE.HEIC",
+            "Takeout/Album/IMG_LIVE.MOV",
+            "Takeout/Album/CLIP.mp4",
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| line["member"] == member)
+                .unwrap_or_else(|| panic!("missing {member}"));
+            assert!(line["sha256"].as_str().unwrap().len() == 64, "{line}");
+        }
+        let live = lines
+            .iter()
+            .find(|line| line["member"] == "Takeout/Album/IMG_LIVE.HEIC")
+            .unwrap();
+        assert_eq!(live["motion_photo_stem"], "IMG_LIVE");
+        let orphan_line = lines
+            .iter()
+            .find(|line| line["member"] == "Takeout/Album/ORPHAN.jpg")
+            .unwrap();
+        assert_eq!(orphan_line["unmatched"], true);
+        let metadata = lines
+            .iter()
+            .find(|line| line["member"] == "Takeout/Album/metadata.json")
+            .unwrap();
+        assert!(metadata["partner"].is_null(), "{metadata}");
+        assert_eq!(metadata["sha256"].as_str().unwrap().len(), 64);
+        let summary = lines.last().unwrap();
+        assert_eq!(summary["count_in"], summary["count_out"]);
+        assert_eq!(summary["mismatched"], 0);
+
+        let discovered = crate::discover::discover(&album.join("IMG_0001.jpg")).unwrap();
+        assert!(discovered.files().iter().any(|file| {
+            file.role == crate::discover::Role::Sidecar
+                && file.path.file_name().unwrap() == "IMG_0001.jpg.json"
+        }));
+        let edited_asset = crate::discover::discover(&album.join("IMG_0001-edited.jpg")).unwrap();
+        let edited_names: Vec<_> = edited_asset
+            .files()
+            .iter()
+            .skip(1)
+            .map(|file| file.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            edited_names,
+            vec!["IMG_0001-edited.jpg.supplemental-metadata.json".to_string()]
+        );
+        let clipped = crate::discover::discover(&album.join(&long)).unwrap();
+        assert_eq!(
+            clipped.files()[1]
+                .path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            long_json_name
+        );
+        let clip_asset = crate::discover::discover(&album.join("CLIP.mp4")).unwrap();
+        assert!(clip_asset.files().iter().any(|file| {
+            file.path.file_name().unwrap() == "CLIP.mp4.supplemental-metadata.json"
+        }));
     }
 
     fn write_zip_owned(path: &Path, files: &[(String, Vec<u8>)]) {

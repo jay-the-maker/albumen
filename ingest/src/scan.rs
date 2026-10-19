@@ -118,15 +118,14 @@ struct Hashed {
 /// manifest that already ends with complete lines is continued after the last
 /// path. An incomplete final line is truncated back to the last newline.
 /// Re-running the same command finishes the walk.
-pub fn scan_tree(source: &Path, manifest: &Path) -> Result<ScanStats, IngestError> {
-    if !source.is_dir() {
+pub fn scan_tree(source: &SourceRoot, manifest: &Path) -> Result<ScanStats, IngestError> {
+    if !source.canonical().is_dir() {
         return Err(IngestError::store(
             "scan",
-            source.display().to_string(),
+            source.canonical().display().to_string(),
             "source is not a directory",
         ));
     }
-    let source = SourceRoot::open(source)?;
     source.refuse_destination(manifest)?;
     if let Some(parent) = manifest.parent() {
         if !parent.as_os_str().is_empty() {
@@ -166,7 +165,7 @@ pub fn scan_tree(source: &Path, manifest: &Path) -> Result<ScanStats, IngestErro
         });
 
         let mut index = 0u64;
-        let walked = walk_readonly(&source, after.as_deref(), &mut |relative| {
+        let walked = walk_readonly(source, after.as_deref(), &mut |relative| {
             if cancel.load(Ordering::Relaxed) {
                 return WalkStop::Stop;
             }
@@ -208,22 +207,21 @@ pub fn scan_tree(source: &Path, manifest: &Path) -> Result<ScanStats, IngestErro
 /// the same way as `scan_tree`. Metadata tags are not compared.
 pub fn verify_scan_manifest(
     manifest: &Path,
-    source: &Path,
+    source: &SourceRoot,
     on_drift: &mut dyn FnMut(&ScanDrift),
 ) -> Result<(), IngestError> {
-    if !source.is_dir() {
+    if !source.canonical().is_dir() {
         return Err(IngestError::store(
             "verify-manifest",
-            source.display().to_string(),
+            source.canonical().display().to_string(),
             "source is not a directory",
         ));
     }
-    let source = SourceRoot::open(source)?;
     let file = File::open(manifest).map_err(|err| IngestError::io(manifest, err))?;
     let (tx, rx) = sync_channel::<Result<Option<String>, IngestError>>(8);
     let drifts = thread::scope(|scope| {
         let walker = scope.spawn(|| {
-            let walked = walk_readonly(&source, None, &mut |relative| {
+            let walked = walk_readonly(source, None, &mut |relative| {
                 if tx.send(Ok(Some(relative.to_string()))).is_err() {
                     WalkStop::Stop
                 } else {
@@ -235,7 +233,7 @@ pub fn verify_scan_manifest(
                 Err(err) => tx.send(Err(err)),
             };
         });
-        let compared = compare_manifest(&source, manifest, file, rx, on_drift);
+        let compared = compare_manifest(source, manifest, file, rx, on_drift);
         walker.join().ok();
         compared
     })?;
@@ -961,91 +959,7 @@ fn walk_readonly(
     after: Option<&str>,
     visit: &mut dyn FnMut(&str) -> WalkStop,
 ) -> Result<(), IngestError> {
-    match walk_dir(root, root.canonical(), "", after, visit)? {
-        WalkStop::Continue | WalkStop::Stop => Ok(()),
-    }
-}
-
-fn walk_dir(
-    root: &SourceRoot,
-    dir: &Path,
-    prefix: &str,
-    after: Option<&str>,
-    visit: &mut dyn FnMut(&str) -> WalkStop,
-) -> Result<WalkStop, IngestError> {
-    let mut entries = Vec::new();
-    let read = root.read_dir(dir)?;
-    for entry in read {
-        let entry = entry.map_err(|err| IngestError::io(dir, err))?;
-        let path = entry.path();
-        let meta = root.metadata_nofollow(&path)?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return Err(IngestError::NonUtf8Filename { path });
-        };
-        crate::discover::check_filename(name)?;
-        if meta.is_dir() {
-            entries.push((name.to_string(), true));
-        } else if meta.is_file() {
-            entries.push((name.to_string(), false));
-        }
-    }
-    entries.sort_by(|left, right| cmp_walk(&left.0, left.1, &right.0, right.1));
-    for (name, is_dir) in entries {
-        let child = dir.join(&name);
-        let relative = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
-        if is_dir {
-            if let Some(after) = after {
-                if directory_is_at_or_before(&relative, after) {
-                    continue;
-                }
-            }
-            if walk_dir(root, &child, &relative, after, visit)? == WalkStop::Stop {
-                return Ok(WalkStop::Stop);
-            }
-        } else if let Some(after) = after {
-            if relative.as_str() <= after {
-                continue;
-            } else if visit(&relative) == WalkStop::Stop {
-                return Ok(WalkStop::Stop);
-            }
-        } else if visit(&relative) == WalkStop::Stop {
-            return Ok(WalkStop::Stop);
-        }
-    }
-    Ok(WalkStop::Continue)
-}
-
-fn directory_is_at_or_before(relative: &str, after: &str) -> bool {
-    let mut prefix = String::with_capacity(relative.len() + 1);
-    prefix.push_str(relative);
-    prefix.push('/');
-    !after.starts_with(&prefix) && prefix.as_str() < after
-}
-
-fn cmp_walk(
-    left_name: &str,
-    left_dir: bool,
-    right_name: &str,
-    right_dir: bool,
-) -> std::cmp::Ordering {
-    let mut left = left_name.bytes().chain(left_dir.then_some(b'/'));
-    let mut right = right_name.bytes().chain(right_dir.then_some(b'/'));
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return std::cmp::Ordering::Equal,
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(left_byte), Some(right_byte)) => match left_byte.cmp(&right_byte) {
-                std::cmp::Ordering::Equal => {}
-                order => return order,
-            },
-        }
-    }
+    root.walk(after, &mut |relative| visit(relative) == WalkStop::Continue)
 }
 
 #[cfg(test)]
@@ -1053,6 +967,10 @@ mod tests {
     use super::*;
     use crate::test_support::{write_file, Tmp};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn as_root(path: &Path) -> SourceRoot {
+        SourceRoot::open(path).unwrap()
+    }
 
     struct ModeGuard {
         #[cfg(unix)]
@@ -1272,7 +1190,7 @@ mod tests {
             UNIX_EPOCH + Duration::from_secs(1_400_000_000),
         );
         let manifest = source.join("nested").join("out.jsonl");
-        let err = scan_tree(&source, &manifest).unwrap_err();
+        let err = scan_tree(&as_root(&source), &manifest).unwrap_err();
         assert!(
             matches!(err, IngestError::DestinationInsideSource { .. }),
             "{err}"
@@ -1290,7 +1208,7 @@ mod tests {
         let _guard = lock_tree(&source);
         let rels = list_rels(&source);
         let before = capture(&source, &rels);
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         let after = capture(&source, &rels);
         assert_eq!(before, after);
         assert_eq!(stats.files, 4);
@@ -1314,7 +1232,7 @@ mod tests {
         assert_eq!(jpeg.sidecars, vec!["trip/IMG.xmp".to_string()]);
         assert_eq!(jpeg.bytes, b"jpeg-bytes".len() as u64);
         assert!(jpeg.drift.is_none(), "{jpeg:?}");
-        verify_scan_manifest(&manifest, &source, &mut |_| ()).unwrap();
+        verify_scan_manifest(&manifest, &as_root(&source), &mut |_| ()).unwrap();
     }
 
     #[test]
@@ -1341,13 +1259,13 @@ mod tests {
             }
         });
 
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         drop(_hook);
 
         assert_eq!(stats.files, 1);
         assert_eq!(fs::read(&path).unwrap(), b"alphabet");
         let left = fs::symlink_metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(left, new_mtime);
+        assert!(crate::mtime::mtime_matches(new_mtime, left));
         let line: ScanLine = serde_json::from_str(
             fs::read_to_string(&manifest)
                 .unwrap()
@@ -1358,9 +1276,15 @@ mod tests {
         .unwrap();
         let drift = line.drift.expect("manifest records drift");
         assert_eq!(drift.before.bytes, b"alpha".len() as u64);
-        assert_eq!(drift.before.mtime_ns, to_unix_nanos_string(mtime));
+        assert!(crate::mtime::mtime_matches(
+            mtime,
+            crate::mtime::from_unix_nanos_string(&drift.before.mtime_ns, "a.txt").unwrap()
+        ));
         assert_eq!(drift.after.bytes, b"alphabet".len() as u64);
-        assert_eq!(drift.after.mtime_ns, to_unix_nanos_string(new_mtime));
+        assert!(crate::mtime::mtime_matches(
+            new_mtime,
+            crate::mtime::from_unix_nanos_string(&drift.after.mtime_ns, "a.txt").unwrap()
+        ));
         assert_eq!(line.bytes, drift.before.bytes);
         assert_eq!(line.mtime_ns, drift.before.mtime_ns);
     }
@@ -1377,11 +1301,11 @@ mod tests {
         let _guard = lock_tree(&source);
         let rels = list_rels(&source);
         let before = capture(&source, &rels);
-        scan_tree(&source, &manifest).unwrap();
+        scan_tree(&as_root(&source), &manifest).unwrap();
         let text = fs::read_to_string(&manifest).unwrap();
         let end = text.trim_end_matches('\n').rfind('\n').unwrap();
         fs::write(&manifest, &text[..=end]).unwrap();
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         assert_eq!(stats.files, 1);
         let paths: Vec<String> = fs::read_to_string(&manifest)
             .unwrap()
@@ -1399,10 +1323,10 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("empty.jpg"), b"").unwrap();
         let manifest = tmp.path().join("scan.jsonl");
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         assert_eq!(stats.files, 1);
         assert_eq!(stats.bytes, 0);
-        verify_scan_manifest(&manifest, &source, &mut |_| ()).unwrap();
+        verify_scan_manifest(&manifest, &as_root(&source), &mut |_| ()).unwrap();
     }
 
     #[test]
@@ -1415,13 +1339,15 @@ mod tests {
         let manifest = tmp.path().join("scan.jsonl");
         {
             let _guard = lock_tree(&source);
-            scan_tree(&source, &manifest).unwrap();
+            scan_tree(&as_root(&source), &manifest).unwrap();
         }
         allow_write(&source.join("a.txt"));
         fs::write(source.join("a.txt"), b"alphb").unwrap();
         let mut seen = Vec::new();
-        let err = verify_scan_manifest(&manifest, &source, &mut |drift| seen.push(drift.clone()))
-            .unwrap_err();
+        let err = verify_scan_manifest(&manifest, &as_root(&source), &mut |drift| {
+            seen.push(drift.clone())
+        })
+        .unwrap_err();
         assert!(matches!(err, IngestError::ManifestDrift { .. }), "{err}");
         assert!(
             seen.iter()

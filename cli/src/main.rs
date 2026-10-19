@@ -17,16 +17,16 @@ use std::process::ExitCode;
 
 use albumen_ingest::{
     dest, export_tree, import_icloud, import_takeout_with, parse_manifest, plan_icloud,
-    plan_takeout, scan_tree, verify_scan_manifest, verify_tree, walk_sorted, write_manifest,
-    DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store, SourceRoot,
-    WalkControl,
+    plan_takeout, platform_dirs, scan_tree, verify_scan_manifest, verify_tree, walk_sorted,
+    write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
+    SourceRoot, WalkControl,
 };
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "albumen",
-    about = "Bit-exact photo library export, Takeout import, iCloud import, and read-only scan. Export and import writes require --apply or --execute."
+    about = "Bit-exact photo library export, Takeout import, iCloud import, and read-only scan. Export and import writes require --apply or --execute. platform-dirs prints native paths and creates nothing."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -55,6 +55,12 @@ enum Command {
         #[arg(long)]
         execute: bool,
     },
+    /// Print the platform config and data directories. Creates nothing.
+    ///
+    /// Linux uses XDG, macOS uses ~/Library/Application Support, and Windows
+    /// uses the roaming Known Folder. These paths are not used unless you
+    /// pass them to another command.
+    PlatformDirs,
     /// Read a library and write a JSONL manifest outside it.
     ///
     /// The source is opened read-only. Scan does not write the source.
@@ -166,7 +172,8 @@ fn run() -> Result<(), IngestError> {
                 return print_export_plan(&from, &to, &manifest_path);
             }
             let dest = open_target(&to)?;
-            let entries = export_tree(&from, dest.as_ref())?;
+            let source = SourceRoot::open(&from)?;
+            let entries = export_tree(&source, dest.as_ref())?;
             refuse_clobber(&manifest_path, &to, &entries)?;
             write_manifest(&manifest_path, &entries)?;
             println!("exported {} files to {to}", entries.len());
@@ -174,7 +181,8 @@ fn run() -> Result<(), IngestError> {
             Ok(())
         }
         Command::Scan { dir, manifest } => {
-            let stats = scan_tree(&dir, &manifest)?;
+            let source = SourceRoot::open(&dir)?;
+            let stats = scan_tree(&source, &manifest)?;
             println!(
                 "scanned {} files ({} bytes) into {}",
                 stats.files,
@@ -256,6 +264,14 @@ fn run() -> Result<(), IngestError> {
             println!("report {}", report.display());
             Ok(())
         }
+        Command::PlatformDirs => {
+            let (config, data) = platform_dirs()?;
+            println!("platform-dirs");
+            println!("  config: {}", config.display());
+            println!("  data: {}", data.display());
+            println!("  creates: nothing");
+            Ok(())
+        }
         Command::VerifyManifest { manifest, against } => {
             if manifest_is_jsonl(&manifest)? {
                 if against.starts_with("s3://") {
@@ -266,7 +282,8 @@ fn run() -> Result<(), IngestError> {
                             .to_string(),
                     });
                 }
-                verify_scan_manifest(&manifest, Path::new(&against), &mut |drift| {
+                let source = SourceRoot::open(Path::new(&against))?;
+                verify_scan_manifest(&manifest, &source, &mut |drift| {
                     println!("{} {} {}", drift.kind, drift.path, drift.detail);
                 })?;
                 println!("verified scan manifest against {against}");

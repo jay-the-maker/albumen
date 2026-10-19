@@ -411,23 +411,26 @@ fn sync_dir(dir: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-static FAIL_SIDECAR_RENAME: Mutex<Option<PathBuf>> = Mutex::new(None);
+static FAIL_SIDECAR_RENAME: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(crate) fn arm_fail_before_sidecar_rename(sidecar: PathBuf) {
-    *FAIL_SIDECAR_RENAME
+    FAIL_SIDECAR_RENAME
         .lock()
-        .expect("sidecar rename hook lock") = Some(sidecar);
+        .expect("sidecar rename hook lock")
+        .push(sidecar);
 }
 
 fn sidecar_rename_should_fail(dest: &Path) -> bool {
     #[cfg(test)]
     {
+        // Two tests arm different sidecars at the same time. One slot would
+        // drop the other path, and the commit would succeed.
         let mut armed = FAIL_SIDECAR_RENAME
             .lock()
             .expect("sidecar rename hook lock");
-        if armed.as_deref() == Some(dest) {
-            *armed = None;
+        if let Some(index) = armed.iter().position(|path| path == dest) {
+            armed.remove(index);
             return true;
         }
         false

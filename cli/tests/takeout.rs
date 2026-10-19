@@ -25,17 +25,19 @@ fn write_zip(path: &Path, files: &[(&str, &[u8])]) {
     zip.finish().unwrap();
 }
 
-fn write_tgz(path: &Path, name: &str, bytes: &[u8]) {
+fn write_tgz(path: &Path, files: &[(&str, &[u8])]) {
     let file = File::create(path).unwrap();
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
-    let mut header = tar::Header::new_gnu();
-    header.set_path(name).unwrap();
-    header.set_size(bytes.len() as u64);
-    header.set_mtime(1_590_000_000);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder.append(&header, bytes).unwrap();
+    for (name, bytes) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(bytes.len() as u64);
+        header.set_mtime(1_590_000_000);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, *bytes).unwrap();
+    }
     let encoder = builder.into_inner().unwrap();
     encoder.finish().unwrap();
 }
@@ -57,7 +59,10 @@ fn import_takeout_reconciles_a_synthetic_split_download() {
             ("Takeout/Google Photos/IMG_0001.jpg.json", json.as_slice()),
         ],
     );
-    write_tgz(&tgz_path, "Takeout/Google Photos/Album/CLIP.mp4", mp4);
+    write_tgz(
+        &tgz_path,
+        &[("Takeout/Google Photos/Album/CLIP.mp4", mp4.as_slice())],
+    );
     let zip_before = fs::read(&zip_path).unwrap();
     let tgz_before = fs::read(&tgz_path).unwrap();
 
@@ -223,4 +228,113 @@ fn import_takeout_dry_run_writes_nothing() {
     assert!(!library.exists(), "{text}");
     assert!(!report.exists(), "{text}");
     assert_eq!(fs::read(&archive).unwrap(), before);
+}
+
+#[test]
+fn import_takeout_round_trips_split_archives_and_takeout_names() {
+    let root = tempfile::tempdir().unwrap();
+    let from = root.path().join("takeout");
+    fs::create_dir(&from).unwrap();
+    let long = format!("{}.jpg", "n".repeat(43));
+    assert_eq!(long.chars().count(), 47);
+    let long_json = format!("{}.jp.json", "n".repeat(43));
+    let long_member = format!("Takeout/Album/{long}");
+    let long_json_member = format!("Takeout/Album/{long_json}");
+    let jpeg = b"\xff\xd8\xff\xdb synthetic-cli-gate-jpeg";
+    let edited = b"\xff\xd8\xff\xdb synthetic-cli-gate-edited";
+    let heic = b"synthetic-cli-gate-heic";
+    let mov = b"synthetic-cli-gate-mov";
+    let clip = b"synthetic-cli-gate-clip";
+    let long_bytes = b"synthetic-cli-gate-truncated";
+    let plain_json = br#"{"title":"IMG_0001.jpg","creationTime":{"timestamp":"1600000000","formatted":"synthetic"},"photoTakenTime":{"timestamp":"1590000000","formatted":"synthetic"}}"#;
+    let edited_json = br#"{"title":"IMG_0001-edited.jpg","photoTakenTime":{"timestamp":"1590000001","formatted":"synthetic"}}"#;
+    let live_json = br#"{"title":"IMG_LIVE.HEIC","photoTakenTime":{"timestamp":"1590000002","formatted":"synthetic"}}"#;
+    let clip_json = br#"{"title":"CLIP.mp4","photoTakenTime":{"timestamp":"1590000003","formatted":"synthetic"}}"#;
+    let truncated_json = br#"{"title":"truncated","photoTakenTime":{"timestamp":"1590000004","formatted":"synthetic"}}"#;
+    let zip_path = from.join("takeout-001.zip");
+    let tgz_path = from.join("takeout-002.tgz");
+    write_zip(
+        &zip_path,
+        &[
+            ("Takeout/Album/IMG_0001.jpg", jpeg.as_slice()),
+            ("Takeout/Album/IMG_0001-edited.jpg", edited.as_slice()),
+            ("Takeout/Album/IMG_LIVE.HEIC", heic.as_slice()),
+            ("Takeout/Album/IMG_LIVE.MOV", mov.as_slice()),
+            ("Takeout/Album/CLIP.mp4", clip.as_slice()),
+            (long_member.as_str(), long_bytes.as_slice()),
+        ],
+    );
+    write_tgz(
+        &tgz_path,
+        &[
+            ("Takeout/Album/IMG_0001.jpg.json", plain_json.as_slice()),
+            (
+                "Takeout/Album/IMG_0001-edited.jpg.supplemental-metadata.json",
+                edited_json.as_slice(),
+            ),
+            (
+                "Takeout/Album/IMG_LIVE.HEIC.supplemental-metadata.json",
+                live_json.as_slice(),
+            ),
+            (
+                "Takeout/Album/CLIP.mp4.supplemental-metadata.json",
+                clip_json.as_slice(),
+            ),
+            (long_json_member.as_str(), truncated_json.as_slice()),
+            (
+                "Takeout/Album/metadata.json",
+                br#"{"title":"synthetic album"}"#,
+            ),
+        ],
+    );
+    let zip_before = fs::read(&zip_path).unwrap();
+    let tgz_before = fs::read(&tgz_path).unwrap();
+    let library = root.path().join("library");
+    let report = root.path().join("report.jsonl");
+    let output = albumen()
+        .args(["import-takeout", "--apply", "--from"])
+        .arg(&from)
+        .arg("--to")
+        .arg(&library)
+        .arg("--report")
+        .arg(&report)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert_eq!(
+        fs::read(library.join("Takeout/Album/IMG_0001.jpg")).unwrap(),
+        jpeg
+    );
+    assert_eq!(
+        fs::read(library.join("Takeout/Album/IMG_0001.jpg.json")).unwrap(),
+        plain_json
+    );
+    assert_eq!(
+        fs::read(library.join("Takeout/Album/IMG_0001-edited.jpg.supplemental-metadata.json"))
+            .unwrap(),
+        edited_json
+    );
+    assert_eq!(fs::read(library.join(&long_member)).unwrap(), long_bytes);
+    assert_eq!(
+        fs::read(library.join(&long_json_member)).unwrap(),
+        truncated_json
+    );
+    assert!(!jpeg.windows(10).any(|window| window == b"1590000000"));
+    assert!(!library.join("Takeout/Album/IMG_0001.jpg.xmp").exists());
+    assert_eq!(fs::read(&zip_path).unwrap(), zip_before);
+    assert_eq!(fs::read(&tgz_path).unwrap(), tgz_before);
+    let report_text = fs::read_to_string(&report).unwrap();
+    let summary = report_text.lines().last().unwrap();
+    assert!(summary.contains("\"mismatched\":0"), "{summary}");
+    assert!(summary.contains("\"count_in\""), "{summary}");
+    assert!(summary.contains("\"count_out\""), "{summary}");
+    assert!(report_text.contains("\"sha256\""));
+    assert!(report_text.contains("IMG_LIVE"));
+    assert!(report_text.contains("\"unmatched\":true"));
+    assert!(report_text.contains("\"photo_taken_time\":\"1590000000\""));
 }

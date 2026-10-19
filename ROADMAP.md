@@ -10,13 +10,45 @@ Shipped. A source is opened read-only. Scan, import, and export read through tha
 
 ## Google Takeout and iCloud export
 
-This is the gap after the safety work and before the storage backends. Both importers are in the tree.
+`albumen import-takeout` and `albumen import-icloud` bring a Google Takeout download and an iCloud Photos download, export, or Photos library copy into the library you choose. The source stays read-only. Originals stay bit-exact.
 
 `albumen import-takeout` reads split zip and tgz parts, or an extracted Takeout folder, read-only. Each file is `copy_verify`'d. Takeout JSON, including truncated names, `(1)` suffixes, and `.supplemental-metadata.json`, stays byte-for-byte beside the photo it describes. Capture time and GPS are restored into a new `.albumen.json` sidecar. The original bytes are not modified. A still and a video that share a stem are reported as a Motion Photo pair. The JSONL report lists every unmatched file. Nothing is dropped because of its extension. The default is a dry-run. See [docs/importers/takeout.md](docs/importers/takeout.md).
 
 `albumen import-icloud` reads a multi-part download (zip parts plus Photo Details CSVs), a Photos export, or a copied Photos library, read-only. Originals, edited versions, Live Photo pairs, and AAE/XMP sidecars are `copy_verify`'d. CSVs stay byte-for-byte. Album, favorite, caption, capture time, and GPS metadata is a sidecar export. `Photos.sqlite` is opened `mode=ro&immutable=1`. The report lists every unmatched sidecar. The default is a dry-run. See [docs/importers/icloud.md](docs/importers/icloud.md).
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
+
+## Sync is not backup
+
+Next, after the importers above. Deletes never propagate. Library content is append-only, and a removal is a tombstone or a hide. The stored original stays. Receivers and importers leave the source and the stored library in place. How that is met, and the gaps that remain, are in [docs/architecture.md](docs/architecture.md).
+
+Test idea: a delete-propagation test. Two copies of one library. A hide or a tombstone on the first copy leaves the second copy's original bytes, name, and mtime in place. `cli/tests/deletes_never_propagate.rs` already runs in CI. It rejects an unlink in the receiver, the importers, the CLI, and the MCP server. It does not yet use two copies.
+
+## No account lockout
+
+Next, with the item above. There is no vendor account. The library is plain files on the user's own storage, readable without Albumen. Keys and config stay local. Export to a directory needs no service.
+
+Test idea: an offline/no-account restore test. `cli/tests/offline_restore.rs` is that test and runs in CI. It exports a synthetic library and runs `verify-manifest` with a cleared environment, and on Linux with `connect()` blocked.
+
+## Family library
+
+Not built. A design for a shared library on storage the family already has, with no server the owner runs, is [docs/design/family-sharing.md](docs/design/family-sharing.md). Each member has an append-only namespace. Originals stay bit-exact under `copy_verify`. A hide is per viewer and leaves the other member's files in place.
+
+## Live Photo playback
+
+Not built. A Live Photo would play as the still and its paired video. Both files stay the originals Albumen stored. Playback does not transcode them and does not write a new master.
+
+## Windows and Linux, with macOS
+
+Linux, Windows, and macOS are first-class for the ingest tools. The round-trip suite, the read-only source snapshot, and the in-process scale tests run on `ubuntu-24.04`, `ubuntu-26.04`, `windows-2025`, `windows-latest`, and `macos-14`. `windows-2025` is the pinned image.
+
+Windows opens paths longer than 260 characters, reserved device names, and trailing dots or spaces with the `\\?\` prefix. A destination that already has another spelling of the same name is reported. Named NTFS alternate data streams are copied with the file. Modification time is kept to the 100 ns tick NTFS stores.
+
+`albumen platform-dirs` prints the config and data directories and creates nothing. Linux uses XDG, macOS uses `~/Library/Application Support`, and Windows uses the roaming Known Folder. Pass those paths to another command when you want them.
+
+`albumen-receive --keyring` reads the camera password from the Keychain, Windows Credential Manager, or the Secret Service. `--keyring-set` stores it. The password is not printed. `--print-service` prints a launchd plist, a systemd user unit, or a Task Scheduler definition. `--service-dir` with `--apply` writes that file and does not start the service. The definition names `ALBUMEN_RECEIVE_PASSWORD` and does not contain the password.
+
+The test ladder runs on all three. The Windows sandbox rung is [docs/test-ladder.md](docs/test-ladder.md). Details are in [docs/platforms.md](docs/platforms.md).
 
 ## Export everything
 

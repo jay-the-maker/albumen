@@ -21,6 +21,13 @@ final class BackgroundUploadTests: XCTestCase {
         XCTAssertThrowsError(try BackgroundPut.request(endpoint: URL(string: "http://127.0.0.1/")!, filename: "..", mtimeSeconds: 0))
     }
 
+    func testForegroundSessionIsNotTheBackgroundSession() {
+        let configuration = ForegroundUpload.foregroundConfiguration()
+        XCTAssertNil(configuration.identifier)
+        XCTAssertFalse(configuration.sessionSendsLaunchEvents)
+        XCTAssertNotEqual(configuration.identifier, BackgroundUpload.sessionIdentifier)
+    }
+
     func testBackgroundSessionAsksToBeRelaunched() throws {
         let configuration = BackgroundUpload.makeConfiguration()
         XCTAssertEqual(configuration.identifier, BackgroundUpload.sessionIdentifier)
