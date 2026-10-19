@@ -47,40 +47,56 @@ fi
 gradle=$("$root/scripts/install-gradle.sh" | tail -n 1)
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" >"$root/mobile/android/local.properties"
 cd "$root/mobile/android"
-set +e
-"$gradle" :backup:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=photos.albumen.backup.ScaleSoakTest \
-  -Pandroid.testInstrumentationRunnerArguments.albumenSoakItems="$items" \
-  -Pandroid.testInstrumentationRunnerArguments.albumenSoakShard="$shard" \
-  -Pandroid.testInstrumentationRunnerArguments.albumenSoakShards="$shards" \
-  -Pandroid.testInstrumentationRunnerArguments.albumenSoakSeed="$seed" \
-  --no-daemon --stacktrace --console=plain
-status=$?
-set -e
+# connectedDebugAndroidTest uninstalls the test package before this script can
+# read the result files. Install, instrument, then read while the package remains.
+"$gradle" :backup:installDebugAndroidTest --no-daemon --stacktrace --console=plain
+pkg=$(adb shell pm list packages photos.albumen.backup | tr -d '\r' | awk -F: '/\.test$/ {print $2; exit}')
+if [[ -z "$pkg" ]]; then
+  echo "the backup test package was not installed" >&2
+  adb shell pm list packages photos.albumen.backup >&2 || true
+  exit 1
+fi
 
 dest="$root/build/backup-scale-soak"
 mkdir -p "$dest"
-remote="/sdcard/Android/data/photos.albumen.backup.test/files/backup-scale-soak"
-if adb shell "ls $remote/result.txt" >/dev/null 2>&1; then
-  adb pull "$remote/result.txt" "$dest/android-shard-${shard}-result.txt"
-  adb pull "$remote/faults.log" "$dest/android-shard-${shard}-faults.log"
-  adb pull "$remote/timeline.csv" "$dest/android-shard-${shard}-timeline.csv"
-else
-  pkg=$(adb shell pm list packages | tr -d '\r' | awk -F: '/photos\.albumen\.backup\.test$/ {print $2; exit}')
-  if [[ -n "$pkg" ]]; then
-    adb exec-out run-as "$pkg" cat files/backup-scale-soak/result.txt >"$dest/android-shard-${shard}-result.txt" || true
-    adb exec-out run-as "$pkg" cat files/backup-scale-soak/faults.log >"$dest/android-shard-${shard}-faults.log" || true
-    adb exec-out run-as "$pkg" cat files/backup-scale-soak/timeline.csv >"$dest/android-shard-${shard}-timeline.csv" || true
-  fi
+adb logcat -c || true
+set +e
+adb shell am instrument -w \
+  -e class photos.albumen.backup.ScaleSoakTest \
+  -e albumenSoakItems "$items" \
+  -e albumenSoakShard "$shard" \
+  -e albumenSoakShards "$shards" \
+  -e albumenSoakSeed "$seed" \
+  "$pkg/androidx.test.runner.AndroidJUnitRunner" | tr -d '\r' | tee "$dest/android-shard-${shard}-instrument.txt"
+status=${PIPESTATUS[0]}
+set -e
+if ! grep -q 'OK (' "$dest/android-shard-${shard}-instrument.txt"; then
+  status=1
 fi
-if [[ -s "$dest/android-shard-${shard}-result.txt" ]]; then
-  cat "$dest/android-shard-${shard}-result.txt"
-elif [[ "$status" -eq 0 ]]; then
-  echo "scale soak did not write a result" >&2
+
+pull_app_file() {
+  local name=$1
+  local out=$2
+  adb exec-out run-as "$pkg" cat "files/backup-scale-soak/$name" 2>/dev/null | tr -d '\r' >"$out" || true
+  if [[ ! -s "$out" ]]; then
+    adb shell run-as "$pkg" cat "files/backup-scale-soak/$name" 2>/dev/null | tr -d '\r' >"$out" || true
+  fi
+}
+pull_app_file result.txt "$dest/android-shard-${shard}-result.txt"
+pull_app_file faults.log "$dest/android-shard-${shard}-faults.log"
+pull_app_file timeline.csv "$dest/android-shard-${shard}-timeline.csv"
+if ! grep -q '^backup-scale-soak ' "$dest/android-shard-${shard}-result.txt" 2>/dev/null; then
+  adb logcat -d -s albumen-scale-soak:I | tr -d '\r' \
+    | sed -n 's/.*\(backup-scale-soak platform=.*\)/\1/p' \
+    | tail -n 1 >"$dest/android-shard-${shard}-result.txt" || true
+fi
+if ! grep -q '^backup-scale-soak ' "$dest/android-shard-${shard}-result.txt" 2>/dev/null; then
+  echo "scale soak did not write a result for $pkg" >&2
   adb logcat -d -s albumen-scale-soak:I >&2 || true
   exit 1
 fi
-if [[ "$status" -eq 0 ]] && ! grep -q 'silent_failures=0' "$dest/android-shard-${shard}-result.txt"; then
+cat "$dest/android-shard-${shard}-result.txt"
+if ! grep -q 'silent_failures=0' "$dest/android-shard-${shard}-result.txt"; then
   echo "scale soak reported a silent failure" >&2
   exit 1
 fi
