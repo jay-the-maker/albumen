@@ -2,8 +2,9 @@
 
 //! Filesystem-write lint for modules that only read a source.
 //!
-//! Allow-list: empty. `ingest/src/scan.rs`, `ingest/src/discover.rs`, and
-//! `ingest/src/source.rs` must not create, write, rename, or remove a file
+//! Allow-list: empty. `ingest/src/scan.rs`, `ingest/src/discover.rs`,
+//! `ingest/src/source.rs`, and `ingest/src/family_source.rs` must not create,
+//! write, rename, or remove a file
 //! outside `#[cfg(test)]`. `OpenOptions` is a write only when it sets
 //! `write`, `append`, `create`, or `create_new`. A hit fails as `file:line`.
 //! Add a line to `ALLOW` only when the call cannot reach a source, and say
@@ -17,7 +18,7 @@ const ALLOW: &[&str] = &[];
 #[test]
 fn source_modules_do_not_call_filesystem_writes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let files = ["scan.rs", "discover.rs", "source.rs"];
+    let files = ["scan.rs", "discover.rs", "source.rs", "family_source.rs"];
     let mut hits = Vec::new();
     for name in files {
         let path = root.join(name);
