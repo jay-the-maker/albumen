@@ -615,6 +615,8 @@ function Invoke-Albumen([string]$Name, [string]$Exe, [string[]]$ArgumentList, [s
     if ($Stdin) { $start.RedirectStandardInput = $Stdin }
     $proc = Start-Process @start
     if ($script:WatchProcesses) {
+        # Without a cached handle, Start-Process without -Wait reports a null ExitCode.
+        $null = $proc.Handle
         [void]$script:ObservedPids.Add([int]$proc.Id)
         $script:ObservedImages[[int]$proc.Id] = [IO.Path]::GetFileName($Exe)
         while (-not $proc.HasExited) {
