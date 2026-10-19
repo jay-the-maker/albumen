@@ -48,7 +48,8 @@ pub use takeout_scale::{
 };
 pub use throughput::{
     measure_throughput, optional_rate, phase_share_line, ratio_passes, throughput_problems,
-    ThroughputReport, DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES, THROUGHPUT_RATIO_FLOOR,
+    ThroughputReport, CPU_PERCENT_TARGET, DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES,
+    THROUGHPUT_RATIO_FLOOR,
 };
 
 pub const DEFAULT_SEARCH_ITEMS: u64 = 128;

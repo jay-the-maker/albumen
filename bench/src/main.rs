@@ -145,7 +145,7 @@ fn run() -> Result<(), String> {
             println!("{text}");
             io::stdout().flush().map_err(|err| err.to_string())?;
             eprintln!(
-                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={}",
+                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={} cpu_seconds={:.3} cores={} cpu_percent={:.2} cpu_seconds_per_1000={:.3} cpu_target_percent={:.1}",
                 report.leg,
                 report.files,
                 report.bytes_each,
@@ -160,7 +160,12 @@ fn run() -> Result<(), String> {
                 report.reconciled_percent(),
                 report.mismatched,
                 report.source_changed,
-                phase_share_line(&report.phases)
+                phase_share_line(&report.phases),
+                report.cpu_seconds,
+                report.cores,
+                report.cpu_percent,
+                report.cpu_seconds_per_1000,
+                albumen_bench::CPU_PERCENT_TARGET
             );
             let problems = throughput_problems(&report);
             if !problems.is_empty() {
