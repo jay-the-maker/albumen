@@ -57,7 +57,7 @@ These are the product bars on a 380,000-item library. CI does not fail a job for
 
 Status: proposed, pending XO acceptance. This is a team scorecard target. It is not a product requirement. Until it is accepted, the 0.80 target above applies to every leg.
 
-Proposal: on `macos-14`, the import throughput target is **import MB/s at 90% or more of the copy ceiling measured in the same job**. The copy ceiling uses the same workers and the import's durability, `F_FULLFSYNC` on every file and on its directory, and reads each source once, with no hash and no read-back. The other legs keep the 0.80-of-raw target. The import throughput job prints the copy ceiling as `copy_ceiling_mb_s` and `copy_ceiling_ratio` once [#102](https://github.com/jay-the-maker/albumen/pull/102) is merged.
+Proposal: on `macos-14`, the import throughput target is **import MB/s at 90% or more of the copy ceiling measured in the same job**. The copy ceiling uses the same workers and the import's durability, `F_FULLFSYNC` on every file and on its directory, and reads each source once, with no hash and no read-back. The other legs keep the 0.80-of-raw target. The import throughput job prints the copy ceiling as `copy_ceiling_mb_s` and `copy_ceiling_ratio`, added in [#110](https://github.com/jay-the-maker/albumen/pull/110), which is on main.
 
 Why: the copy ceiling is the most an import can reach on that runner with one read of each source and the required syncs. CI measured it between 0.72 and 1.07 of the raw rate on `macos-14`, depending on the runner. On a runner where it is 0.72, 0.80 of raw is above anything an import with the required durability can reach, whatever the code does. A target relative to the same-job ceiling follows the runner and keeps measuring the import code.
 
