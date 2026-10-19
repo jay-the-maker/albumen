@@ -20,7 +20,7 @@ There is no `albumen ingest` subcommand. The write that stores bytes from a libr
 | Write | Nothing. `export` prints the plan. `scan` is refused when the manifest resolves inside the source, so a refused scan creates nothing. | `--apply` or `--execute` on `export` writes the destination and the manifest, both outside the source. `scan` writes the manifest outside the source. `verify-manifest` writes nothing. |
 | Network | None. A dry-run that names `s3://` says that a later apply would connect. It does not connect. | `export --apply` to `s3://` connects to `ALBUMEN_S3_ENDPOINT`. `verify-manifest` of an export manifest against `s3://` reads objects there. A scan manifest is verified against a local directory only. |
 
-CI straces `scan` and fails if it opens a socket or writes under the source. The same scan is repeated with a seccomp profile that denies socket calls.
+CI straces `scan` and a receive dry-run and fails if either opens a socket or writes under the source. The same scan is repeated in a rootless container with `--network none` and a seccomp profile that denies socket calls. The source in that container is a copy mounted read-only. `albumen-mcp` and `albumen export` are not in that strace script.
 
 ## albumen-mcp
 
@@ -31,6 +31,8 @@ CI straces `scan` and fails if it opens a socket or writes under the source. The
 | Network | None. stdio only. | `export --apply` to `s3://` connects to `ALBUMEN_S3_ENDPOINT`. Nothing else dials out. |
 
 There is no delete, move, or quarantine tool. Inbound messages are capped by `ALBUMEN_MCP_MAX_MESSAGE` (default 8 MiB) before the body is allocated.
+
+The published image mounts the library at `/library` read-only. CI runs `scripts/check-library-mount.sh` and fails if that default container can create, modify, rename, or delete a file there. A writable directory is a separate mount, `/destination`, and is used only when export or upload is turned on.
 
 ## albumen-receive
 
@@ -44,4 +46,4 @@ There is no delete, move, or quarantine tool. Inbound messages are capped by `AL
 
 ## What this does not claim
 
-Apple notarization is not done. Gatekeeper will warn on the macOS binaries. The gap is recorded in [release-verify.md](release-verify.md). The ladder in [test-ladder.md](test-ladder.md) is how a real machine is approached. Rung 4 is a copied folder after rungs 1–3 are green.
+Apple notarization is not done. Gatekeeper will warn on the macOS binaries. The gap is recorded in [release-verify.md](release-verify.md). The ladder in [test-ladder.md](test-ladder.md) is how a real machine is approached. The last rung is [trial-macos.md](trial-macos.md): a copied folder, mounted read-only, on a dedicated non-admin Mac, after rungs 1–3 are green and the owner has said to run it. The million-item tree in the scheduled job runs on `macos-14` only.

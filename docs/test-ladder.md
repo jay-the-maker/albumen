@@ -8,7 +8,7 @@ Safety comes before a scan of a machine that holds the only copy. Each rung has 
 
 Entry: a pull request, or a local `cargo test` of this tree.
 
-What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, and `macos-14`. The corpus is the CC0 fixtures. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
+What runs: `cargo fmt`, `cargo clippy`, and `scripts/with-minio.sh cargo test --locked --all-targets` on `ubuntu-24.04`, `ubuntu-26.04`, `macos-14`, and `windows-2025`. `windows-2025` is the pinned Windows image. It is not `windows-latest`. The corpus is the CC0 fixtures. `ALBUMEN_REAL_CORPUS` is unset in CI. Set it locally, and only locally, to a directory of copies plus `sanitized.sha256`. Do not commit that directory.
 
 `scripts/check-dest-writes.py` fails the job if production code creates, writes, renames, or removes a file outside `ingest/src/dest.rs`. The bench harness is not part of that scan. It writes synthetic timing files and does not open a user archive.
 
@@ -28,11 +28,11 @@ The before/after snapshot is mtime, mode, and size. Access time is not part of i
 
 Exit: the script prints `rung 2 exit: source copy unchanged` and the metadata diff is empty.
 
-## Rung 3 — generated million-item tree on macos-14
+## Rung 3 — generated million-item tree
 
 Entry: rungs 1 and 2 are green.
 
-`cli/tests/raid_scale.rs` is `#[ignore]` so an ordinary `cargo test`, and a pull request, does not create a million inodes. A million files hung the pull-request job, so [`.github/workflows/raid-scale.yml`](../.github/workflows/raid-scale.yml) runs it on `workflow_dispatch` and a weekly schedule. The job timeout is 180 minutes. The command is:
+`cli/tests/raid_scale.rs` is `#[ignore]` so an ordinary `cargo test`, and a pull request, does not create a million inodes. A million files hung the pull-request job, so [`.github/workflows/raid-scale.yml`](../.github/workflows/raid-scale.yml) runs it on `workflow_dispatch` and a weekly schedule. The job timeout is 180 minutes. The runner in that workflow is `macos-14` only. A Linux or Windows run of the same tree is not in the workflow. The command is:
 
 ```bash
 cargo test --release --locked -p albumen --test raid_scale -- --ignored --nocapture --test-threads=1
@@ -44,22 +44,10 @@ Scan writes the manifest outside the tree. Verify hashes the tree again. The bef
 
 Exit: the ignored test passes on the scheduled or manual `macos-14` job and the snapshot diff is empty. A pull request does not wait for this rung.
 
-## Rung 4 — optional owner Mac
+## Rung 4 — owner Mac
 
-Entry: rungs 1–3 are green. This rung is not run in CI.
+Entry: rungs 1–3 are green, and the owner has said to run it. This rung is not a CI job. The procedure is [trial-macos.md](trial-macos.md).
 
-Use a dedicated non-admin macOS user, or a VM. Work on a **copied** folder, not the live volume. Keep the copy read-only from the process's point of view. Take the network away with `scripts/macos-readonly-sandbox.sh` (a `sandbox-exec` profile) or with pf or LuLu. The profile allows reads and allows writes only in the manifest's parent directory. It refuses a manifest that resolves inside the source. `chmod a-w` does not replace that profile.
+Use a dedicated non-admin macOS user. Scan a copied folder, not the original volume. Take the network away with `scripts/macos-readonly-sandbox.sh`. Mount the copy read-only (`mount -u -o rdonly,noatime`, a read-only APFS snapshot, or a read-only disk image) so a read cannot change access time. macOS has no `O_NOATIME`. Without that mount, a read may update atime. Bytes, mtime, and xattrs are still left unchanged. `chmod a-w` does not replace the mount or the sandbox profile.
 
-The commands are the same shape as a scan of a volume, aimed at the copy:
-
-```bash
-ditto "/Volumes/RAID/Photos/2024" "$HOME/albumen-trial/copy"
-scripts/macos-readonly-sandbox.sh \
-  "$HOME/albumen-trial/copy" \
-  "$HOME/albumen-trial/scan.jsonl"
-albumen verify-manifest \
-  --manifest "$HOME/albumen-trial/scan.jsonl" \
-  --against "$HOME/albumen-trial/copy"
-```
-
-Exit: the copy's bytes, mtime, and xattrs match the snapshot taken before the scan. macOS may update atime. The live volume was not the path that was scanned.
+Exit: the mounted copy's bytes, mtime, xattrs, and access time match the snapshot taken before the scan. The original volume was not the path that was scanned.
