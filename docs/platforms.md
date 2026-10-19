@@ -32,6 +32,14 @@ NTFS stores modification time in 100 ns ticks. A time Albumen sets is kept to th
 
 The entry name is `albumen-receive` and the account is `--user`. `--keyring-set` with `--apply` stores the password from `--password` or the environment and prints `keyring: stored`. It does not print the password. Without `--apply`, the keyring is left unchanged.
 
+## Pairing
+
+`albumen-receive --pair` serves WebDAV over TLS and prints a QR code. The QR is `albumen-pair://v1` with the endpoint, the SHA-256 fingerprint of the certificate, a one-time token, and the `--member` public key when one was passed. `--qr-png PATH` writes the same code as a PNG. Both the certificate and the PNG are written only with `--apply` or `--execute`. A dry-run prints the camera settings and opens no sockets.
+
+The certificate is generated on first run and reused after that. It lives in a sibling directory of `--to`, named `<library>.receive`, so it is not a library file and it is not a member object. The phone pins the fingerprint from the QR. A different certificate is refused before the copy starts, and the refusal is a sentence the phone can show. The one-time token is the Basic password for that first copy. The camera password from `--password` or the keyring still works, and it is not printed. FTP stays unencrypted. The lines under `camera setup` are the host, port, user, and `ftp encryption: none` for a body that cannot scan a QR.
+
+`--pair` on `0.0.0.0` or `::` needs `--advertise <host>`, a host name or IP address without a scheme or port. The service file does not include `--pair`. Run pairing in the terminal when a phone or a camera is being set up.
+
 ## Receiver service
 
 `--print-service` prints a definition and writes nothing:
