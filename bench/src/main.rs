@@ -192,6 +192,11 @@ fn run() -> Result<(), String> {
                 report.sha_hw,
                 report.sha256_mb_s,
             );
+            let (contig, any, failed, errno) = albumen_win::reserve_stats();
+            eprintln!(
+                "import-preallocate leg={} f_preallocate_contig={contig} f_preallocate_any={any} f_preallocate_failed={failed} f_preallocate_last_errno={errno}",
+                report.leg
+            );
             if let Some(path) = env::var_os("ALBUMEN_THROUGHPUT_SCORECARD") {
                 use std::io::Write as _;
                 let mut out = std::fs::OpenOptions::new()

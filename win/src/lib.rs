@@ -226,3 +226,82 @@ pub fn uncached_writes(file: &std::fs::File) -> std::io::Result<()> {
     let _ = file;
     Ok(())
 }
+
+/// Reserve disk blocks for `len` bytes at the end of a new, empty file
+/// (macOS `F_PREALLOCATE`, contiguous first, then any blocks). It allocates
+/// only and never changes the file's logical size. Elsewhere it does
+/// nothing. An error means nothing was reserved; the caller writes as usual.
+static RESERVE_CONTIG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RESERVE_ANY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RESERVE_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RESERVE_LAST_ERRNO: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// What [`reserve_blocks`] did so far in this process: calls that got
+/// contiguous blocks, calls that got any blocks, failed calls, and the last
+/// failure's errno (0 for none).
+pub fn reserve_stats() -> (u64, u64, u64, i32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        RESERVE_CONTIG.load(Relaxed),
+        RESERVE_ANY.load(Relaxed),
+        RESERVE_FAILED.load(Relaxed),
+        RESERVE_LAST_ERRNO.load(Relaxed),
+    )
+}
+
+pub fn reserve_blocks(file: &std::fs::File, len: u64) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        #[repr(C)]
+        struct Fstore {
+            flags: u32,
+            posmode: std::ffi::c_int,
+            offset: i64,
+            length: i64,
+            bytesalloc: i64,
+        }
+        extern "C" {
+            fn fcntl(fd: std::ffi::c_int, cmd: std::ffi::c_int, ...) -> std::ffi::c_int;
+        }
+        const F_PREALLOCATE: std::ffi::c_int = 42;
+        const F_ALLOCATECONTIG: u32 = 0x2;
+        const F_ALLOCATEALL: u32 = 0x4;
+        const F_PEOFPOSMODE: std::ffi::c_int = 3;
+        let length = i64::try_from(len).map_err(|_| std::io::Error::other("length too large"))?;
+        let fd = file.as_raw_fd();
+        for flags in [F_ALLOCATECONTIG | F_ALLOCATEALL, F_ALLOCATEALL] {
+            let mut store = Fstore {
+                flags,
+                posmode: F_PEOFPOSMODE,
+                offset: 0,
+                length,
+                bytesalloc: 0,
+            };
+            // SAFETY: `fd` is an open descriptor owned by `file`, and
+            // `store` is a valid fstore_t for the duration of the call.
+            let rc = unsafe { fcntl(fd, F_PREALLOCATE, &mut store as *mut Fstore) };
+            if rc != -1 {
+                let counter = if flags & F_ALLOCATECONTIG != 0 {
+                    &RESERVE_CONTIG
+                } else {
+                    &RESERVE_ANY
+                };
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+        let err = std::io::Error::last_os_error();
+        RESERVE_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RESERVE_LAST_ERRNO.store(
+            err.raw_os_error().unwrap_or(-1),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Err(err)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = (file, len);
+        Ok(())
+    }
+}
