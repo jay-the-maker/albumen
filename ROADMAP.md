@@ -48,6 +48,6 @@ Storage adapters beyond the local directory and the S3 API that exist now:
 
 - rclone for SMB. SFTP, WebDAV, and Backblaze B2 already go through `RcloneStore`: the adapter calls `copy_verify`, and rclone is the transport. CI serves SFTP and WebDAV with rclone and uses MinIO as the B2 stand-in.
 - Camera-to-cloud: `albumen-receive` accepts WebDAV, SFTP, and FTP and stores each file with `copy_verify`. S3 upload from a camera, and tethered USB import, are still open. Described in [docs/architecture.md](docs/architecture.md).
-- Synced Google Drive and Dropbox folders stay a `LocalStore` root. No vendor API that rewrites the file on the way through.
+- Synced Google Drive and Dropbox folders stay a `LocalStore` root. Albumen reads and copies that folder as a filesystem, so the stored file is the file in the folder.
 
 Each connector refuses to overwrite, preserves the filename and mtime, and reports done only after the SHA-256 check.

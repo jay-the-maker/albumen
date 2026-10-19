@@ -111,9 +111,9 @@ ALBUMEN_REAL_CORPUS=/path/to/local/corpus \
   scripts/with-minio.sh cargo test --locked -p albumen-ingest --test real_corpus
 ```
 
-## Code we do not copy
+## License boundary
 
-Immich, Ente, and other AGPL photo libraries are ideas only. Do not paste their source, translate it, or retype it from memory into this Apache-2.0 tree. MinIO is run as an external CI process and is not vendored.
+This tree is Apache-2.0 and contains Albumen's own code. Immich, Ente, and other AGPL photo libraries are welcome as ideas. Their source stays in their repositories. MinIO runs as an external CI process and stays outside the tree.
 
 ## Conduct
 

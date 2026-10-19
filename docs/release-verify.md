@@ -27,8 +27,8 @@ gh attestation verify albumen-macos-arm64.tar.gz --repo jay-the-maker/albumen
 
 Repeat `cosign verify-blob` for `albumen-mcp`, `albumen-receive`, and `albumen-macos-arm64.tar.gz`.
 
-## Notarization is deferred
+## Gatekeeper
 
-The binaries are not notarized. Notarization needs a paid Apple Developer Program membership, and this project does not have one. Gatekeeper will warn when you open the binary. That warning is expected.
+Release binaries are checked with the checksum and the keyless signature. Notarization needs a paid Apple Developer Program membership. Gatekeeper will warn when you open the binary. That warning is expected.
 
 Do not disable Gatekeeper. `spctl --master-disable` is not a setup step. Verify the checksum and the keyless signature, then decide whether to run the binary. The owner trial in [trial-macos.md](trial-macos.md) stays on a copied folder after the [test ladder](test-ladder.md) is green.
