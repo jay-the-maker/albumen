@@ -48,6 +48,8 @@ Phone backup is not five steps. It sends to a receiver, so the five steps above 
 
 There is no Albumen account, no signup, and no cloud login. The receiver user and password are the ones you pass on the command line.
 
+A library on disk is readable and exportable with no network and no service. `albumen export` copies it to a directory, and `albumen verify-manifest` checks that copy. Neither command takes an account. After the check, the export is ordinary files.
+
 ### No nags
 
 Albumen does not nag, upsell, or ask for a rating. There is no paid tier that unlocks the original, export, or fidelity. Search does not scan the library in the background for a purpose you did not start.
