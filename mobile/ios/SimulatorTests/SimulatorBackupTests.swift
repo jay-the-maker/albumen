@@ -399,36 +399,27 @@ private final class FamilyMemberReceiver {
     }
 
     private func respond(_ client: Int32) {
-        var header = Data()
-        var byte = [UInt8](repeating: 0, count: 1)
-        while header.count < 64 * 1024 {
-            let n = read(client, &byte, 1)
-            if n <= 0 {
-                break
-            }
-            header.append(byte[0])
-            if header.suffix(4).elementsEqual([13, 10, 13, 10] as [UInt8]) {
-                break
-            }
-        }
+        // URLSession's file upload sends `Expect: 100-continue` and withholds
+        // the body until this process replies. A missing or zero Content-Length
+        // on that first flight still has a body after 100 Continue. Hashing the
+        // empty read is the empty-string digest, which the phone then reports
+        // as a mismatch and stores as a 0-byte object.
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        let (header, leftover) = readHeaders(client)
         let text = String(data: header, encoding: .isoLatin1) ?? ""
-        let length = contentLength(text)
-        if text.lowercased().contains("100-continue") {
-            _ = "HTTP/1.1 100 Continue\r\n\r\n".withCString { reply in
-                write(client, reply, strlen(reply))
-            }
-        }
-        var body = Data()
-        while body.count < length {
-            var buf = [UInt8](repeating: 0, count: max(length - body.count, 1))
-            let n = read(client, &buf, buf.count)
-            if n <= 0 {
-                break
-            }
-            body.append(buf, count: n)
-        }
-        let request = text.split(separator: "\r\n").first.map(String.init) ?? ""
+        let request = text.split(separator: "\r\n").first.map(String.init)
+            ?? text.split(separator: "\n").first.map(String.init)
+            ?? ""
         let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+        let declared = contentLength(text)
+        let chunked = headerValue(text, name: "transfer-encoding")?.lowercased().contains("chunked") ?? false
+        let expectsContinue = headerValue(text, name: "expect")?.lowercased().contains("100-continue") == true
+            || text.lowercased().contains("100-continue")
+        if expectsContinue && leftover.count < (declared ?? Int.max) {
+            writeAll(client, Data("HTTP/1.1 100 Continue\r\n\r\n".utf8))
+        }
+        let body = readBody(client, declared: declared, chunked: chunked, expectsContinue: expectsContinue, leftover: leftover)
         let prefix = "/members/\(memberId)/"
         let allowed = path.hasPrefix(prefix) && !path.contains("..")
         if allowed {
@@ -443,26 +434,179 @@ private final class FamilyMemberReceiver {
             seen.append(path)
             lock.unlock()
             let digest = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
-            let response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\nX-Albumen-Sha256: \(digest)\r\n\r\n"
-            _ = response.withCString { reply in
-                write(client, reply, strlen(reply))
-            }
+            writeAll(
+                client,
+                Data("HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\nX-Albumen-Sha256: \(digest)\r\n\r\n".utf8)
+            )
             return
         }
-        let refused = "HTTP/1.1 403 refusing a write outside members/\(memberId)/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        _ = refused.withCString { reply in
-            write(client, reply, strlen(reply))
+        writeAll(
+            client,
+            Data("HTTP/1.1 403 refusing a write outside members/\(memberId)/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+        )
+    }
+
+    /// Bytes before the header terminator, and any body bytes already in that read.
+    private func readHeaders(_ client: Int32) -> (Data, Data) {
+        var buf = Data()
+        let marker = Data([13, 10, 13, 10])
+        while buf.count < 64 * 1024 {
+            let chunk = readSome(client, max: 4096)
+            if chunk.isEmpty {
+                break
+            }
+            buf.append(chunk)
+            if let range = buf.range(of: marker) {
+                let header = buf.subdata(in: buf.startIndex..<range.lowerBound)
+                let leftover = buf.subdata(in: range.upperBound..<buf.endIndex)
+                return (header, leftover)
+            }
+        }
+        return (buf, Data())
+    }
+
+    private func readBody(
+        _ client: Int32,
+        declared: Int?,
+        chunked: Bool,
+        expectsContinue: Bool,
+        leftover: Data
+    ) -> Data {
+        if chunked {
+            return decodeChunks(readUntilPause(client, already: leftover))
+        }
+        if let declared, declared > 0 {
+            return readExact(client, count: declared, already: leftover)
+        }
+        // Explicit Content-Length: 0 with no Expect and no bytes already read.
+        if declared == 0, !expectsContinue, leftover.isEmpty {
+            return Data()
+        }
+        return readUntilPause(client, already: leftover)
+    }
+
+    private func readExact(_ client: Int32, count: Int, already: Data) -> Data {
+        var body = Data(already.prefix(count))
+        while body.count < count {
+            let chunk = readSome(client, max: count - body.count)
+            if chunk.isEmpty {
+                break
+            }
+            body.append(chunk)
+        }
+        return body
+    }
+
+    /// Read what the client still sends. A short read is followed by one more
+    /// wait so a TCP segment boundary is not treated as the end of the body.
+    private func readUntilPause(_ client: Int32, already: Data) -> Data {
+        var pause = timeval(tv_sec: 0, tv_usec: 400_000)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &pause, socklen_t(MemoryLayout<timeval>.size))
+        var body = already
+        while body.count < 8 * 1024 * 1024 {
+            let chunk = readSome(client, max: 8192)
+            if chunk.isEmpty {
+                break
+            }
+            body.append(chunk)
+            if chunk.count < 8192 {
+                let extra = readSome(client, max: 8192)
+                if extra.isEmpty {
+                    break
+                }
+                body.append(extra)
+            }
+        }
+        return body
+    }
+
+    private func readSome(_ client: Int32, max: Int) -> Data {
+        var buf = [UInt8](repeating: 0, count: max)
+        let n = buf.withUnsafeMutableBytes { raw -> Int in
+            guard let base = raw.baseAddress else {
+                return -1
+            }
+            return read(client, base, raw.count)
+        }
+        if n <= 0 {
+            return Data()
+        }
+        return Data(buf.prefix(n))
+    }
+
+    private func writeAll(_ client: Int32, _ bytes: Data) {
+        bytes.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else {
+                return
+            }
+            var sent = 0
+            while sent < raw.count {
+                let n = write(client, base.advanced(by: sent), raw.count - sent)
+                if n <= 0 {
+                    break
+                }
+                sent += n
+            }
         }
     }
 
-    private func contentLength(_ header: String) -> Int {
-        for line in header.split(separator: "\n") {
-            let parts = line.split(separator: ":", maxSplits: 1)
-            if parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length" {
-                return Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    private func contentLength(_ header: String) -> Int? {
+        guard let raw = headerValue(header, name: "content-length") else {
+            return nil
+        }
+        return Int(raw)
+    }
+
+    private func headerValue(_ header: String, name: String) -> String? {
+        let normalized = header.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        for line in normalized.split(separator: "\n", omittingEmptySubsequences: false) {
+            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else {
+                continue
+            }
+            let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if key == name {
+                return parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
-        return 0
+        return nil
+    }
+
+    private func decodeChunks(_ raw: Data) -> Data {
+        var out = Data()
+        var index = raw.startIndex
+        while index < raw.endIndex {
+            guard let lineEnd = raw[index...].firstIndex(of: 10) else {
+                break
+            }
+            let line = raw[index..<lineEnd].filter { $0 != 13 }
+            let hex = String(bytes: line, encoding: .ascii)?
+                .split(separator: ";")
+                .first
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            guard let size = Int(hex, radix: 16) else {
+                break
+            }
+            var next = raw.index(after: lineEnd)
+            if size == 0 {
+                break
+            }
+            guard let end = raw.index(next, offsetBy: size, limitedBy: raw.endIndex) else {
+                out.append(raw[next..<raw.endIndex])
+                break
+            }
+            out.append(raw[next..<end])
+            next = end
+            if next < raw.endIndex, raw[next] == 13 {
+                next = raw.index(after: next)
+            }
+            if next < raw.endIndex, raw[next] == 10 {
+                next = raw.index(after: next)
+            }
+            index = next
+        }
+        return out
     }
 }
 
