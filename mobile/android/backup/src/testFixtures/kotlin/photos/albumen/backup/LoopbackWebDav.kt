@@ -110,7 +110,8 @@ class LoopbackWebDav(
                     matched = if (value.toByte() == needle[0]) 1 else 0
                 }
             }
-            return buf.toString(Charsets.ISO_8859_1)
+            // String(ByteArray, Charset) is on API 30. ByteArrayOutputStream.toString(Charset) is not.
+            return String(buf.toByteArray(), Charsets.ISO_8859_1)
         }
 
         fun contentLength(header: String): Int {
