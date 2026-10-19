@@ -19,13 +19,16 @@ fn run(root: &Path, preload: Option<&Path>, args: &[&str]) -> (bool, String) {
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
     cmd.env("PATH", path);
     cmd.env("TMPDIR", root);
-    cmd.env("TMP", root);
-    cmd.env("TEMP", root);
-    if let Ok(value) = std::env::var("SYSTEMROOT") {
-        cmd.env("SYSTEMROOT", value);
-    }
-    if let Ok(value) = std::env::var("WINDIR") {
-        cmd.env("WINDIR", value);
+    // A Windows process cannot start without these. They are not an account
+    // and they do not open a network. The Linux leg still blocks connect().
+    if cfg!(windows) {
+        for key in ["SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE"] {
+            if let Ok(value) = std::env::var(key) {
+                cmd.env(key, value);
+            }
+        }
+        cmd.env("TMP", root);
+        cmd.env("TEMP", root);
     }
     for (key, value) in [
         ("http_proxy", "http://127.0.0.1:9"),

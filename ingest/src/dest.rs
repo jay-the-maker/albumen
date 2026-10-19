@@ -18,7 +18,13 @@ fn opened(path: &Path) -> PathBuf {
 
 pub fn create_dir_all(path: &Path) -> Result<(), IngestError> {
     let opened = opened(path);
-    fs::create_dir_all(&opened).map_err(|err| IngestError::io(path, err))
+    match fs::create_dir_all(&opened) {
+        Ok(()) => Ok(()),
+        // Windows can deny CreateDirectory on a directory that already exists,
+        // including the process temp root. The directory is there.
+        Err(_) if opened.is_dir() || path.is_dir() => Ok(()),
+        Err(err) => Err(IngestError::io(path, err)),
+    }
 }
 
 pub fn create_file(path: &Path) -> Result<File, IngestError> {

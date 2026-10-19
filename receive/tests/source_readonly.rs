@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `albumen-receive` does not change a tree it is only planning against.
+//!
+//! Unix only: the proof records mode and extended attributes, and the
+//! `xattr` crate does not build on Windows.
+
+#![cfg(unix)]
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader};

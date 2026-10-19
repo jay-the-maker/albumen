@@ -6,8 +6,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::IngestError;
 
+/// The modification time this filesystem can store.
+///
+/// NTFS ticks are 100 nanoseconds. `set_mtime` writes that value and the
+/// copy check requires it back. Linux and macOS keep the full `SystemTime`.
+pub(crate) fn representable_mtime(mtime: SystemTime) -> SystemTime {
+    #[cfg(not(windows))]
+    {
+        mtime
+    }
+    #[cfg(windows)]
+    {
+        const TICK: i128 = 100;
+        let nanos = to_unix_nanos(mtime);
+        let coarse = if nanos >= 0 {
+            nanos / TICK * TICK
+        } else {
+            -(((-nanos) + (TICK - 1)) / TICK * TICK)
+        };
+        system_time_from_unix_nanos(coarse).unwrap_or(mtime)
+    }
+}
+
 pub(crate) fn set_mtime(path: &Path, mtime: SystemTime) -> Result<(), IngestError> {
-    crate::dest::set_mtime(path, mtime)
+    crate::dest::set_mtime(path, representable_mtime(mtime))
 }
 
 pub(crate) use crate::platform::mtime_matches;
@@ -34,6 +56,20 @@ pub(crate) fn to_unix_nanos(mtime: SystemTime) -> i128 {
 
 pub(crate) fn to_unix_nanos_string(mtime: SystemTime) -> String {
     to_unix_nanos(mtime).to_string()
+}
+
+#[cfg(windows)]
+fn system_time_from_unix_nanos(nanos: i128) -> Option<SystemTime> {
+    let negative = nanos < 0;
+    let nanos = nanos.unsigned_abs();
+    let secs = u64::try_from(nanos / 1_000_000_000).ok()?;
+    let sub = u32::try_from(nanos % 1_000_000_000).ok()?;
+    let duration = Duration::new(secs, sub);
+    if negative {
+        UNIX_EPOCH.checked_sub(duration)
+    } else {
+        UNIX_EPOCH.checked_add(duration)
+    }
 }
 
 pub(crate) fn from_unix_nanos_string(

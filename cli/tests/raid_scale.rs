@@ -4,6 +4,10 @@
 //! not create a million inodes. `.github/workflows/raid-scale.yml` runs it
 //! with `--ignored` on `workflow_dispatch` and a weekly schedule. That job
 //! must not set `ALBUMEN_RAID_ITEMS` to a smaller count. A local smoke test may.
+//!
+//! Unix only: the snapshot records inode identity and extended attributes.
+
+#![cfg(unix)]
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};

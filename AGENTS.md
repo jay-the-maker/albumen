@@ -25,8 +25,8 @@ Read [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md), then the crate you are changi
 | Read-only macOS trial, `albumen scan` | [docs/trial-macos.md](docs/trial-macos.md), `ingest/src/scan.rs` |
 | Camera receiver | `receive/src/store.rs` |
 | MCP tools | `mcp/src/tools.rs`, `mcp/src/main.rs` |
-| iOS camera roll | `mobile/ios`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
-| Android camera roll | `mobile/android`, [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
+| iOS camera roll | `mobile/ios`, [docs/mobile-ios-backup.md](docs/mobile-ios-backup.md), [docs/camera-roll-scope.md](docs/camera-roll-scope.md) |
+| Android camera roll | `mobile/android`, [docs/mobile-android-backup.md](docs/mobile-android-backup.md) |
 | Benchmarks | `bench/`, [docs/performance-budgets.md](docs/performance-budgets.md) |
 | Scale, page size, safety bounds | [docs/scale.md](docs/scale.md), `mcp/src/page.rs` |
 | What is not built | [ROADMAP.md](ROADMAP.md) |

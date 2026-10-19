@@ -33,24 +33,41 @@ sha256_ok() {
 VERSION="v1.75.2"
 OS_NAME="$(uname -s)"
 ARCH_NAME="$(uname -m)"
-case "${OS_NAME}-${ARCH_NAME}" in
-  Linux-x86_64|Linux-amd64)
-    TRIPLE="linux-amd64"
-    SHA256="349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702"
+EXE="rclone"
+TRIPLE=""
+SHA256=""
+case "${OS_NAME}" in
+  Linux)
+    case "${ARCH_NAME}" in
+      x86_64|amd64)
+        TRIPLE="linux-amd64"
+        SHA256="349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702"
+        ;;
+    esac
     ;;
-  Darwin-arm64)
-    TRIPLE="osx-arm64"
-    SHA256="610ab7d48615135dfc60b763858b11a426a0d3d1160c1bb76fb0ae6011b02edd"
+  Darwin)
+    case "${ARCH_NAME}" in
+      arm64)
+        TRIPLE="osx-arm64"
+        SHA256="610ab7d48615135dfc60b763858b11a426a0d3d1160c1bb76fb0ae6011b02edd"
+        ;;
+    esac
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    TRIPLE="windows-amd64"
-    SHA256="8a9db2bad1dc79a65b3348fd857069598e2aab7cf4d118b77b1df23055aff818"
-    ;;
-  *)
-    echo "Docker is not used. No pinned rclone binary for ${OS_NAME}-${ARCH_NAME}." >&2
-    exit 0
+    case "${ARCH_NAME}" in
+      x86_64|amd64)
+        TRIPLE="windows-amd64"
+        SHA256="8a9db2bad1dc79a65b3348fd857069598e2aab7cf4d118b77b1df23055aff818"
+        EXE="rclone.exe"
+        ;;
+    esac
     ;;
 esac
+
+if [[ -z "${TRIPLE}" ]]; then
+  echo "Docker is not used. No pinned rclone binary for ${OS_NAME}-${ARCH_NAME}." >&2
+  exit 0
+fi
 
 URL="https://github.com/rclone/rclone/releases/download/${VERSION}/rclone-${VERSION}-${TRIPLE}.zip"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/albumen"
@@ -67,22 +84,21 @@ fi
 
 check_sha256 "$SHA256" "$ZIP"
 
-RCLONE_BIN="${ROOT}/rclone"
-case "${OS_NAME}" in
-  MINGW*|MSYS*|CYGWIN*) RCLONE_BIN="${ROOT}/rclone.exe" ;;
-esac
-
-if [[ ! -x "${RCLONE_BIN}" ]] || [[ "$("${RCLONE_BIN}" version 2>/dev/null | awk 'NR==1{print $2}')" != "$VERSION" ]]; then
+if [[ ! -f "${ROOT}/${EXE}" ]] || [[ "$("${ROOT}/${EXE}" version 2>/dev/null | awk 'NR==1{print $2}')" != "$VERSION" ]]; then
   rm -rf "$ROOT"
   unzip -q "$ZIP" -d "$CACHE"
 fi
 
-chmod +x "${RCLONE_BIN}"
+chmod +x "${ROOT}/${EXE}"
 if [[ "$OS_NAME" == "Darwin" ]]; then
   xattr -dr com.apple.quarantine "$ROOT" 2>/dev/null || true
 fi
 echo "${ROOT}"
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
-  echo "${ROOT}" >> "${GITHUB_PATH}"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "${ROOT}" >> "${GITHUB_PATH}"
+  else
+    echo "${ROOT}" >> "${GITHUB_PATH}"
+  fi
 fi

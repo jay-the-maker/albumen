@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -29,6 +28,7 @@ use crate::checksum::{sha256_reader, to_hex};
 use crate::dest;
 use crate::discover::companion_names;
 use crate::error::IngestError;
+use crate::exiftool::exiftool_command;
 use crate::mtime::to_unix_nanos_string;
 use crate::source::SourceRoot;
 
@@ -118,15 +118,14 @@ struct Hashed {
 /// manifest that already ends with complete lines is continued after the last
 /// path. An incomplete final line is truncated back to the last newline.
 /// Re-running the same command finishes the walk.
-pub fn scan_tree(source: &Path, manifest: &Path) -> Result<ScanStats, IngestError> {
-    if !source.is_dir() {
+pub fn scan_tree(source: &SourceRoot, manifest: &Path) -> Result<ScanStats, IngestError> {
+    if !source.canonical().is_dir() {
         return Err(IngestError::store(
             "scan",
-            source.display().to_string(),
+            source.canonical().display().to_string(),
             "source is not a directory",
         ));
     }
-    let source = SourceRoot::open(source)?;
     source.refuse_destination(manifest)?;
     if let Some(parent) = manifest.parent() {
         if !parent.as_os_str().is_empty() {
@@ -166,7 +165,7 @@ pub fn scan_tree(source: &Path, manifest: &Path) -> Result<ScanStats, IngestErro
         });
 
         let mut index = 0u64;
-        let walked = walk_readonly(&source, after.as_deref(), &mut |relative| {
+        let walked = walk_readonly(source, after.as_deref(), &mut |relative| {
             if cancel.load(Ordering::Relaxed) {
                 return WalkStop::Stop;
             }
@@ -208,22 +207,21 @@ pub fn scan_tree(source: &Path, manifest: &Path) -> Result<ScanStats, IngestErro
 /// the same way as `scan_tree`. Metadata tags are not compared.
 pub fn verify_scan_manifest(
     manifest: &Path,
-    source: &Path,
+    source: &SourceRoot,
     on_drift: &mut dyn FnMut(&ScanDrift),
 ) -> Result<(), IngestError> {
-    if !source.is_dir() {
+    if !source.canonical().is_dir() {
         return Err(IngestError::store(
             "verify-manifest",
-            source.display().to_string(),
+            source.canonical().display().to_string(),
             "source is not a directory",
         ));
     }
-    let source = SourceRoot::open(source)?;
     let file = File::open(manifest).map_err(|err| IngestError::io(manifest, err))?;
     let (tx, rx) = sync_channel::<Result<Option<String>, IngestError>>(8);
     let drifts = thread::scope(|scope| {
         let walker = scope.spawn(|| {
-            let walked = walk_readonly(&source, None, &mut |relative| {
+            let walked = walk_readonly(source, None, &mut |relative| {
                 if tx.send(Ok(Some(relative.to_string()))).is_err() {
                     WalkStop::Stop
                 } else {
@@ -235,7 +233,7 @@ pub fn verify_scan_manifest(
                 Err(err) => tx.send(Err(err)),
             };
         });
-        let compared = compare_manifest(&source, manifest, file, rx, on_drift);
+        let compared = compare_manifest(source, manifest, file, rx, on_drift);
         walker.join().ok();
         compared
     })?;
@@ -656,7 +654,7 @@ fn count_newlines(file: &mut File, manifest: &Path, len: u64) -> Result<u64, Ing
 }
 
 fn require_exiftool() -> Result<(), IngestError> {
-    match Command::new("exiftool").arg("-ver").output() {
+    match exiftool_command().arg("-ver").output() {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => Err(IngestError::store(
             "exiftool",
@@ -678,7 +676,7 @@ fn read_metadata(
     root: &SourceRoot,
     relative_paths: &[String],
 ) -> Result<Vec<KeyMetadata>, IngestError> {
-    let output = Command::new("exiftool")
+    let output = exiftool_command()
         .current_dir(root.canonical())
         .arg("-json")
         .arg("-n")
@@ -961,168 +959,121 @@ fn walk_readonly(
     after: Option<&str>,
     visit: &mut dyn FnMut(&str) -> WalkStop,
 ) -> Result<(), IngestError> {
-    match walk_dir(root, root.canonical(), "", after, visit)? {
-        WalkStop::Continue | WalkStop::Stop => Ok(()),
-    }
-}
-
-fn walk_dir(
-    root: &SourceRoot,
-    dir: &Path,
-    prefix: &str,
-    after: Option<&str>,
-    visit: &mut dyn FnMut(&str) -> WalkStop,
-) -> Result<WalkStop, IngestError> {
-    let mut entries = Vec::new();
-    let read = root.read_dir(dir)?;
-    for entry in read {
-        let entry = entry.map_err(|err| IngestError::io(dir, err))?;
-        let path = entry.path();
-        let meta = root.metadata_nofollow(&path)?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return Err(IngestError::NonUtf8Filename { path });
-        };
-        crate::discover::check_filename(name)?;
-        if meta.is_dir() {
-            entries.push((name.to_string(), true));
-        } else if meta.is_file() {
-            entries.push((name.to_string(), false));
-        }
-    }
-    entries.sort_by(|left, right| cmp_walk(&left.0, left.1, &right.0, right.1));
-    for (name, is_dir) in entries {
-        let child = dir.join(&name);
-        let relative = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
-        if is_dir {
-            if let Some(after) = after {
-                if directory_is_at_or_before(&relative, after) {
-                    continue;
-                }
-            }
-            if walk_dir(root, &child, &relative, after, visit)? == WalkStop::Stop {
-                return Ok(WalkStop::Stop);
-            }
-        } else if let Some(after) = after {
-            if relative.as_str() <= after {
-                continue;
-            } else if visit(&relative) == WalkStop::Stop {
-                return Ok(WalkStop::Stop);
-            }
-        } else if visit(&relative) == WalkStop::Stop {
-            return Ok(WalkStop::Stop);
-        }
-    }
-    Ok(WalkStop::Continue)
-}
-
-fn directory_is_at_or_before(relative: &str, after: &str) -> bool {
-    let mut prefix = String::with_capacity(relative.len() + 1);
-    prefix.push_str(relative);
-    prefix.push('/');
-    !after.starts_with(&prefix) && prefix.as_str() < after
-}
-
-fn cmp_walk(
-    left_name: &str,
-    left_dir: bool,
-    right_name: &str,
-    right_dir: bool,
-) -> std::cmp::Ordering {
-    let mut left = left_name.bytes().chain(left_dir.then_some(b'/'));
-    let mut right = right_name.bytes().chain(right_dir.then_some(b'/'));
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return std::cmp::Ordering::Equal,
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(left_byte), Some(right_byte)) => match left_byte.cmp(&right_byte) {
-                std::cmp::Ordering::Equal => {}
-                order => return order,
-            },
-        }
-    }
+    root.walk(after, &mut |relative| visit(relative) == WalkStop::Continue)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{write_file, Tmp};
-    use std::fs;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    fn meta_mode(meta: &fs::Metadata) -> u32 {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            meta.mode()
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            meta.file_attributes()
-        }
-    }
-
-    fn apply_mode(path: &Path, mode: u32) {
-        let mut perms = fs::symlink_metadata(path).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(mode);
-        }
-        #[cfg(windows)]
-        {
-            perms.set_readonly(mode & 1 != 0);
-        }
-        fs::set_permissions(path, perms).unwrap();
-    }
-
-    fn locked_mode(mode: u32) -> u32 {
-        #[cfg(unix)]
-        {
-            mode & !0o222
-        }
-        #[cfg(windows)]
-        {
-            mode | 1
-        }
+    fn as_root(path: &Path) -> SourceRoot {
+        SourceRoot::open(path).unwrap()
     }
 
     struct ModeGuard {
+        #[cfg(unix)]
         saved: Vec<(PathBuf, u32)>,
+        #[cfg(not(unix))]
+        saved: Vec<PathBuf>,
     }
 
     impl Drop for ModeGuard {
         fn drop(&mut self) {
-            for (path, mode) in self.saved.iter().rev() {
-                if fs::symlink_metadata(path).is_ok() {
-                    apply_mode(path, *mode);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                for (path, mode) in self.saved.iter().rev() {
+                    let Ok(meta) = fs::symlink_metadata(path) else {
+                        continue;
+                    };
+                    let mut perms = meta.permissions();
+                    perms.set_mode(*mode);
+                    let _ = fs::set_permissions(path, perms);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                for path in self.saved.iter().rev() {
+                    let Ok(meta) = fs::symlink_metadata(path) else {
+                        continue;
+                    };
+                    if meta.is_file() {
+                        let mut perms = meta.permissions();
+                        // This block is not compiled on Unix. Clearing the
+                        // Windows read-only attribute restores the fixture.
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        {
+                            perms.set_readonly(false);
+                        }
+                        let _ = fs::set_permissions(path, perms);
+                    }
                 }
             }
         }
     }
 
     fn lock_tree(root: &Path) -> ModeGuard {
-        let mut saved = Vec::new();
         let mut stack = vec![root.to_path_buf()];
+        let mut paths = Vec::new();
         while let Some(path) = stack.pop() {
             let meta = fs::symlink_metadata(&path).unwrap();
-            saved.push((path.clone(), meta_mode(&meta)));
+            paths.push(path.clone());
             if meta.is_dir() {
                 for entry in fs::read_dir(&path).unwrap() {
                     stack.push(entry.unwrap().path());
                 }
             }
         }
-        for (path, mode) in &saved {
-            apply_mode(path, locked_mode(*mode));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let saved = paths
+                .iter()
+                .map(|path| {
+                    let mode = fs::symlink_metadata(path).unwrap().mode();
+                    (path.clone(), mode)
+                })
+                .collect::<Vec<_>>();
+            for (path, mode) in &saved {
+                let mut perms = fs::symlink_metadata(path).unwrap().permissions();
+                perms.set_mode(mode & !0o222);
+                fs::set_permissions(path, perms).unwrap();
+            }
+            ModeGuard { saved }
         }
-        ModeGuard { saved }
+        #[cfg(not(unix))]
+        {
+            for path in &paths {
+                let meta = fs::symlink_metadata(path).unwrap();
+                if meta.is_file() {
+                    let mut perms = meta.permissions();
+                    perms.set_readonly(true);
+                    fs::set_permissions(path, perms).unwrap();
+                }
+            }
+            ModeGuard { saved: paths }
+        }
+    }
+
+    fn allow_write(path: &Path) {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o644);
+        }
+        #[cfg(not(unix))]
+        {
+            // This block is not compiled on Unix. Clearing the Windows
+            // read-only attribute lets the test change the fixture bytes.
+            #[allow(clippy::permissions_set_readonly_false)]
+            {
+                perms.set_readonly(false);
+            }
+        }
+        fs::set_permissions(path, perms).unwrap();
     }
 
     /// What scan must leave untouched. A read may update access time, and
@@ -1134,7 +1085,10 @@ mod tests {
         len: u64,
         sha: String,
         mtime: SystemTime,
+        #[cfg(unix)]
         mode: u32,
+        #[cfg(not(unix))]
+        readonly: bool,
     }
 
     fn list_rels(root: &Path) -> Vec<String> {
@@ -1188,7 +1142,13 @@ mod tests {
                     len: meta.len(),
                     sha,
                     mtime: meta.modified().unwrap(),
-                    mode: meta_mode(&meta),
+                    #[cfg(unix)]
+                    mode: {
+                        use std::os::unix::fs::MetadataExt;
+                        meta.mode()
+                    },
+                    #[cfg(not(unix))]
+                    readonly: meta.permissions().readonly(),
                 }
             })
             .collect()
@@ -1210,7 +1170,7 @@ mod tests {
     }
 
     fn fixture(dir: &Path) {
-        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789);
+        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_700);
         fs::create_dir_all(dir.join("trip")).unwrap();
         write_file(dir, "a.txt", b"alpha", mtime);
         write_file(&dir.join("trip"), "IMG.jpg", b"jpeg-bytes", mtime);
@@ -1230,7 +1190,7 @@ mod tests {
             UNIX_EPOCH + Duration::from_secs(1_400_000_000),
         );
         let manifest = source.join("nested").join("out.jsonl");
-        let err = scan_tree(&source, &manifest).unwrap_err();
+        let err = scan_tree(&as_root(&source), &manifest).unwrap_err();
         assert!(
             matches!(err, IngestError::DestinationInsideSource { .. }),
             "{err}"
@@ -1248,7 +1208,7 @@ mod tests {
         let _guard = lock_tree(&source);
         let rels = list_rels(&source);
         let before = capture(&source, &rels);
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         let after = capture(&source, &rels);
         assert_eq!(before, after);
         assert_eq!(stats.files, 4);
@@ -1272,7 +1232,7 @@ mod tests {
         assert_eq!(jpeg.sidecars, vec!["trip/IMG.xmp".to_string()]);
         assert_eq!(jpeg.bytes, b"jpeg-bytes".len() as u64);
         assert!(jpeg.drift.is_none(), "{jpeg:?}");
-        verify_scan_manifest(&manifest, &source, &mut |_| ()).unwrap();
+        verify_scan_manifest(&manifest, &as_root(&source), &mut |_| ()).unwrap();
     }
 
     #[test]
@@ -1280,12 +1240,12 @@ mod tests {
         let tmp = Tmp::new();
         let source = tmp.path().join("library");
         fs::create_dir_all(&source).unwrap();
-        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_789);
+        let mtime = UNIX_EPOCH + Duration::new(1_400_000_000, 123_456_700);
         let path = write_file(&source, "a.txt", b"alpha", mtime)
             .canonicalize()
             .unwrap();
         let manifest = tmp.path().join("scan.jsonl");
-        let new_mtime = UNIX_EPOCH + Duration::new(1_700_000_000, 50);
+        let new_mtime = UNIX_EPOCH + Duration::new(1_700_000_000, 100);
         let _hook = HookGuard::install({
             let path = path.clone();
             move |opened: &Path| {
@@ -1299,7 +1259,7 @@ mod tests {
             }
         });
 
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         drop(_hook);
 
         assert_eq!(stats.files, 1);
@@ -1341,11 +1301,11 @@ mod tests {
         let _guard = lock_tree(&source);
         let rels = list_rels(&source);
         let before = capture(&source, &rels);
-        scan_tree(&source, &manifest).unwrap();
+        scan_tree(&as_root(&source), &manifest).unwrap();
         let text = fs::read_to_string(&manifest).unwrap();
         let end = text.trim_end_matches('\n').rfind('\n').unwrap();
         fs::write(&manifest, &text[..=end]).unwrap();
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         assert_eq!(stats.files, 1);
         let paths: Vec<String> = fs::read_to_string(&manifest)
             .unwrap()
@@ -1363,10 +1323,10 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("empty.jpg"), b"").unwrap();
         let manifest = tmp.path().join("scan.jsonl");
-        let stats = scan_tree(&source, &manifest).unwrap();
+        let stats = scan_tree(&as_root(&source), &manifest).unwrap();
         assert_eq!(stats.files, 1);
         assert_eq!(stats.bytes, 0);
-        verify_scan_manifest(&manifest, &source, &mut |_| ()).unwrap();
+        verify_scan_manifest(&manifest, &as_root(&source), &mut |_| ()).unwrap();
     }
 
     #[test]
@@ -1379,13 +1339,15 @@ mod tests {
         let manifest = tmp.path().join("scan.jsonl");
         {
             let _guard = lock_tree(&source);
-            scan_tree(&source, &manifest).unwrap();
+            scan_tree(&as_root(&source), &manifest).unwrap();
         }
-        apply_mode(&source.join("a.txt"), 0o644);
+        allow_write(&source.join("a.txt"));
         fs::write(source.join("a.txt"), b"alphb").unwrap();
         let mut seen = Vec::new();
-        let err = verify_scan_manifest(&manifest, &source, &mut |drift| seen.push(drift.clone()))
-            .unwrap_err();
+        let err = verify_scan_manifest(&manifest, &as_root(&source), &mut |drift| {
+            seen.push(drift.clone())
+        })
+        .unwrap_err();
         assert!(matches!(err, IngestError::ManifestDrift { .. }), "{err}");
         assert!(
             seen.iter()

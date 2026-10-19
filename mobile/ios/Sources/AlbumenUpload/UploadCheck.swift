@@ -32,6 +32,29 @@ public enum UploadFailure: Error, Equatable, Sendable {
     case missingPassword
     /// PhotoKit offered only a derivative. The full original was not uploaded.
     case derivativeOnly(String)
+
+    /// A sentence the status screen and the notification can show.
+    /// The receiver password is never part of this sentence.
+    public func surfaced(identifier: String) -> String {
+        switch self {
+        case .derivativeOnly(let detail):
+            return "\(identifier) still needs the full original (\(detail)). A preview was not uploaded."
+        case .noOriginal:
+            return "\(identifier) has no original to copy."
+        case .missingPassword:
+            return "The receiver password is not in the Keychain. The backup has not started."
+        case .conflict(let client, let server):
+            return "SHA-256 mismatch for \(identifier). Sent \(client). Receiver reported \(server)."
+        case .missingServerHash:
+            return "\(identifier) was not accepted. The receiver did not return X-Albumen-Sha256."
+        case .rejected(let status):
+            return "\(identifier) was refused by the receiver (\(status))."
+        case .transport(let detail):
+            return "\(identifier) did not finish: \(detail)"
+        case .badFilename(let name):
+            return "\(identifier) has a filename Albumen will not store (\(name))."
+        }
+    }
 }
 
 public enum UploadCheck {

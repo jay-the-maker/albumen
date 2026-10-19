@@ -396,30 +396,41 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Persist the directory entry after a sidecar or tombstone rename.
+///
+/// The file is already fsynced. On Windows, opening a directory can return
+/// access denied, including a library created under the process temp root.
+/// The rename has already landed, so that denial is not a failed write.
 fn sync_dir(dir: &Path) -> Result<(), String> {
-    File::open(dir)
-        .and_then(|file| file.sync_all())
-        .map_err(|err| err.to_string())
+    match File::open(dir).and_then(|file| file.sync_all()) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 #[cfg(test)]
-static FAIL_SIDECAR_RENAME: Mutex<Option<PathBuf>> = Mutex::new(None);
+static FAIL_SIDECAR_RENAME: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(crate) fn arm_fail_before_sidecar_rename(sidecar: PathBuf) {
-    *FAIL_SIDECAR_RENAME
+    FAIL_SIDECAR_RENAME
         .lock()
-        .expect("sidecar rename hook lock") = Some(sidecar);
+        .expect("sidecar rename hook lock")
+        .push(sidecar);
 }
 
 fn sidecar_rename_should_fail(dest: &Path) -> bool {
     #[cfg(test)]
     {
+        // Two tests arm different sidecars at the same time. One slot would
+        // drop the other path, and the commit would succeed.
         let mut armed = FAIL_SIDECAR_RENAME
             .lock()
             .expect("sidecar rename hook lock");
-        if armed.as_deref() == Some(dest) {
-            *armed = None;
+        if let Some(index) = armed.iter().position(|path| path == dest) {
+            armed.remove(index);
             return true;
         }
         false
@@ -863,9 +874,11 @@ mod tests {
         arm_fail_before_sidecar_rename, disambiguated, Arrival, Library, MtimeProtocol, Record,
         Spool,
     };
+    use std::path::Path;
     use std::time::UNIX_EPOCH;
 
-    fn file_index(meta: &std::fs::Metadata) -> u64 {
+    fn file_id(path: &Path) -> u64 {
+        let meta = std::fs::metadata(path).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -874,7 +887,9 @@ mod tests {
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            meta.file_index().unwrap_or(0)
+            // `file_index` is still unstable. The creation time stays with
+            // the file when a tombstone is rewritten beside it.
+            meta.creation_time()
         }
     }
 
@@ -1013,7 +1028,7 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("injected failure"), "{err}");
         let photo = root.path().join("IMG_0001.JPG");
-        let inode = file_index(&std::fs::metadata(&photo).unwrap());
+        let inode = file_id(&photo);
         assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
         let tombstone =
             std::fs::read_to_string(root.path().join("IMG_0001.JPG.albumen-tombstone")).unwrap();
@@ -1024,7 +1039,7 @@ mod tests {
         );
 
         library.hide("IMG_0001.JPG").unwrap();
-        assert_eq!(file_index(&std::fs::metadata(&photo).unwrap()), inode);
+        assert_eq!(file_id(&photo), inode);
         assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
         let hidden =
             std::fs::read_to_string(root.path().join("IMG_0001.JPG.albumen-tombstone")).unwrap();

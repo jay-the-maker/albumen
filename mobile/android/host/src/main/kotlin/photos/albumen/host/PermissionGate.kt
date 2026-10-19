@@ -50,6 +50,8 @@ object PermissionGate {
  * written into the grant map.
  */
 object HostSession {
+    const val MISSING_RECEIVER =
+        "Receiver endpoint or user is missing. Backup was not started."
     const val MISSING_PASSWORD =
         "Receiver password is missing. It is not part of the permission request."
 
@@ -64,6 +66,13 @@ object HostSession {
         val decision = PermissionGate.decide(sdkInt, grants)
         if (!decision.enqueue) {
             return decision
+        }
+        if (endpoint.isBlank() || user.isBlank()) {
+            return PermissionDecision(
+                enqueue = false,
+                backupFinished = false,
+                message = MISSING_RECEIVER,
+            )
         }
         if (password.isEmpty()) {
             return PermissionDecision(

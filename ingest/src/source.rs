@@ -8,6 +8,9 @@
 //! or xattr-set operation. A destination that resolves inside the root, or
 //! that is the same inode as something in the root, is refused. There is no
 //! flag that turns the refusal off.
+//!
+//! The contract is [DESIGN_PHILOSOPHY.md](../../DESIGN_PHILOSOPHY.md):
+//! originals stay bit-exact, and the default path never writes a source.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
@@ -20,7 +23,12 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use crate::error::IngestError;
 
-/// The directory a command is reading. Writes do not exist on this type.
+/// The directory a command is reading.
+///
+/// Read operations are [`Self::open_read`], [`Self::metadata_nofollow`],
+/// [`Self::read_dir`], and [`Self::walk`]. This type has no method that
+/// creates, writes, renames, or removes. The contract is
+/// [DESIGN_PHILOSOPHY.md](../../DESIGN_PHILOSOPHY.md).
 #[derive(Debug, Clone)]
 pub struct SourceRoot {
     canonical: PathBuf,
@@ -84,6 +92,22 @@ impl SourceRoot {
         }
     }
 
+    /// Visit each regular file under this root in relative-path order.
+    ///
+    /// `after` skips a path that sorts at or before that relative path, so a
+    /// resumed page does not read files it already returned. One directory is
+    /// listed at a time. Return `false` from `visit` to stop before unread
+    /// branches. The walk calls [`Self::read_dir`] and
+    /// [`Self::metadata_nofollow`] only.
+    pub fn walk(
+        &self,
+        after: Option<&str>,
+        visit: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), IngestError> {
+        walk_files(self, &self.canonical, "", after, visit)?;
+        Ok(())
+    }
+
     /// Refuse `dest` when it is this root, is inside this root, or is a
     /// hard link to a file or directory in this root.
     pub fn refuse_destination(&self, dest: &Path) -> Result<(), IngestError> {
@@ -123,6 +147,89 @@ pub fn parent_dir(path: &Path) -> &Path {
     }
 }
 
+fn walk_files(
+    root: &SourceRoot,
+    dir: &Path,
+    prefix: &str,
+    after: Option<&str>,
+    visit: &mut dyn FnMut(&str) -> bool,
+) -> Result<bool, IngestError> {
+    let mut entries = Vec::new();
+    let read = root.read_dir(dir)?;
+    for entry in read {
+        let entry = entry.map_err(|err| IngestError::io(dir, err))?;
+        let path = entry.path();
+        let meta = root.metadata_nofollow(&path)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(IngestError::NonUtf8Filename { path });
+        };
+        crate::discover::check_filename(name)?;
+        if meta.is_dir() {
+            entries.push((name.to_string(), true));
+        } else if meta.is_file() {
+            entries.push((name.to_string(), false));
+        }
+    }
+    entries.sort_by(|left, right| cmp_walk(&left.0, left.1, &right.0, right.1));
+    for (name, is_dir) in entries {
+        let child = dir.join(&name);
+        let relative = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if is_dir {
+            if let Some(after) = after {
+                if directory_is_at_or_before(&relative, after) {
+                    continue;
+                }
+            }
+            if !walk_files(root, &child, &relative, after, visit)? {
+                return Ok(false);
+            }
+        } else {
+            if let Some(after) = after {
+                if relative.as_str() <= after {
+                    continue;
+                }
+            }
+            if !visit(&relative) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn directory_is_at_or_before(relative: &str, after: &str) -> bool {
+    let mut prefix = String::with_capacity(relative.len() + 1);
+    prefix.push_str(relative);
+    prefix.push('/');
+    !after.starts_with(&prefix) && prefix.as_str() < after
+}
+
+fn cmp_walk(
+    left_name: &str,
+    left_dir: bool,
+    right_name: &str,
+    right_dir: bool,
+) -> std::cmp::Ordering {
+    let mut left = left_name.bytes().chain(left_dir.then_some(b'/'));
+    let mut right = right_name.bytes().chain(right_dir.then_some(b'/'));
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(left_byte), Some(right_byte)) => match left_byte.cmp(&right_byte) {
+                std::cmp::Ordering::Equal => {}
+                order => return order,
+            },
+        }
+    }
+}
+
 fn open_rdonly(path: &Path) -> Result<File, IngestError> {
     let opened = crate::platform::io_path(path);
     #[cfg(target_os = "linux")]
@@ -146,10 +253,105 @@ fn open_rdonly(path: &Path) -> Result<File, IngestError> {
 
 fn destination_aliases(root: &SourceRoot, dest: &Path) -> Result<bool, IngestError> {
     let resolved = resolve_dest(dest)?;
-    if resolved == root.canonical || resolved.starts_with(&root.canonical) {
+    if path_is_inside(&root.canonical, &resolved) {
         return Ok(true);
     }
     hardlink_aliases(root, dest)
+}
+
+/// `dest` is `root` or a path under it.
+///
+/// Windows canonical paths disagree about the `\\?\` prefix, letter case,
+/// and 8.3 short names (`RUNNER~1` and `runneradmin` are one directory).
+/// A string prefix is not enough. The same directory also matches on
+/// creation time, size, and attributes.
+fn path_is_inside(root: &Path, dest: &Path) -> bool {
+    if normalized_starts_with(dest, root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        dest.ancestors()
+            .any(|ancestor| same_directory(ancestor, root))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn root_is_under(root: &Path, dir: &Path) -> bool {
+    if normalized_starts_with(root, dir) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        root.ancestors()
+            .any(|ancestor| same_directory(ancestor, dir))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn normalized_starts_with(path: &Path, prefix: &Path) -> bool {
+    let path = normalize_path(path);
+    let prefix = normalize_path(prefix);
+    if path == prefix {
+        return true;
+    }
+    let separator = std::path::MAIN_SEPARATOR;
+    let mut prefix = prefix;
+    if !prefix.ends_with(separator) {
+        prefix.push(separator);
+    }
+    path.starts_with(&prefix)
+}
+
+fn normalize_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let stripped = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.into_owned()
+    };
+    #[cfg(windows)]
+    {
+        stripped.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        stripped
+    }
+}
+
+#[cfg(windows)]
+fn same_directory(left: &Path, right: &Path) -> bool {
+    if let (Ok(left_canon), Ok(right_canon)) = (left.canonicalize(), right.canonicalize()) {
+        if normalize_path(&left_canon) == normalize_path(&right_canon) {
+            return true;
+        }
+    }
+    // 8.3 and long names can canonicalize to different strings. The leaf
+    // name of one directory does not change between those forms, and two
+    // different directories created in one tick must not compare equal.
+    if left.file_name() != right.file_name() {
+        return false;
+    }
+    let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    if !left_meta.is_dir() || !right_meta.is_dir() {
+        return false;
+    }
+    use std::os::windows::fs::MetadataExt;
+    left_meta.creation_time() == right_meta.creation_time()
+        && left_meta.last_write_time() == right_meta.last_write_time()
+        && left_meta.file_size() == right_meta.file_size()
+        && left_meta.file_attributes() == right_meta.file_attributes()
 }
 
 fn resolve_dest(dest: &Path) -> Result<PathBuf, IngestError> {
@@ -251,7 +453,7 @@ fn dest_ids(root: &SourceRoot, dest: &Path) -> Result<Vec<(u64, u64)>, IngestErr
         let canon = cursor
             .canonicalize()
             .map_err(|err| IngestError::io(&cursor, err))?;
-        if root.canonical.starts_with(&canon) {
+        if root_is_under(&root.canonical, &canon) {
             break;
         }
         let meta = fs::symlink_metadata(&cursor).map_err(|err| IngestError::io(&cursor, err))?;
@@ -272,7 +474,55 @@ fn id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
     Some((meta.dev(), meta.ino()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::windows::fs::MetadataExt;
+    // `file_index` is still unstable. A hard link of a file shares that
+    // file's creation FILETIME and size. A directory's creation time is not
+    // an identity: NTFS stamps a burst of creates with one tick, so a sibling
+    // library would otherwise match the source directory.
+    if !meta.is_file() {
+        return None;
+    }
+    let created = meta.creation_time();
+    if created == 0 {
+        return None;
+    }
+    Some((meta.file_size(), created))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn id_of(_meta: &fs::Metadata) -> Option<(u64, u64)> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checksum::{sha256_file, sha256_reader};
+    use crate::mtime::mtime_of;
+
+    #[test]
+    fn reading_fixtures_through_source_root_leaves_sha256_and_mtime() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/jpeg-gps");
+        let source = SourceRoot::open(&root).unwrap();
+        let mut relatives = Vec::new();
+        source
+            .walk(None, &mut |relative| {
+                relatives.push(relative.to_string());
+                true
+            })
+            .unwrap();
+        assert!(!relatives.is_empty(), "fixture directory had no files");
+        for relative in relatives {
+            let path = root.join(&relative);
+            let before_hash = sha256_file(&path).unwrap();
+            let before_mtime = mtime_of(&path).unwrap();
+            let file = source.open_read(&path).unwrap();
+            let read_hash = sha256_reader(file, &path).unwrap();
+            assert_eq!(read_hash, before_hash, "{relative}");
+            assert_eq!(sha256_file(&path).unwrap(), before_hash, "{relative}");
+            assert_eq!(mtime_of(&path).unwrap(), before_mtime, "{relative}");
+        }
+    }
 }

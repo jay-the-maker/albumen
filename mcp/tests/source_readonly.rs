@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Every MCP tool leaves the source it read byte-for-byte identical.
+//!
+//! Unix only: the proof records mode and extended attributes, and the
+//! `xattr` crate does not build on Windows.
+
+#![cfg(unix)]
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};

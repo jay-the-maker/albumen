@@ -181,7 +181,7 @@ pub fn mtime_matches(expected: SystemTime, actual: SystemTime) -> bool {
     }
     #[cfg(windows)]
     {
-        return to_unix_nanos(expected).abs_diff(to_unix_nanos(actual)) < 100;
+        to_unix_nanos(expected).abs_diff(to_unix_nanos(actual)) < 100
     }
     #[cfg(not(windows))]
     {
