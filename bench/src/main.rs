@@ -145,11 +145,12 @@ fn run() -> Result<(), String> {
             println!("{text}");
             io::stdout().flush().map_err(|err| err.to_string())?;
             eprintln!(
-                "import-throughput leg={} files={} bytes_each={} workers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} ceiling_mb_s={:.3} ceiling_ratio={:.4} copy_ceiling_mb_s={:.3} copy_ceiling_ratio={:.4} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={}",
+                "import-throughput leg={} files={} bytes_each={} workers={} verifiers={} import_mb_s={:.3} raw_mb_s={:.3} raw_sync={} raw_fsync_mb_s={} raw_fullfsync_mb_s={} ratio={:.4} target={:.3} ceiling_mb_s={:.3} ceiling_ratio={:.4} copy_ceiling_mb_s={:.3} copy_ceiling_ratio={:.4} reconciled_percent={:.1} mismatched={} source_changed={} phase_share={}",
                 report.leg,
                 report.files,
                 report.bytes_each,
                 report.workers,
+                report.verifiers,
                 report.import_mb_s,
                 report.raw_mb_s,
                 report.raw_sync,

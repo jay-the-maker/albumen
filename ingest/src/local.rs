@@ -123,8 +123,41 @@ pub fn prefetch_source(source: &Path) -> Result<Option<PrefetchedSource>, Ingest
 /// memory that is already mapped.
 fn prefetch_source_into(
     source: &Path,
-    mut data: Vec<u8>,
+    data: Vec<u8>,
 ) -> Result<Option<PrefetchedSource>, IngestError> {
+    Ok(read_source_into(source, data)?.map(ReadSource::hashed))
+}
+
+/// A source file read into memory but not yet hashed. Only
+/// [`ReadSource::hashed`] turns it into a [`PrefetchedSource`], so nothing
+/// can be written without the digest of exactly these bytes.
+struct ReadSource {
+    source: PathBuf,
+    filename: String,
+    mtime: std::time::SystemTime,
+    data: Vec<u8>,
+}
+
+impl ReadSource {
+    /// SHA-256 of the bytes that were read. In the pipeline this runs on its
+    /// own thread while the next source is read.
+    fn hashed(self) -> PrefetchedSource {
+        let hash_at = crate::copy_profile::tic();
+        let sha256 = sha256_slice(&self.data);
+        crate::copy_profile::add_hash(hash_at);
+        PrefetchedSource {
+            source: self.source,
+            filename: self.filename,
+            mtime: self.mtime,
+            data: self.data,
+            sha256,
+        }
+    }
+}
+
+/// Read `source` into `data` (cleared first) through the read-only
+/// [`SourceRoot`]. `Ok(None)` when it is over [`PREFETCH_MAX_BYTES`].
+fn read_source_into(source: &Path, mut data: Vec<u8>) -> Result<Option<ReadSource>, IngestError> {
     if !source.is_file() {
         return Err(IngestError::NotAFile(source.to_path_buf()));
     }
@@ -150,15 +183,11 @@ fn prefetch_source_into(
     if data.len() as u64 > PREFETCH_MAX_BYTES {
         return Ok(None);
     }
-    let hash_at = crate::copy_profile::tic();
-    let sha256 = sha256_slice(&data);
-    crate::copy_profile::add_hash(hash_at);
-    Ok(Some(PrefetchedSource {
+    Ok(Some(ReadSource {
         source: source.to_path_buf(),
         filename,
         mtime,
         data,
-        sha256,
     }))
 }
 
@@ -190,16 +219,26 @@ pub fn store_prefetched(
     })
 }
 
-/// Copy `sources` into `dest_dir` on `lanes` lanes.
+/// Read-back threads used by [`copy_verify_files_pipelined`] for `lanes`
+/// writer lanes: between 2 and 4.
+pub fn pipelined_verifiers(lanes: usize) -> usize {
+    lanes.clamp(2, 4)
+}
+
+/// Copy `sources` into `dest_dir` with `lanes` writer lanes and
+/// [`pipelined_verifiers`] read-back threads.
 ///
-/// Each lane has three threads. The first reads and hashes the next source.
-/// The second writes the current file, syncs it, then syncs the directory,
-/// so each lane has one full sync in flight. The third reads the
-/// destination back and checks the SHA-256 and mtime. A file is reported to
+/// Each lane has three threads. The first reads the next source. The
+/// second hashes what was read, while the first reads the following file.
+/// The third writes the current file, syncs it, then syncs the directory,
+/// so each lane has one full sync in flight. Synced files go into one
+/// bounded queue shared by the read-back threads, which open each
+/// destination again and check its SHA-256 and mtime. A file is reported to
 /// `on_done` only after its own file sync, its own directory sync, and its
 /// read-back. Files over [`PREFETCH_MAX_BYTES`] go through
 /// [`copy_verify_file`]. `on_done` gets the index into `sources`. It
-/// returns `false` to stop the copy early.
+/// returns `false` to stop the copy early; files not yet read back are
+/// then removed.
 pub fn copy_verify_files_pipelined<F>(
     sources: &[PathBuf],
     dest_dir: &Path,
@@ -210,19 +249,26 @@ pub fn copy_verify_files_pipelined<F>(
 {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::sync_channel;
+    use std::sync::Mutex;
 
+    type Read = (usize, Result<Option<ReadSource>, IngestError>);
+    type Hashed = (usize, Result<Option<PrefetchedSource>, IngestError>);
+
+    let lanes = lanes.max(1);
+    let verifiers = pipelined_verifiers(lanes);
     let profile = crate::copy_profile::thread_enabled();
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
+    let (sync_tx, sync_rx) = sync_channel::<(usize, Synced)>(2 * lanes);
+    let sync_rx = Mutex::new(sync_rx);
     std::thread::scope(|scope| {
-        for _ in 0..lanes.max(1) {
-            let (read_tx, read_rx) =
-                sync_channel::<(usize, Result<Option<PrefetchedSource>, IngestError>)>(1);
-            let (sync_tx, sync_rx) = sync_channel::<(usize, Synced)>(4);
-            let (spare_tx, spare_rx) = sync_channel::<Vec<u8>>(2);
+        for _ in 0..lanes {
+            let (read_tx, read_rx) = sync_channel::<Read>(1);
+            let (hash_tx, hash_rx) = sync_channel::<Hashed>(1);
+            let (spare_tx, spare_rx) = sync_channel::<Vec<u8>>(4);
+            let sync_tx = sync_tx.clone();
             let next = &next;
             let stop = &stop;
-            let on_done = &on_done;
             scope.spawn(move || {
                 if profile {
                     crate::copy_profile::enable_thread();
@@ -234,7 +280,7 @@ pub fn copy_verify_files_pipelined<F>(
                     };
                     let buf = spare_rx.try_recv().unwrap_or_default();
                     if read_tx
-                        .send((index, prefetch_source_into(source, buf)))
+                        .send((index, read_source_into(source, buf)))
                         .is_err()
                     {
                         break;
@@ -245,7 +291,18 @@ pub fn copy_verify_files_pipelined<F>(
                 if profile {
                     crate::copy_profile::enable_thread();
                 }
-                for (index, prefetched) in read_rx {
+                for (index, read) in read_rx {
+                    let hashed = read.map(|read| read.map(ReadSource::hashed));
+                    if hash_tx.send((index, hashed)).is_err() || stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            });
+            scope.spawn(move || {
+                if profile {
+                    crate::copy_profile::enable_thread();
+                }
+                for (index, prefetched) in hash_rx {
                     let synced = match prefetched {
                         Ok(Some(prefetched)) => {
                             let (written, buf) = write_prefetched(prefetched, dest_dir);
@@ -271,18 +328,37 @@ pub fn copy_verify_files_pipelined<F>(
                     }
                 }
             });
+        }
+        // Only the lane writers hold senders, so the queue closes when the
+        // last writer is done.
+        drop(sync_tx);
+        for _ in 0..verifiers {
+            let sync_rx = &sync_rx;
+            let stop = &stop;
+            let on_done = &on_done;
             scope.spawn(move || {
                 if profile {
                     crate::copy_profile::enable_thread();
                 }
-                for (index, synced) in sync_rx {
+                loop {
+                    let received = match sync_rx.lock() {
+                        Ok(rx) => rx.recv(),
+                        Err(_) => break,
+                    };
+                    let Ok((index, synced)) = received else {
+                        break;
+                    };
+                    if stop.load(Ordering::Relaxed) {
+                        // Dropping a pending file removes it: it was never
+                        // read back, so it is not reported stored.
+                        continue;
+                    }
                     let result = match synced {
                         Synced::Done(result) => result,
                         Synced::Pending(pending) => pending.verify().map(Verified::keep),
                     };
                     if !on_done(index, result) {
                         stop.store(true, Ordering::Relaxed);
-                        break;
                     }
                 }
             });
@@ -661,6 +737,39 @@ mod tests {
             assert_eq!(stored.sha256, crate::sha256_hex(source).unwrap());
             assert_eq!(mtime_of(source).unwrap(), mtime_of(&dest).unwrap());
         }
+    }
+
+    #[test]
+    fn pipelined_copy_stopped_early_keeps_only_reported_files() {
+        let tmp = Tmp::new();
+        let src_dir = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src_dir).unwrap();
+        let sources: Vec<PathBuf> = (0..24u32)
+            .map(|index| {
+                write_file(
+                    &src_dir,
+                    &format!("IMG_{index:04}.jpg"),
+                    &[index as u8; 4096],
+                    fixed_mtime(),
+                )
+            })
+            .collect();
+        let reported = std::sync::Mutex::new(Vec::new());
+        copy_verify_files_pipelined(&sources, &dest_dir, 3, |_, result| {
+            let mut reported = reported.lock().unwrap();
+            reported.push(result.unwrap().filename);
+            reported.len() < 2
+        });
+        let mut reported = reported.into_inner().unwrap();
+        reported.sort();
+        let mut kept: Vec<String> = fs::read_dir(&dest_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        kept.sort();
+        assert!(!reported.is_empty());
+        assert_eq!(kept, reported);
     }
 
     #[test]

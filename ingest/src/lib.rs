@@ -48,8 +48,8 @@ pub use family_export::{export_family, plan_family_export, FamilyExportPlan, Fam
 pub use family_source::FamilySource;
 pub use icloud::{import_icloud, plan_icloud, IcloudPlan, IcloudReport};
 pub use local::{
-    copy_verify_file, copy_verify_files_pipelined, prefetch_source, store_prefetched, LocalStore,
-    PrefetchedSource, PREFETCH_MAX_BYTES,
+    copy_verify_file, copy_verify_files_pipelined, pipelined_verifiers, prefetch_source,
+    store_prefetched, LocalStore, PrefetchedSource, PREFETCH_MAX_BYTES,
 };
 pub use platform::platform_dirs;
 pub use rclone::RcloneStore;

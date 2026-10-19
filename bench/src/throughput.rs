@@ -110,6 +110,8 @@ pub struct ThroughputReport {
     pub mismatched: u64,
     pub source_changed: u64,
     pub workers: u64,
+    /// Read-back threads behind the import's writer lanes.
+    pub verifiers: u64,
 }
 
 impl ThroughputReport {
@@ -166,6 +168,7 @@ impl ThroughputReport {
             "mismatched": self.mismatched,
             "source_changed": self.source_changed,
             "workers": self.workers,
+            "verifiers": self.verifiers,
             "reconciled_percent": self.reconciled_percent(),
         })
     }
@@ -301,6 +304,7 @@ pub fn measure_throughput(
         mismatched,
         source_changed,
         workers: u64::try_from(workers).unwrap_or(0),
+        verifiers: u64::try_from(albumen_ingest::pipelined_verifiers(workers)).unwrap_or(0),
     })
 }
 
@@ -877,6 +881,7 @@ mod tests {
             mismatched: 0,
             source_changed: 0,
             workers: 1,
+            verifiers: 2,
         };
         assert!(report.reconciled());
         assert!(!ratio_passes(report.ratio));
