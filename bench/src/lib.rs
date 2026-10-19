@@ -43,7 +43,7 @@ pub const NOISE_SPREAD: f64 = 0.25;
 pub const REGRESSION: f64 = 0.10;
 
 pub use takeout_scale::{
-    measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
+    measure_icloud, measure_takeout, TakeoutScale, DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
 };
 
 pub const DEFAULT_SEARCH_ITEMS: u64 = 128;

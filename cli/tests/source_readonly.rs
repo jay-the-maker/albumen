@@ -186,6 +186,59 @@ fn exercise(root: &Path, outside: &Path) {
     assert!(text.contains("read-only"), "{text}");
     assert!(!inside.exists(), "{text}");
 
+    let (ok, text) = run(&[
+        "import-takeout",
+        "--from",
+        root.to_str().unwrap(),
+        "--to",
+        outside.join("takeout").to_str().unwrap(),
+        "--report",
+        outside.join("takeout.jsonl").to_str().unwrap(),
+    ]);
+    assert!(ok, "{text}");
+    assert!(text.contains("dry-run"), "{text}");
+    assert!(!outside.join("takeout").exists(), "{text}");
+
+    let (ok, text) = run(&[
+        "import-icloud",
+        "--from",
+        root.to_str().unwrap(),
+        "--to",
+        outside.join("icloud").to_str().unwrap(),
+        "--report",
+        outside.join("icloud.jsonl").to_str().unwrap(),
+    ]);
+    assert!(ok, "{text}");
+    assert!(text.contains("dry-run"), "{text}");
+    assert!(!outside.join("icloud").exists(), "{text}");
+
+    let (ok, text) = run(&[
+        "import-takeout",
+        "--from",
+        root.to_str().unwrap(),
+        "--to",
+        outside.join("takeout-copy").to_str().unwrap(),
+        "--report",
+        outside.join("takeout-copy.jsonl").to_str().unwrap(),
+        "--apply",
+    ]);
+    assert!(ok, "{text}");
+    assert!(outside.join("takeout-copy").join("trip/IMG.jpg").is_file());
+
+    let inside_import = root.join("imported");
+    let (ok, text) = run(&[
+        "import-icloud",
+        "--from",
+        root.to_str().unwrap(),
+        "--to",
+        inside_import.to_str().unwrap(),
+        "--report",
+        outside.join("icloud-inside.jsonl").to_str().unwrap(),
+        "--apply",
+    ]);
+    assert!(!ok, "{text}");
+    assert!(!inside_import.exists(), "{text}");
+
     let nested = root.join("nested").join("out.jsonl");
     let (ok, text) = run(&[
         "scan",

@@ -45,7 +45,7 @@ fn import_icloud_reconciles_a_synthetic_library() {
     let library = root.path().join("library");
     let report = root.path().join("report.jsonl");
     let output = albumen()
-        .arg("import-icloud")
+        .args(["import-icloud", "--apply"])
         .arg("--from")
         .arg(&from)
         .arg("--to")
@@ -120,7 +120,7 @@ fn import_icloud_exits_nonzero_on_a_mismatch() {
     let report = root.path().join("report.jsonl");
     let before = fs::read(&archive).unwrap();
     let output = albumen()
-        .arg("import-icloud")
+        .args(["import-icloud", "--apply"])
         .arg("--from")
         .arg(&archive)
         .arg("--to")

@@ -1,8 +1,8 @@
 name: takeout scale
 
-# A 100,000-member Takeout import is too slow for the pull-request ingest
-# matrix. Run it by hand, or let the weekly schedule run it. The budget is
-# 4 hours. The job timeout is a backstop past that budget.
+# A 100,000-item Takeout or iCloud import is too slow for the pull-request
+# ingest matrix. Run it by hand, or let the weekly schedule run it. The budget
+# is 4 hours per 100,000 items. The job timeout is a backstop past that budget.
 
 on:
   workflow_dispatch:
@@ -26,3 +26,17 @@ jobs:
 
       - name: Import 100,000 generated Takeout members
         run: cargo run --release --locked -p albumen-bench -- --takeout
+
+  icloud-100k:
+    name: 100k iCloud import
+    runs-on: ubuntu-24.04
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Import 100,000 generated iCloud export files
+        run: cargo run --release --locked -p albumen-bench -- --icloud

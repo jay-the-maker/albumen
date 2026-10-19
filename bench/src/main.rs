@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use albumen_bench::{
-    load_baseline, measure, measure_takeout, regression_problems, scale_problems, to_json, Report,
-    DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS, DEFAULT_TAKEOUT_ITEMS,
-    TAKEOUT_BUDGET_SECONDS,
+    load_baseline, measure, measure_icloud, measure_takeout, regression_problems, scale_problems,
+    to_json, Report, DEFAULT_COPY_BYTES, DEFAULT_COPY_FILES, DEFAULT_SEARCH_ITEMS,
+    DEFAULT_TAKEOUT_ITEMS, TAKEOUT_BUDGET_SECONDS,
 };
 
 fn main() -> ExitCode {
@@ -100,6 +100,26 @@ fn run() -> Result<(), String> {
                 ));
             }
         }
+        Mode::Icloud => {
+            let items = env_u64("ALBUMEN_TAKEOUT_ITEMS", DEFAULT_TAKEOUT_ITEMS)?;
+            let scale = measure_icloud(items)?;
+            let text =
+                serde_json::to_string_pretty(&scale.to_json()).map_err(|err| err.to_string())?;
+            println!("{text}");
+            io::stdout().flush().map_err(|err| err.to_string())?;
+            if !scale.reconciled() {
+                return Err(format!(
+                    "icloud reconciliation failed: count_in {} count_out {} mismatched {}",
+                    scale.count_in, scale.count_out, scale.mismatched
+                ));
+            }
+            if scale.seconds > TAKEOUT_BUDGET_SECONDS {
+                return Err(format!(
+                    "icloud import of {} items took {:.1}s, budget is {:.0}s",
+                    scale.items, scale.seconds, TAKEOUT_BUDGET_SECONDS
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -110,6 +130,7 @@ enum Mode {
     Measure,
     Write,
     Takeout,
+    Icloud,
 }
 
 struct Invocation {
@@ -127,6 +148,7 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
             "--measure" => set_mode(&mut mode, Mode::Measure)?,
             "--write-baseline" => set_mode(&mut mode, Mode::Write)?,
             "--takeout" => set_mode(&mut mode, Mode::Takeout)?,
+            "--icloud" => set_mode(&mut mode, Mode::Icloud)?,
             "--baseline" => {
                 index += 1;
                 let path = args
@@ -147,7 +169,8 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
 fn set_mode(slot: &mut Option<Mode>, mode: Mode) -> Result<(), String> {
     if slot.is_some() {
         return Err(
-            "pass only one of --check, --measure, --write-baseline, or --takeout".to_string(),
+            "pass only one of --check, --measure, --write-baseline, --takeout, or --icloud"
+                .to_string(),
         );
     }
     *slot = Some(mode);
