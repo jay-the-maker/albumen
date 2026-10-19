@@ -230,3 +230,11 @@ A pull request does not run this. It is too long for the ingest matrix. [`.githu
 The same budget covers an iCloud export of 100,000 generated files. `--icloud` times `import_icloud` on a directory of tiny still/video pairs. Generation is not included. The workflow runs that command in a second job. `ALBUMEN_TAKEOUT_ITEMS` overrides the count for either command.
 
 A local run of the default command, on this machine's ext4 filesystem, imported 100,000 members in 27.992 seconds. `count_in` and `count_out` were 100000 and `mismatched` was 0, so reconciliation was 100 percent. That is inside the 4 hour budget. The JSON field was `seconds`: 27.992430546.
+
+## Search index at 380,000 items
+
+`albumen-mcp` search reads a path index instead of walking the library on every query. The index holds each directory's sorted listing and modification time. Before each answer it stats the indexed directories and lists again only the ones whose time changed, so files added, renamed, or removed since the last run are in the next answer. A listing taken within 2 seconds of its directory's time is listed again on the next query, so a change inside one clock tick is still seen.
+
+The index is saved outside the library: `--index-dir`, else `ALBUMEN_INDEX_DIR`, else `index` in the platform data directory. A directory inside the library is refused, and nothing is written inside the library. If the index directory cannot be written, search answers from the in-memory index. `albumen-mcp --build-index` builds or refreshes it and prints the time.
+
+The `library scale` workflow (`scripts/library-scale.py`) reports the first index build as its own number, then times cold start, time to first answer, search p50 and p95 over 200 fixed queries, and peak memory against the saved index. Targets: time to first answer ≤ 1.5 s, search p95 ≤ 200 ms. `mcp/tests/search_index.rs` checks that index results equal a full walk, including files added, renamed, and removed between runs and while the server runs.
