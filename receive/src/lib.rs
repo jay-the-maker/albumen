@@ -3,6 +3,7 @@
 //! Camera-to-cloud receiver. The user runs it on their own machine.
 //! WebDAV, SFTP, and FTP accept a finished upload and then call `copy_verify`.
 //! Nothing is overwritten, and nothing already in the library is deleted.
+//! A hide or a failed receipt writes a tombstone and leaves the original.
 
 mod ftp;
 mod sftp;
