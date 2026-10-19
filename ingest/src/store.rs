@@ -292,6 +292,7 @@ mod tests {
         let tmp = Tmp::new();
         let mtime = UNIX_EPOCH + Duration::from_secs(1_500_000_200);
         let source = write_file(tmp.path(), "solo.jpg", b"original", mtime);
+        #[cfg(unix)]
         let before = source_snap(&source);
         let asset = Asset::from_files(vec![AssetFile {
             path: source.clone(),

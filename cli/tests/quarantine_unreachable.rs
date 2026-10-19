@@ -18,7 +18,9 @@ fn file_id(path: &Path) -> u64 {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        meta.file_index().expect("file index")
+        // `file_index` is still unstable. Creation time identifies the file
+        // that export must leave in place.
+        meta.creation_time()
     }
 }
 

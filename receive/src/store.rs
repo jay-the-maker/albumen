@@ -876,7 +876,9 @@ mod tests {
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            meta.file_index().expect("file index")
+            // `file_index` is still unstable. The creation time stays with
+            // the file when a tombstone is rewritten beside it.
+            meta.creation_time()
         }
     }
 

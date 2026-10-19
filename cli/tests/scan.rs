@@ -71,7 +71,12 @@ impl Drop for ModeGuard {
                 };
                 if meta.is_file() {
                     let mut perms = meta.permissions();
-                    perms.set_readonly(false);
+                    // This block is not compiled on Unix. Clearing the
+                    // Windows read-only attribute restores the fixture.
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    {
+                        perms.set_readonly(false);
+                    }
                     let _ = fs::set_permissions(path, perms);
                 }
             }
