@@ -52,8 +52,14 @@ class CameraRollReadOnlyTest {
                 }
             }
         }
-        val androidTest = File("src/androidTest/kotlin")
-        if (androidTest.isDirectory) {
+        val androidTests = listOf(
+            File("src/androidTest/kotlin"),
+            File("../host/src/androidTest/kotlin"),
+        )
+        for (androidTest in androidTests) {
+            if (!androidTest.isDirectory) {
+                continue
+            }
             androidTest.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { file ->
                 file.readLines().forEachIndexed { index, raw ->
                     val code = raw.substringBefore("//")

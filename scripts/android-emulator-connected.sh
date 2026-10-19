@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the camera-roll instrumented test on an emulator that is already booted.
+# Run the camera-roll instrumented tests on an emulator that is already booted.
 # GitHub Actions boots that emulator with reactivecircus/android-emulator-runner.
 # This script does not start a second emulator and does not publish an APK.
 set -euo pipefail
@@ -45,4 +45,4 @@ fi
 gradle=$("$root/scripts/install-gradle.sh" | tail -n 1)
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" >"$root/mobile/android/local.properties"
 cd "$root/mobile/android"
-"$gradle" :backup:connectedDebugAndroidTest --no-daemon --stacktrace
+"$gradle" :backup:connectedDebugAndroidTest :host:connectedDebugAndroidTest --no-daemon --stacktrace

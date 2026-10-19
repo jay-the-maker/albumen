@@ -10,4 +10,4 @@ The first WorkManager job runs on a network and is aimed at a verified copy with
 scripts/android-ci.sh
 ```
 
-The script installs command-line tools `13114758` and Gradle `8.11.1` after checking their SHA-256 sums, then runs `:backup:testDebugUnitTest`, `:host:testDebugUnitTest`, and `:host:assembleDebug`. CI boots an API 30 emulator with KVM and runs `scripts/android-emulator-connected.sh`. `scripts/android-emulator-ci.sh` is the same test on a local machine that has KVM.
+The script installs command-line tools `13114758` and Gradle `8.11.1` after checking their SHA-256 sums, then runs `:backup:testDebugUnitTest`, `:host:testDebugUnitTest`, and `:host:assembleDebug`. CI boots an API 30 emulator with KVM and runs `scripts/android-emulator-connected.sh`. That run includes the host test that times the first verified backup and checks that a down receiver and a SHA-256 mismatch show on the status screen and as a notification. `scripts/android-emulator-ci.sh` is the same test on a local machine that has KVM.
