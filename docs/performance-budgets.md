@@ -12,6 +12,7 @@ Cold start, the first thumbnail, scroll, and backup CPU and battery are targets 
 | Time to first thumbnail (app first paint) | ≤ 1.0 second on a 380,000-item library: the ceiling for the app's first painted thumbnail, from launch. Team target. |
 | First thumbnail (library scale) | ≤ 300 ms at 380,000 items: `albumen-mcp` `thumbnail`, request to bytes and spawn to bytes, measured by the `library scale` job. Team target. |
 | Scroll | ≥ 60 FPS on a 380,000-item library, which is a p95 frame time ≤ 16.7 ms |
+| Import CPU | ≤ 2.0 normalized CPU seconds per GB imported on every leg, scored; the `import throughput` job fails when the best of 6 rounds is above 3.0 normalized CPU seconds per GB on any leg, and on Linux and Windows also when the median is above 3.0. macOS prints and scores its median and spread without gating on them. Only the two hash phases are normalized, to a 1,800 MB/s SHA-256 reference. Raw CPU seconds per GB and `cpu_percent` are reported next to it. Team targets. Status: Partial until every leg is at or under 2.0. See [Import CPU](#import-cpu). |
 | Backup CPU | Average ≤ 25% of one core across a background backup. A hash may use one core. It does not fan out across every core. |
 | Backup battery | Backup does not run on battery by default. Once a client can measure drain, screen-off backup stays ≤ 5% battery per hour. |
 
@@ -284,4 +285,43 @@ Two thumbnail numbers are budgets, and both are team targets. The 1.0 s ceiling 
 
 ## Import CPU
 
-The `import throughput` job reports `cpu_percent` for the 1,000-photo import against a 10 percent target. Definition: process CPU time (user plus system, all threads, measured around the timed `copy_verify` import only) divided by (import wall time × logical cores), times 100. 100 means every core was busy for the whole import. CPU time is `CLOCK_PROCESS_CPUTIME_ID` on Linux and macOS and `GetProcessTimes` on Windows; cores are `std::thread::available_parallelism`. The job also prints `cpu_seconds_per_1000`, the CPU seconds spent per 1,000 imported photos. Report only.
+The `import throughput` job reports the CPU of the 1,000-photo, 5 GB import, and its step summary shows a scorecard.
+
+**CPU seconds per GB imported** is the metric. It is process CPU time (user plus system, all threads, measured around the timed import only, per round) divided by the gigabytes imported (10^9 bytes). It counts the copy, both SHA-256 passes, the fsyncs, and the read-back. A faster or slower runner disk does not change it. CPU seconds per 1,000 photos is the same number scaled by photo size: the job uses 5 MB photos, so 1 CPU second per GB is 5 CPU seconds per 1,000 photos.
+
+Both numbers below are team targets, not requirements from Jay:
+
+- **Scored target: ≤ 2.0 normalized CPU seconds per GB on every leg, median of 6 rounds** (10 CPU seconds per 1,000 five-megabyte photos). Status: **Partial** until every leg is at or under 2.0 normalized.
+- **Regression gate: best of 6 rounds ≤ 3.0 normalized CPU seconds per GB on every leg; on Linux and Windows the median must also be ≤ 3.0.** On macOS the median and spread are printed and scored but not gated. The job fails above the gate. The gate reads its numbers from the same job and the same rounds it reports.
+
+**Normalization.** Runner CPUs differ, and SHA-256 is the work that varies most with them. The job therefore measures its own one-thread in-memory SHA-256 rate (`sha256_mb_s`) and rescales only the two hash phases, `hash` and `readback_hash`, to a 1,800 MB/s reference:
+
+`normalized = raw − hash + hash × sha256_mb_s / 1800`
+
+Here `hash` is those two phases' thread CPU per GB. Every other phase stays as measured. The job prints both `cpu_seconds_per_gb` (raw) and `cpu_seconds_per_gb_normalized`. The gate and the scored target use the normalized number. Without a usable rate, the raw number is used.
+
+**Best and median of rounds.** The job runs 6 import rounds per leg. Each round's CPU is normalized with that round's own hash CPU. The gate reads the **best** round on every leg and the **median** round on Linux and Windows. macOS write CPU is bimodal across rounds on shared runners, so its median and spread (`cpu_seconds_per_gb_spread`, highest minus lowest) are printed and scored only. The scored target reads the median on every leg. The job prints every round as `cpu_rounds=raw/normalized/write_ms,...`, the best round as `cpu_seconds_per_gb_best`, the median as `cpu_seconds_per_gb_median`, and the all-rounds totals as `cpu_seconds_per_gb` (raw) and `cpu_seconds_per_gb_normalized`. A run with fewer than 6 rounds fails the gate. `ALBUMEN_THROUGHPUT_ORDER` (`raw-first`, the default, `import-first` or `alternate`) sets whether the raw sample runs before or after the import in each round. It is for measuring page-cache effects only; the gate is the same in every order.
+
+**`cpu_percent`** stays in the report as context: the same CPU time divided by (import wall time × logical cores), times 100. It is no longer the target because it moves with disk speed: the same work on a disk twice as fast scores twice the percent. The earlier 10 percent target is printed beside it for comparison.
+
+CPU time is `CLOCK_PROCESS_CPUTIME_ID` on Linux and macOS and `GetProcessTimes` on Windows; cores are `std::thread::available_parallelism`. The job also prints `phase_cpu_ms`, the thread CPU per copy phase.
+
+### How the targets were set
+
+CI runs on 2026-10-19, CPU seconds per GB per 5 GB round:
+
+| leg | main ae1cb87 (run 39272133628) | #112 b453a10 (run 39274872606) | #112 cpu_percent, import MB/s |
+|---|---|---|---|
+| ubuntu-24.04 | 3.44 | 1.86 | 9.5%, 206 |
+| ubuntu-26.04 | 3.28 | 2.79 | 14.3%, 201 |
+| windows-2025 | 3.24 | 2.93 | 16.4%, 224 |
+| macos-14 | 4.47 | 1.93 | 34.4%, 547 |
+
+- **Gate.** The 3.0 gate is the slowest #112 leg (windows-2025, 2.93) rounded up to the next half second, so every leg passes once #112 is on main and a regression of a few tenths fails. Windows has the least headroom: a windows-2025 run of #116 on a slower runner CPU (in-memory SHA-256 1,581 MB/s against 2,061) measured 3.05. The gate stays at 3.0 on Windows too, and the Windows preflight work in #116 and after it is how that leg gains room.
+- **Scored target.** The 2.0 target is what two legs already reach.
+- **Floor.** The floor is the SHA-256 work alone: two passes per GB at each runner's one-thread in-memory rate (1,498 to 2,155 MB/s with the CPU SHA-256 instructions), about 0.9 to 1.3 CPU seconds per GB. That work stays.
+- **What's left.** Windows preflight (4.2 CPU seconds per round) is the largest cost above the floor and the next cut.
+
+**Why cpu_percent stopped being the target.**
+- On ubuntu-24.04 the runner's disk was half as fast in the #112 run: the plain fsync copy in the same job fell from 417 to 163 MB/s. `cpu_percent` fell from 36% to 9.5%, well past the 46% drop in work per GB.
+- On macos-14 the import ran 45% faster. Work per GB fell 57%, yet `cpu_percent` stayed at 34%.

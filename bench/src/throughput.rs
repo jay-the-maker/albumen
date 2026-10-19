@@ -46,10 +46,22 @@ pub const DEFAULT_THROUGHPUT_BYTES: u64 = 5_000_000;
 /// Product target for import MB/s divided by raw MB/s. CI prints the ratio
 /// and does not fail below this. See `docs/performance-budgets.md`.
 pub const THROUGHPUT_RATIO_FLOOR: f64 = 0.80;
-/// Product target for import CPU: at most this percent of the machine while
-/// 1,000 photos import. Report only. The definition is
+/// The earlier import CPU target: at most this percent of the machine while
+/// 1,000 photos import. Now printed as context next to CPU seconds per GB,
+/// because it moves with disk speed. The definition is
 /// [`ThroughputReport::cpu_percent`].
 pub const CPU_PERCENT_TARGET: f64 = 10.0;
+
+/// Scored team target for CPU seconds per GB imported (10^9 bytes; copy,
+/// both SHA-256 passes, fsync, and read-back included). Report only. The
+/// derivation is in docs/performance-budgets.md.
+pub const CPU_SECONDS_PER_GB_TARGET: f64 = 2.0;
+/// Team regression gate for normalized CPU seconds per GB imported: the
+/// import throughput job fails above it on any leg.
+pub const CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
+/// Reference one-thread in-memory SHA-256 rate the hash phases are
+/// normalized to, in MB/s.
+pub const SHA256_REFERENCE_MB_S: f64 = 1800.0;
 /// Upper bound on import workers. The pool is also limited by the CPU count
 /// and by the number of files.
 pub const MAX_IMPORT_WORKERS: usize = 8;
@@ -60,6 +72,20 @@ pub const MAX_IMPORT_WORKERS: usize = 8;
 /// disk and cache state over the run (ABAB). One sample on a warm or cold
 /// disk does not move either median.
 pub const RAW_SAMPLES_PER_SIDE: usize = 3;
+/// The CPU gate needs this many import rounds. Every leg is gated on the
+/// best round. Linux and Windows are also gated on the median. macOS
+/// prints and scores its median and spread without gating on them.
+pub const MIN_CPU_ROUNDS: usize = 6;
+const _: () = assert!(RAW_SAMPLES_PER_SIDE * 2 >= MIN_CPU_ROUNDS);
+
+/// CPU of one import round, per GB imported.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CpuRound {
+    pub raw: f64,
+    pub normalized: f64,
+    /// Thread CPU of the write phase in this round, in ms.
+    pub write_ms: f64,
+}
 
 const JPEG_PREFIX: &[u8] = &[
     0xFF, 0xD8, // SOI
@@ -146,6 +172,18 @@ pub struct ThroughputReport {
     /// `cpu_seconds / (bytes / 10^9)`: CPU seconds per GB imported, per
     /// round. Unlike `cpu_percent`, it does not move with disk speed.
     pub cpu_seconds_per_gb: f64,
+    /// [`Self::cpu_seconds_per_gb`] with only the hash and read-back hash
+    /// phases rescaled to a [`SHA256_REFERENCE_MB_S`] runner: their thread
+    /// CPU times `sha256_mb_s / 1800`. Everything else stays as measured.
+    /// The gate and the scored target use this number.
+    pub cpu_seconds_per_gb_normalized: f64,
+    /// Every import round, in run order.
+    pub cpu_rounds: Vec<CpuRound>,
+    /// Median of the rounds' normalized CPU seconds per GB. The gate and
+    /// the scored target read this value.
+    pub cpu_seconds_per_gb_median: f64,
+    /// Order of the raw sample and the import inside each round.
+    pub round_order: String,
     /// The CPU has the SHA-256 instructions `sha2` checks for (SHA-NI on
     /// x86_64, SHA2 on aarch64).
     pub sha_hw: bool,
@@ -236,11 +274,57 @@ impl ThroughputReport {
         });
         // A second step keeps the json! macro under its recursion limit.
         value["cpu_seconds_per_gb"] = json!(self.cpu_seconds_per_gb);
+        value["cpu_seconds_per_gb_target"] = json!(CPU_SECONDS_PER_GB_TARGET);
+        value["cpu_seconds_per_gb_gate"] = json!(CPU_SECONDS_PER_GB_GATE);
+        value["cpu_seconds_per_gb_normalized"] = json!(self.cpu_seconds_per_gb_normalized);
+        value["sha256_reference_mb_s"] = json!(SHA256_REFERENCE_MB_S);
+        value["cpu_seconds_per_gb_median"] = json!(self.cpu_seconds_per_gb_median);
+        value["cpu_rounds"] = json!(self
+            .cpu_rounds
+            .iter()
+            .map(|round| json!({"raw": round.raw, "normalized": round.normalized, "write_ms": round.write_ms}))
+            .collect::<Vec<_>>());
+        value["round_order"] = json!(self.round_order);
+        value["cpu_seconds_per_gb_best"] = json!(cpu_best(&self.cpu_rounds));
+        value["cpu_seconds_per_gb_spread"] = json!(cpu_spread(&self.cpu_rounds));
+        value["cpu_median_gated"] = json!(median_is_gated(&self.leg));
+        value["cpu_seconds_per_gb_gate_passed"] = json!(cpu_round_gate_passes(self));
+        value["cpu_seconds_per_gb_met"] =
+            json!(self.cpu_seconds_per_gb_median <= CPU_SECONDS_PER_GB_TARGET);
         value["phase_cpu_ms_per_round"] = phase_cpu_ms(self);
         value["sha_hw"] = json!(self.sha_hw);
         value["sha256_mb_s"] = json!(self.sha256_mb_s);
         value
     }
+}
+
+/// Lowest normalized CPU seconds per GB over the rounds.
+pub fn cpu_best(rounds: &[CpuRound]) -> f64 {
+    rounds
+        .iter()
+        .map(|round| round.normalized)
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Highest minus lowest normalized CPU seconds per GB over the rounds.
+pub fn cpu_spread(rounds: &[CpuRound]) -> f64 {
+    let worst = rounds
+        .iter()
+        .map(|round| round.normalized)
+        .fold(f64::NEG_INFINITY, f64::max);
+    (worst - cpu_best(rounds)).max(0.0)
+}
+
+/// The median is gated on every leg except macOS.
+pub fn median_is_gated(leg: &str) -> bool {
+    !leg.to_ascii_lowercase().contains("macos")
+}
+
+/// Whether the CPU gate passes: the best round on every leg, and the median
+/// too on legs other than macOS.
+pub fn cpu_round_gate_passes(report: &ThroughputReport) -> bool {
+    cpu_gate_passes(cpu_best(&report.cpu_rounds))
+        && (!median_is_gated(&report.leg) || cpu_gate_passes(report.cpu_seconds_per_gb_median))
 }
 
 /// Fail when reconciliation is short of 100 percent.
@@ -264,6 +348,31 @@ pub fn throughput_problems(report: &ThroughputReport) -> Vec<String> {
             report.source_changed
         ));
     }
+    if report.cpu_rounds.len() < MIN_CPU_ROUNDS {
+        problems.push(format!(
+            "import CPU has {} rounds; the gate needs at least {MIN_CPU_ROUNDS}",
+            report.cpu_rounds.len()
+        ));
+    }
+    let best = cpu_best(&report.cpu_rounds);
+    if !cpu_gate_passes(best) {
+        problems.push(format!(
+            "import CPU best round {best:.3} normalized CPU seconds per GB over {} rounds is above the {:.1} regression gate",
+            report.cpu_rounds.len(),
+            CPU_SECONDS_PER_GB_GATE
+        ));
+    }
+    if median_is_gated(&report.leg) && !cpu_gate_passes(report.cpu_seconds_per_gb_median) {
+        problems.push(format!(
+            "import CPU median {:.3} normalized CPU seconds per GB over {} rounds (total {:.3} normalized, {:.3} raw, sha256_mb_s {:.0}) is above the {:.1} regression gate",
+            report.cpu_seconds_per_gb_median,
+            report.cpu_rounds.len(),
+            report.cpu_seconds_per_gb_normalized,
+            report.cpu_seconds_per_gb,
+            report.sha256_mb_s,
+            CPU_SECONDS_PER_GB_GATE
+        ));
+    }
     problems
 }
 
@@ -285,6 +394,13 @@ fn disk_model() -> String {
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The CPU gate passes at or below [`CPU_SECONDS_PER_GB_GATE`], compared at
+/// three decimals, as the job prints it.
+pub fn cpu_gate_passes(cpu_seconds_per_gb: f64) -> bool {
+    cpu_seconds_per_gb.is_finite()
+        && (cpu_seconds_per_gb * 1000.0).round() <= (CPU_SECONDS_PER_GB_GATE * 1000.0).round()
 }
 
 pub fn ratio_passes(ratio: f64) -> bool {
@@ -323,15 +439,28 @@ pub fn measure_throughput(
     reset_copy_profile();
     let mut cpu_seconds = 0.0;
     let mut import_seconds_total = 0.0;
+    let order = round_order();
+    let gb = (files.saturating_mul(bytes_each).max(1) as f64) / 1e9;
+    let sha_rate = sha256_mb_s();
+    let mut cpu_rounds = Vec::with_capacity(rounds);
+    let mut before_hash = 0u64;
+    let mut before_write = 0u64;
     for round in 0..rounds {
-        resident_before_raw.push(resident_share(&source_paths));
-        sample_raw_once(
-            &root.path.join("raw"),
-            files,
-            bytes_each,
-            &mut raw_samples,
-            &mut plain_samples,
-        )?;
+        let import_first = match order {
+            RoundOrder::RawFirst => false,
+            RoundOrder::ImportFirst => true,
+            RoundOrder::Alternate => round % 2 == 1,
+        };
+        if !import_first {
+            resident_before_raw.push(resident_share(&source_paths));
+            sample_raw_once(
+                &root.path.join("raw"),
+                files,
+                bytes_each,
+                &mut raw_samples,
+                &mut plain_samples,
+            )?;
+        }
 
         resident_before_import.push(resident_share(&source_paths));
         fs::create_dir_all(&dest).map_err(|err| format!("create dest: {err}"))?;
@@ -339,7 +468,19 @@ pub fn measure_throughput(
         let started = Instant::now();
         let (out, bad, imported_bytes) = import_parallel(&snaps, &dest, workers)?;
         let seconds = started.elapsed().as_secs_f64().max(1e-9);
-        cpu_seconds += process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+        let round_cpu = process_cpu_time()?.saturating_sub(cpu_before).as_secs_f64();
+        cpu_seconds += round_cpu;
+        let so_far = copy_phases();
+        let hash_now = hash_cpu_ns(&so_far);
+        let write_now = phase_cpu_ns(&so_far, "write");
+        let round_hash = hash_now.saturating_sub(before_hash) as f64 / 1e9 / gb;
+        cpu_rounds.push(CpuRound {
+            raw: round_cpu / gb,
+            normalized: normalized_cpu_seconds_per_gb(round_cpu / gb, round_hash, sha_rate),
+            write_ms: write_now.saturating_sub(before_write) as f64 / 1e6,
+        });
+        before_hash = hash_now;
+        before_write = write_now;
         import_seconds_total += seconds;
         import_samples.push((imported_bytes as f64) / 1_000_000.0 / seconds);
         // Every round must reconcile, so the report keeps the worst one.
@@ -350,6 +491,16 @@ pub fn measure_throughput(
         // sample. The source directory stays, read-only, until the temp
         // root drops.
         fs::remove_dir_all(&dest).map_err(|err| format!("remove measured destination: {err}"))?;
+        if import_first {
+            resident_before_raw.push(resident_share(&source_paths));
+            sample_raw_once(
+                &root.path.join("raw"),
+                files,
+                bytes_each,
+                &mut raw_samples,
+                &mut plain_samples,
+            )?;
+        }
 
         if round % 2 == 0 {
             ceiling_samples.push(ceiling_sample(
@@ -383,6 +534,12 @@ pub fn measure_throughput(
     if !(raw_mb_s.is_finite() && raw_mb_s > 0.0 && import_mb_s.is_finite() && import_mb_s > 0.0) {
         return Err("import or raw throughput was not a positive number".to_string());
     }
+    let cpu_seconds_per_gb_median = median(
+        &mut cpu_rounds
+            .iter()
+            .map(|round| round.normalized)
+            .collect::<Vec<_>>(),
+    );
     Ok(ThroughputReport {
         leg: leg.to_string(),
         disk_model: disk_model(),
@@ -421,10 +578,89 @@ pub fn measure_throughput(
         cores,
         cpu_percent: cpu_seconds / (import_seconds_total.max(1e-9) * cores as f64) * 100.0,
         cpu_seconds_per_1000: cpu_seconds / rounds as f64 * 1000.0 / (files as f64),
-        cpu_seconds_per_gb: cpu_seconds / rounds as f64 / ((expected_bytes.max(1) as f64) / 1e9),
+        cpu_seconds_per_gb: cpu_seconds / rounds as f64 / gb,
         sha_hw: sha_hw(),
-        sha256_mb_s: sha256_mb_s(),
+        sha256_mb_s: sha_rate,
+        cpu_seconds_per_gb_normalized: normalized_cpu_seconds_per_gb(
+            cpu_seconds / rounds as f64 / gb,
+            hash_cpu_ns(&phases) as f64 / 1e9 / rounds as f64 / gb,
+            sha_rate,
+        ),
+        cpu_rounds,
+        cpu_seconds_per_gb_median,
+        round_order: order.name().to_string(),
     })
+}
+
+/// Order of the raw sample and the import in each round, from
+/// `ALBUMEN_THROUGHPUT_ORDER`: `raw-first` (the default), `import-first`,
+/// or `alternate`. A measurement knob only; the gate is the same.
+#[derive(Clone, Copy)]
+enum RoundOrder {
+    RawFirst,
+    ImportFirst,
+    Alternate,
+}
+
+impl RoundOrder {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RawFirst => "raw-first",
+            Self::ImportFirst => "import-first",
+            Self::Alternate => "alternate",
+        }
+    }
+}
+
+fn round_order() -> RoundOrder {
+    match std::env::var("ALBUMEN_THROUGHPUT_ORDER").as_deref() {
+        Ok("import-first") => RoundOrder::ImportFirst,
+        Ok("alternate") => RoundOrder::Alternate,
+        _ => RoundOrder::RawFirst,
+    }
+}
+
+fn phase_cpu_ns(phases: &albumen_ingest::CopyPhases, phase: &str) -> u64 {
+    phases
+        .cpu_named()
+        .iter()
+        .filter(|(name, _)| *name == phase)
+        .fold(0u64, |sum, (_, ns)| sum.saturating_add(*ns))
+}
+
+/// `raw/normalized/write_ms` for each round, in run order, for the log line.
+pub fn cpu_rounds_line(rounds: &[CpuRound]) -> String {
+    rounds
+        .iter()
+        .map(|round| {
+            format!(
+                "{:.3}/{:.3}/{:.0}",
+                round.raw, round.normalized, round.write_ms
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Thread CPU of the two SHA-256 phases, hash and read-back hash, summed.
+fn hash_cpu_ns(phases: &albumen_ingest::CopyPhases) -> u64 {
+    phases
+        .cpu_named()
+        .iter()
+        .filter(|(name, _)| matches!(*name, "hash" | "readback_hash"))
+        .fold(0u64, |sum, (_, ns)| sum.saturating_add(*ns))
+}
+
+/// `raw - hash + hash * sha256_mb_s / 1800`: the hash phases' CPU as it
+/// would be on a runner whose one-thread SHA-256 runs at 1,800 MB/s. A
+/// runner that hashes slower is not charged for its slower CPU; one that
+/// hashes faster gets no credit for it. Without a usable rate the raw
+/// number is returned.
+pub fn normalized_cpu_seconds_per_gb(raw: f64, hash: f64, sha256_mb_s: f64) -> f64 {
+    if !(sha256_mb_s.is_finite() && sha256_mb_s > 0.0 && hash.is_finite()) {
+        return raw;
+    }
+    raw - hash + hash * sha256_mb_s / SHA256_REFERENCE_MB_S
 }
 
 /// User plus system CPU time of this process, all threads.
@@ -817,6 +1053,44 @@ fn sha256_mb_s() -> f64 {
     (buf.len() * rounds) as f64 / 1_000_000.0 / seconds
 }
 
+/// Markdown scorecard for the CI step summary: CPU seconds per GB against
+/// its team gate and scored team target, with `cpu_percent` as context.
+pub fn cpu_scorecard(report: &ThroughputReport) -> String {
+    let mark = |met: bool| if met { "met" } else { "not met" };
+    format!(
+        "| import CPU ({leg}) | value | team target | |\n|---|---|---|---|\n\
+         | CPU seconds per GB, normalized to {sha_ref:.0} MB/s SHA-256, best of {n} rounds | {best:.2} | ≤ {gb_gate:.1} gate (fails the job) | gate {gate_met} |\n\
+         | CPU seconds per GB, normalized, median of {n} rounds (spread {spread:.2}) | {median:.2} | ≤ {gb_target:.1} scored{median_gate} | scored {gb_met} |\n\
+         | CPU seconds per GB, normalized, all rounds | {norm:.2} | | |\n\
+         | CPU seconds per GB, raw, all rounds | {gb:.2} | | |\n\
+         | cpu_percent (CPU ÷ (wall × {cores} cores)), context | {pct:.1}% | | |\n\
+         | CPU seconds per 1,000 photos | {per_1000:.2} | | |\n\
+         | hardware SHA-256 | {sha_hw} ({sha_mb_s:.0} MB/s) | | |\n",
+        leg = report.leg,
+        gb = report.cpu_seconds_per_gb,
+        gb_target = CPU_SECONDS_PER_GB_TARGET,
+        norm = report.cpu_seconds_per_gb_normalized,
+        sha_ref = SHA256_REFERENCE_MB_S,
+        n = report.cpu_rounds.len(),
+        median = report.cpu_seconds_per_gb_median,
+        gb_met = mark(report.cpu_seconds_per_gb_median <= CPU_SECONDS_PER_GB_TARGET),
+        gb_gate = CPU_SECONDS_PER_GB_GATE,
+        gate_met = mark(cpu_round_gate_passes(report)),
+        best = cpu_best(&report.cpu_rounds),
+        spread = cpu_spread(&report.cpu_rounds),
+        median_gate = if median_is_gated(&report.leg) {
+            ", ≤ 3.0 gate (fails the job)"
+        } else {
+            ", not gated on macOS"
+        },
+        cores = report.cores,
+        pct = report.cpu_percent,
+        per_1000 = report.cpu_seconds_per_1000,
+        sha_hw = report.sha_hw,
+        sha_mb_s = report.sha256_mb_s,
+    )
+}
+
 fn ns_to_ms(ns: u64) -> f64 {
     (ns as f64) / 1_000_000.0
 }
@@ -1056,6 +1330,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalizing_rescales_only_the_hash_phases() {
+        // 2026-10-19, #119 ubuntu-24.04: raw 3.188, hash phases 10.574 s
+        // per 5 GB round, SHA-256 1,337 MB/s.
+        let hash = 10.574 / 5.0;
+        let norm = normalized_cpu_seconds_per_gb(3.188, hash, 1337.0);
+        assert!((norm - (3.188 - hash + hash * 1337.0 / 1800.0)).abs() < 1e-12);
+        assert!(norm < 3.0, "{norm}");
+        // At the reference rate nothing moves.
+        assert_eq!(normalized_cpu_seconds_per_gb(2.5, 1.0, 1800.0), 2.5);
+        // A faster runner is charged up to the reference.
+        assert!(normalized_cpu_seconds_per_gb(2.5, 1.0, 2400.0) > 2.5);
+        // Without a rate the raw number stands.
+        assert_eq!(normalized_cpu_seconds_per_gb(2.5, 1.0, 0.0), 2.5);
+    }
+
+    #[test]
+    fn the_cpu_gate_reads_normalized_cpu_and_fails_above_three() {
+        // #122 on 2026-10-19: (raw, hash + readback_hash s/GB, sha256_mb_s).
+        let windows = normalized_cpu_seconds_per_gb(3.054, 0.993, 1578.0);
+        let ubuntu = normalized_cpu_seconds_per_gb(2.326, 1.293, 1585.0);
+        let fast_sha = normalized_cpu_seconds_per_gb(1.758, 1.059, 2179.0);
+        let macos = normalized_cpu_seconds_per_gb(3.388, 1.340, 1406.0);
+        for (leg, expected) in [
+            (windows, 2.932),
+            (ubuntu, 2.172),
+            (fast_sha, 1.981),
+            (macos, 3.095),
+        ] {
+            assert!((leg - expected).abs() < 0.001, "{leg} vs {expected}");
+        }
+        // Raw 3.054 would fail; normalized it passes. macOS fails until cut.
+        assert!(!cpu_gate_passes(3.054));
+        assert!(cpu_gate_passes(windows) && cpu_gate_passes(ubuntu) && cpu_gate_passes(fast_sha));
+        assert!(!cpu_gate_passes(macos));
+        assert!(cpu_gate_passes(3.0004));
+        assert!(!cpu_gate_passes(3.001));
+        assert!(!cpu_gate_passes(f64::NAN));
+    }
+
+    #[test]
     fn vmtouch_resident_pages_parse() {
         let text = "           Files: 1000\n     Directories: 1\n  Resident Pages: 1220/2441  4M/9M  50%\n         Elapsed: 0.01 seconds\n";
         assert_eq!(parse_vmtouch_resident(text), Some(1220.0 / 2441.0));
@@ -1142,6 +1456,17 @@ mod tests {
             cpu_percent: 5.6,
             cpu_seconds_per_1000: 4.0,
             cpu_seconds_per_gb: 0.8,
+            cpu_seconds_per_gb_normalized: 0.8,
+            cpu_rounds: vec![
+                CpuRound {
+                    raw: 0.8,
+                    normalized: 0.8,
+                    write_ms: 1.0,
+                };
+                6
+            ],
+            cpu_seconds_per_gb_median: 0.8,
+            round_order: "raw-first".to_string(),
             sha_hw: true,
             sha256_mb_s: 2000.0,
             verifiers: 2,
@@ -1154,10 +1479,49 @@ mod tests {
         assert!(report.reconciled());
         assert!(!ratio_passes(report.ratio));
         assert!(throughput_problems(&report).is_empty());
+        let mut few = report.clone();
+        few.cpu_rounds.truncate(MIN_CPU_ROUNDS - 1);
+        assert!(!throughput_problems(&few).is_empty());
+        let mut slow = report.clone();
+        slow.cpu_seconds_per_gb_median = 3.001;
+        slow.leg = "ubuntu-24.04".to_string();
+        assert!(!throughput_problems(&slow).is_empty());
+        slow.leg = "macos-14".to_string();
+        assert!(throughput_problems(&slow).is_empty());
+        for round in &mut slow.cpu_rounds {
+            round.normalized = 3.001;
+        }
+        assert!(!throughput_problems(&slow).is_empty());
         let mut missed = report.clone();
         missed.source_changed = 1;
         assert!(!missed.reconciled());
         assert!(!throughput_problems(&missed).is_empty());
+    }
+
+    #[test]
+    fn the_cpu_gate_reads_the_best_round_and_the_median_off_macos() {
+        // Same report fixture as above, with the CPU rounds varied.
+        let round = |normalized: f64| CpuRound {
+            raw: normalized,
+            normalized,
+            write_ms: 0.0,
+        };
+        let mut rounds: Vec<CpuRound> = [2.6, 2.7, 4.1, 2.8, 2.9, 3.6].map(round).to_vec();
+        let mut values: Vec<f64> = rounds.iter().map(|r| r.normalized).collect();
+        // Even count: the mean of the middle two, 2.85. Two slow rounds do not fail it.
+        assert!((median(&mut values) - 2.85).abs() < 1e-9);
+        assert!(cpu_gate_passes(2.85));
+        rounds[0] = round(3.2);
+        rounds[1] = round(3.1);
+        let mut values: Vec<f64> = rounds.iter().map(|r| r.normalized).collect();
+        assert!(!cpu_gate_passes(median(&mut values)));
+        assert!((cpu_best(&rounds) - 2.8).abs() < 1e-9);
+        assert!((cpu_spread(&rounds) - 1.3).abs() < 1e-9);
+        assert!(median_is_gated("windows-2025"));
+        assert!(median_is_gated("ubuntu-26.04"));
+        assert!(!median_is_gated("macos-14"));
+        assert_eq!(MIN_CPU_ROUNDS, 6);
+        assert_eq!(cpu_rounds_line(&[round(2.5)]), "2.500/2.500/0");
     }
 
     #[test]
