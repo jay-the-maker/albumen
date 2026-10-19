@@ -91,15 +91,14 @@ pub fn remove_file_best_effort(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+#[cfg(windows)]
 pub fn rename(from: &Path, to: &Path) -> Result<(), IngestError> {
-    #[cfg(windows)]
-    {
-        return rename_durable(from, to);
-    }
-    #[cfg(not(windows))]
-    {
-        fs::rename(from, to).map_err(|err| IngestError::io(to, err))
-    }
+    rename_durable(from, to)
+}
+
+#[cfg(not(windows))]
+pub fn rename(from: &Path, to: &Path) -> Result<(), IngestError> {
+    fs::rename(from, to).map_err(|err| IngestError::io(to, err))
 }
 
 pub fn set_len(file: &File, path: &Path, len: u64) -> Result<(), IngestError> {
@@ -123,18 +122,17 @@ pub fn set_len(file: &File, path: &Path, len: u64) -> Result<(), IngestError> {
 /// could not be confirmed. Callers that rename use
 /// [`rename`], which tries `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING |
 /// MOVEFILE_WRITE_THROUGH` first and only then this flush.
+#[cfg(windows)]
 pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
-    #[cfg(windows)]
-    {
-        return sync_dir_windows(path);
-    }
-    #[cfg(not(windows))]
-    {
-        let dir = File::open(path).map_err(|err| IngestError::io(path, err))?;
-        dir.sync_all().map_err(|err| IngestError::io(path, err))?;
-        note_dir_sync(DirSyncKind::Unix);
-        Ok(())
-    }
+    sync_dir_windows(path)
+}
+
+#[cfg(not(windows))]
+pub fn sync_dir(path: &Path) -> Result<(), IngestError> {
+    let dir = File::open(path).map_err(|err| IngestError::io(path, err))?;
+    dir.sync_all().map_err(|err| IngestError::io(path, err))?;
+    note_dir_sync(DirSyncKind::Unix);
+    Ok(())
 }
 
 #[cfg(windows)]
