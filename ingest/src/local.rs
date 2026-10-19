@@ -966,6 +966,39 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn an_8_3_alias_of_an_existing_destination_file_is_not_overwritten() {
+        // A photo named like the 8.3 alias of a file already in the
+        // destination opens that file on Windows. The import refuses it and
+        // leaves both files as they were.
+        let tmp = Tmp::new();
+        let src = tmp.path().join("library");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+        let existing = dest_dir.join("a-long-photo-name.jpeg");
+        fs::write(&existing, b"already").unwrap();
+        let short = albumen_win::short_path(&existing).unwrap();
+        let alias = short.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            alias.contains('~'),
+            "no 8.3 alias for {}",
+            existing.display()
+        );
+        let source = write_file(&src, &alias, b"alpha", fixed_mtime());
+        let err = copy_verify_file(&source, &dest_dir).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IngestError::AlreadyExists { .. } | IngestError::CaseCollision { .. }
+            ),
+            "{err}"
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"already");
+        assert_eq!(fs::read(&source).unwrap(), b"alpha");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn the_source_under_another_letter_case_is_refused() {
         let tmp = Tmp::new();
         let src = tmp.path().join("Library");
