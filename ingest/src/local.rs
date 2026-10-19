@@ -128,6 +128,38 @@ fn prefetch_source_into(
     Ok(read_source_into(source, data)?.map(ReadSource::hashed))
 }
 
+/// Ask macOS to read the first `len` bytes of `file` into the page cache
+/// ahead of use (`F_RDADVISE`). This is a read hint on a descriptor opened
+/// read-only. It never writes to the source. A failed hint is ignored,
+/// because the read that follows is the one that counts.
+#[cfg(target_vendor = "apple")]
+fn advise_read(file: &fs::File, len: u64) {
+    let _ = rustix::fs::fcntl_rdadvise(file, 0, len);
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn advise_read(_file: &fs::File, _len: u64) {}
+
+/// [`advise_read`] for a source the pipeline will read soon, opened
+/// read-only through [`SourceRoot`]. Only on macOS. Elsewhere this does
+/// nothing.
+fn advise_source(source: &Path) {
+    if !cfg!(target_vendor = "apple") {
+        return;
+    }
+    let Ok(root) = SourceRoot::open(parent_dir(source)) else {
+        return;
+    };
+    let Ok(file) = root.open_read(source) else {
+        return;
+    };
+    if let Ok(meta) = file.metadata() {
+        if meta.len() <= PREFETCH_MAX_BYTES {
+            advise_read(&file, meta.len());
+        }
+    }
+}
+
 /// A source file read into memory but not yet hashed. Only
 /// [`ReadSource::hashed`] turns it into a [`PrefetchedSource`], so nothing
 /// can be written without the digest of exactly these bytes.
@@ -173,6 +205,7 @@ fn read_source_into(source: &Path, mut data: Vec<u8>) -> Result<Option<ReadSourc
     if len > PREFETCH_MAX_BYTES {
         return Ok(None);
     }
+    advise_read(&input, len);
     data.clear();
     data.reserve(usize::try_from(len).unwrap_or(0));
     let read_at = crate::copy_profile::tic();
@@ -278,6 +311,11 @@ pub fn copy_verify_files_pipelined<F>(
                     let Some(source) = sources.get(index) else {
                         break;
                     };
+                    // Start the next unclaimed source on its way into the
+                    // page cache while this one is read and hashed.
+                    if let Some(ahead) = sources.get(next.load(Ordering::Relaxed)) {
+                        advise_source(ahead);
+                    }
                     let buf = spare_rx.try_recv().unwrap_or_default();
                     if read_tx
                         .send((index, read_source_into(source, buf)))
