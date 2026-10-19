@@ -24,7 +24,7 @@ There is no `albumen ingest` subcommand. The write that stores bytes from a libr
 
 CI straces `scan` and a receive dry-run and fails if either opens a socket or writes under the source. The same scan is repeated in a rootless container with `--network none` and a seccomp profile that denies socket calls. The source in that container is a copy mounted read-only. `scripts/no-unexpected-egress.sh` runs every `albumen` command that reads a library, including export and both importers, inside a network namespace and fails if a connection is not the destination that command was given.
 
-**Planned:** the same strace for `albumen-mcp` and for `albumen export`. Those two are not in `scripts/scan-no-network.sh`.
+`scripts/zero-network.sh` runs default-config scan, the process-local index, and search on `ubuntu-24.04`, `macos-14`, and `windows-2025`. The index is the metadata cache filled by a search filter. There is no index subcommand and no on-disk catalog. Export is still only in `scripts/no-unexpected-egress.sh`.
 
 ## albumen-mcp
 
@@ -52,7 +52,7 @@ The published image mounts the library at `/library` read-only. CI runs `scripts
 
 `scripts/no-unexpected-egress.sh` runs `albumen`, `albumen-mcp`, and `albumen-receive` in a user network namespace. The namespace has loopback and no route beyond it. `strace` logs every `connect`, `sendto`, `sendmsg`, and `bind`. `scripts/check-egress.py` fails the run when a logged address is not a destination that invocation named.
 
-A scan, a local export, a Takeout or iCloud dry-run, `platform-dirs`, an MCP search, and a receive dry-run name no network destination. Any Internet address fails that run. `export --apply` to `s3://` may connect to `ALBUMEN_S3_ENDPOINT` and nowhere else. `albumen-receive --apply` may bind the listen address it was given. It does not connect out. The CI job is the `sandbox` job on `ubuntu-24.04`.
+A scan, a local export, a Takeout or iCloud dry-run, `platform-dirs`, an MCP search, and a receive dry-run name no network destination. Any Internet address fails that run. `export --apply` to `s3://` may connect to `ALBUMEN_S3_ENDPOINT` and nowhere else. `albumen-receive --apply` may bind the listen address it was given. It does not connect out. The CI job is the `sandbox` job on `ubuntu-24.04`. The `zero network` job requires that same scan, the process-local index, and search to make no connection on `ubuntu-24.04`, `macos-14`, and `windows-2025`.
 
 ## What this does not claim
 
