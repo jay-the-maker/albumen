@@ -40,6 +40,12 @@ struct Cli {
     /// Writable directory for export and upload. Required with `--enable-export` or `--enable-upload`. Must not be the library mount.
     #[arg(long)]
     destination: Option<PathBuf>,
+    /// Directory for the saved search index. Defaults to `ALBUMEN_INDEX_DIR`, else `index` in the platform data directory. Must be outside the library; nothing is written inside the library.
+    #[arg(long)]
+    index_dir: Option<PathBuf>,
+    /// Build or bring the search index current, print one JSON line with the time it took, and exit.
+    #[arg(long)]
+    build_index: bool,
 }
 
 fn main() -> ExitCode {
@@ -57,6 +63,25 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let library = match cli.index_dir {
+        Some(dir) => library.with_index_dir(Some(dir)),
+        None => library,
+    };
+    if cli.build_index {
+        return match library.warm_index() {
+            Ok((ms, loaded)) => {
+                println!(
+                    "{}",
+                    json!({"index_ms": (ms * 10.0).round() / 10.0, "loaded": loaded})
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("albumen-mcp: {err}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let stdin = std::io::stdin();
     let mut input = BufReader::new(stdin.lock());
     let stdout = std::io::stdout();

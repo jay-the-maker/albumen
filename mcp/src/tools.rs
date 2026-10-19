@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use albumen_ingest::index::LibraryIndex;
 use albumen_ingest::{
     copy_verify, discover, export_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest,
     IngestError, LocalStore, S3Config, S3Store, SourceRoot, WalkControl,
@@ -25,6 +26,8 @@ pub struct Library {
     pub enable_upload: bool,
     pub apply: bool,
     metadata: Mutex<metadata::Cache>,
+    index_dir: Option<PathBuf>,
+    index: Mutex<Option<LibraryIndex>>,
 }
 
 impl Library {
@@ -61,7 +64,53 @@ impl Library {
             enable_upload,
             apply,
             metadata: Mutex::new(metadata::Cache::default()),
+            index_dir: albumen_ingest::index::default_index_dir(),
+            index: Mutex::new(None),
         })
+    }
+
+    /// Save the search index in `dir` instead of the platform data directory.
+    /// `None` keeps it in memory only. A directory inside the library is
+    /// refused when the index is opened.
+    pub fn with_index_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.index_dir = dir;
+        self
+    }
+
+    /// Open the search index now, so the first query does not wait for it.
+    /// Returns the open time in milliseconds and whether it was loaded.
+    pub fn warm_index(&self) -> Result<(f64, bool), String> {
+        let mut slot = self.index.lock().unwrap_or_else(|err| err.into_inner());
+        let index = self.current_index(&mut slot)?;
+        Ok((index.open_ms, index.loaded))
+    }
+
+    fn current_index<'a>(
+        &self,
+        slot: &'a mut Option<LibraryIndex>,
+    ) -> Result<&'a LibraryIndex, String> {
+        match slot {
+            Some(index) => {
+                index.refresh().map_err(show)?;
+            }
+            None => {
+                let index = match LibraryIndex::open(&self.root, self.index_dir.as_deref()) {
+                    Ok(index) => index,
+                    Err(IngestError::DestinationInsideSource { .. }) => {
+                        return Err(format!(
+                        "the index directory is inside the library; choose --index-dir outside {}",
+                        self.root.display()
+                    ))
+                    }
+                    Err(err) => return Err(show(err)),
+                };
+                if let Some(err) = index.save_error.as_ref() {
+                    eprintln!("albumen-mcp: search index kept in memory only: {err}");
+                }
+                *slot = Some(index);
+            }
+        }
+        Ok(slot.as_ref().expect("index set above"))
     }
 
     pub fn tool_defs(&self) -> Vec<Value> {
@@ -125,18 +174,17 @@ impl Library {
         let batch = metadata::exiftool_batch();
         let mut cache = self.metadata.lock().unwrap_or_else(|err| err.into_inner());
         let mut failed: Option<String> = None;
-        let walked = walk_sorted(&self.root, after.as_deref(), &mut |relative| {
-            if query
-                .as_ref()
-                .is_some_and(|query| !relative.to_lowercase().contains(query))
-            {
-                return WalkControl::Continue;
+        let mut index_slot = self.index.lock().unwrap_or_else(|err| err.into_inner());
+        let index = self.current_index(&mut index_slot)?;
+        index.visit_after(after.as_deref(), &mut |relative, lower| {
+            if query.as_ref().is_some_and(|query| !lower.contains(query)) {
+                return true;
             }
             let bytes = match file_len(&self.root, relative) {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     failed = Some(err);
-                    return WalkControl::Stop;
+                    return false;
                 }
             };
             if filters.is_none() {
@@ -148,11 +196,7 @@ impl Library {
                         record: None,
                     },
                 );
-                return if stop {
-                    WalkControl::Stop
-                } else {
-                    WalkControl::Continue
-                };
+                return !stop;
             }
             pending.push((relative.to_string(), bytes));
             if pending.len() >= batch {
@@ -165,15 +209,15 @@ impl Library {
                     &mut page,
                 ) {
                     failed = Some(err);
-                    return WalkControl::Stop;
+                    return false;
                 }
                 if page.truncated {
-                    return WalkControl::Stop;
+                    return false;
                 }
             }
-            WalkControl::Continue
+            true
         });
-        walked.map_err(show)?;
+        drop(index_slot);
         if let Some(err) = failed {
             return Err(err);
         }
