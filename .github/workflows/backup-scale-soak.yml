@@ -83,11 +83,13 @@ jobs:
           api-level: 30
           target: aosp_atd
           arch: x86_64
-          script: |
-            export ALBUMEN_SOAK_ITEMS='${{ needs.plan.outputs.per_shard }}'
-            export ALBUMEN_SOAK_SHARD='${{ matrix.shard }}'
-            export ALBUMEN_SOAK_SHARDS='${{ needs.plan.outputs.shards }}'
-            export ALBUMEN_SOAK_SEED='${{ needs.plan.outputs.seed }}'
+          # The emulator action runs each script line in its own shell, so the
+          # variables and the script have to be one command.
+          script: >-
+            ALBUMEN_SOAK_ITEMS='${{ needs.plan.outputs.per_shard }}'
+            ALBUMEN_SOAK_SHARD='${{ matrix.shard }}'
+            ALBUMEN_SOAK_SHARDS='${{ needs.plan.outputs.shards }}'
+            ALBUMEN_SOAK_SEED='${{ needs.plan.outputs.seed }}'
             scripts/android-scale-soak.sh
 
       - name: Upload shard result
