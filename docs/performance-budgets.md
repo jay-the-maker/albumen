@@ -14,7 +14,7 @@ Cold start, the first thumbnail, scroll, and backup CPU and battery are targets 
 | Backup CPU | Average ≤ 25% of one core across a background backup. A hash may use one core. It does not fan out across every core. |
 | Backup battery | Backup does not run on battery by default. Once a client can measure drain, screen-off backup stays ≤ 5% battery per hour. |
 
-The Android worker already refuses to run unless the device is idle, charging, and on a network. That is the default, not a measured battery percent. The percent and the CPU average stay targets until a client exists.
+The periodic Android backup does not run unless the device is idle, charging, and on a network. That is the battery default, not a measured battery percent. The first job after setup is the backup the user just started: a one-time network-constrained job aimed at a verified copy within 5 minutes. The percent and the CPU average stay targets. The worker hashes one file at a time.
 
 ## Budgets for the library
 

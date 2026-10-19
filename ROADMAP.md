@@ -36,11 +36,9 @@ Shipped as `albumen export` and `albumen verify-manifest`. The command copy-veri
 
 ### Android
 
-- `mobile/android` reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor`. `requiredPermissions` is the media permissions on API 33 and newer, and `READ_EXTERNAL_STORAGE` on API 30 through 32, plus `ACCESS_MEDIA_LOCATION`. The library does not show the dialog. Without location permission, MediaStore removes GPS.
-- `CameraRollBackupWorker` schedules the backup with WorkManager while the device is idle and charging, so a killed process resumes the same queue.
-- A motion photo is one JPEG with the video still appended. The worker copies that file whole.
-- The receiver password is in Keystore-backed storage. WorkManager input does not contain it.
-- `mobile/android/host` requests those permissions and enqueues only when images, video, and location are all granted. A location denial is explained as stripped GPS and is not a finished backup. CI compiles the app and unit-tests that decision. It does not click the system dialog. Android 14 selected-photos (`READ_MEDIA_VISUAL_USER_SELECTED`) is still not a grant. The flow is [docs/camera-roll-scope.md](docs/camera-roll-scope.md).
+Shipped as `mobile/android/host`. The host reads images and video through MediaStore with `setRequireOriginal` and `openFileDescriptor` in mode `"r"`. `ACCESS_MEDIA_LOCATION` is required, because without it MediaStore would strip GPS and the backup does not start. A motion photo is copied whole. The first WorkManager job runs on a network and is aimed at a verified copy within 5 minutes of setup. Later jobs run while the phone is idle, charging, and on a network. A killed pass resumes from a progress file of URI, size, and modified time. The upload counts when `X-Albumen-Sha256` matches, and a mismatch is retried and shown. The receiver password is in Keystore-backed storage. WorkManager input does not contain it. Nothing in the camera roll is deleted or updated. The debug APK is not published to a store. See [docs/mobile-android-backup.md](docs/mobile-android-backup.md).
+
+Still open: Android 14 selected-photos (`READ_MEDIA_VISUAL_USER_SELECTED`) is not a grant. The library does not open the photo picker.
 
 ## Connectors
 
