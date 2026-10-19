@@ -23,6 +23,7 @@ use tar::Archive;
 use zip::ZipArchive;
 
 use crate::checksum::{sha256_file, sha256_reader, to_hex};
+use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
 use crate::local::{copy_verify_file, copy_verify_reader};
@@ -73,10 +74,10 @@ pub fn import_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudRepo
         from
     };
     refuse_layout(source_root, to, report)?;
-    fs::create_dir_all(to).map_err(|err| IngestError::io(to, err))?;
+    dest::create_dir_all(to)?;
     if let Some(parent) = report.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| IngestError::io(parent, err))?;
+            dest::create_dir_all(parent)?;
         }
     }
 
@@ -1398,11 +1399,7 @@ fn normalize_path(path: &Path) -> Result<PathBuf, IngestError> {
 
 impl ReportFile {
     fn create(path: &Path) -> Result<Self, IngestError> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|err| IngestError::io(path, err))?;
+        let file = dest::open_new(path)?;
         Ok(Self {
             file: BufWriter::new(file),
             path: path.to_path_buf(),
