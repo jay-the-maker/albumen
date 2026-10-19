@@ -28,6 +28,7 @@ pub struct Library {
     metadata: Mutex<metadata::Cache>,
     index_dir: Option<PathBuf>,
     index: Mutex<Option<LibraryIndex>>,
+    thumbnail_dir: Option<PathBuf>,
 }
 
 impl Library {
@@ -66,6 +67,7 @@ impl Library {
             metadata: Mutex::new(metadata::Cache::default()),
             index_dir: albumen_ingest::index::default_index_dir(),
             index: Mutex::new(None),
+            thumbnail_dir: crate::thumbnail::default_thumbnail_dir(),
         })
     }
 
@@ -74,6 +76,13 @@ impl Library {
     /// refused when the index is opened.
     pub fn with_index_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.index_dir = dir;
+        self
+    }
+
+    /// Cache thumbnails in `dir` instead of the platform data directory.
+    /// `None` keeps no cache. A directory inside the library is refused.
+    pub fn with_thumbnail_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.thumbnail_dir = dir;
         self
     }
 
@@ -114,7 +123,7 @@ impl Library {
     }
 
     pub fn tool_defs(&self) -> Vec<Value> {
-        let mut tools = vec![search_def(), browse_def(), ledger_def()];
+        let mut tools = vec![search_def(), browse_def(), ledger_def(), thumbnail_def()];
         if self.enable_export {
             tools.push(export_def());
         }
@@ -130,6 +139,18 @@ impl Library {
             "search" => self.search(arguments),
             "browse" => self.browse(arguments),
             "ledger" => self.ledger(arguments),
+            "thumbnail" => {
+                let path = required_string(arguments, "path")?;
+                let size = match arguments.get("size") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => Some(
+                        value
+                            .as_u64()
+                            .ok_or_else(|| "size must be a positive integer".to_string())?,
+                    ),
+                };
+                crate::thumbnail::thumbnail(&self.root, self.thumbnail_dir.as_deref(), path, size)
+            }
             "export" => {
                 if !self.enable_export {
                     return Err(
@@ -719,6 +740,22 @@ fn search_def() -> Value {
                 "limit": {"type": "integer", "minimum": 0, "description": "Page size. Soft default is 1000, or ALBUMEN_SEARCH_PAGE. There is no maximum."},
                 "cursor": {"type": "string", "description": "Return matches strictly after this relative path."}
             },
+            "additionalProperties": false
+        }
+    })
+}
+
+fn thumbnail_def() -> Value {
+    json!({
+        "name": "thumbnail",
+        "description": "Return a small JPEG preview of one library JPEG, base64 in data_base64. The original is read, not changed. Previews are cached outside the library.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path relative to the library"},
+                "size": {"type": "integer", "minimum": 1, "description": "Longest edge in pixels. Default 256."}
+            },
+            "required": ["path"],
             "additionalProperties": false
         }
     })

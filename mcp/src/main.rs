@@ -43,6 +43,9 @@ struct Cli {
     /// Directory for the saved search index. Defaults to `ALBUMEN_INDEX_DIR`, else `index` in the platform data directory. Must be outside the library; nothing is written inside the library.
     #[arg(long)]
     index_dir: Option<PathBuf>,
+    /// Directory for cached thumbnails. Defaults to `ALBUMEN_THUMBNAIL_DIR`, else `thumbnails` in the platform data directory. Must be outside the library.
+    #[arg(long)]
+    thumbnail_dir: Option<PathBuf>,
     /// Build or bring the search index current, print one JSON line with the time it took, and exit.
     #[arg(long)]
     build_index: bool,
@@ -65,6 +68,10 @@ fn main() -> ExitCode {
     };
     let library = match cli.index_dir {
         Some(dir) => library.with_index_dir(Some(dir)),
+        None => library,
+    };
+    let library = match cli.thumbnail_dir {
+        Some(dir) => library.with_thumbnail_dir(Some(dir)),
         None => library,
     };
     if cli.build_index {
