@@ -466,11 +466,15 @@ where
     let preflight_at = crate::copy_profile::tic();
     let filename = filename.to_string();
     let root = SourceRoot::open(parent_dir(source))?;
-    root.refuse_destination(dest_dir)?;
     let dest = dest_dir.join(&filename);
-    root.refuse_destination(&dest)?;
+    root.refuse_destinations(&[dest_dir, &dest])?;
     dest::create_dir_all(dest_dir)?;
-    if let Some(existing) = crate::platform::case_collision(dest_dir, &filename)? {
+    crate::copy_profile::add_preflight(preflight_at);
+    let case_at = crate::copy_profile::tic();
+    let collision = crate::platform::case_collision(dest_dir, &filename);
+    crate::copy_profile::add_case_check(case_at);
+    let preflight_at = crate::copy_profile::tic();
+    if let Some(existing) = collision? {
         return Err(IngestError::CaseCollision {
             filename: filename.clone(),
             existing,
@@ -872,6 +876,141 @@ mod tests {
         assert!(err.to_string().contains("sources are read-only"), "{err}");
         assert!(!nested.exists());
         assert_eq!(fs::read(&source).unwrap(), b"alpha");
+    }
+
+    #[test]
+    fn a_case_collision_is_caught_after_an_earlier_file_in_the_same_import() {
+        // The destination is listed for every file. A name that appears
+        // between two files of one import is still a collision.
+        let tmp = Tmp::new();
+        let src = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src).unwrap();
+        let first = write_file(&src, "a.jpg", b"one", fixed_mtime());
+        let second = write_file(&src, "b.jpg", b"two", fixed_mtime());
+        copy_verify_file(&first, &dest_dir).unwrap();
+        fs::write(dest_dir.join("B.JPG"), b"already").unwrap();
+        let err = copy_verify_file(&second, &dest_dir).unwrap_err();
+        assert!(matches!(err, IngestError::CaseCollision { .. }), "{err}");
+        assert_eq!(fs::read(dest_dir.join("B.JPG")).unwrap(), b"already");
+        assert_eq!(fs::read(dest_dir.join("a.jpg")).unwrap(), b"one");
+    }
+
+    #[test]
+    fn every_destination_in_one_check_is_refused_on_its_own() {
+        let tmp = Tmp::new();
+        let src = tmp.path().join("library");
+        fs::create_dir(&src).unwrap();
+        let root = SourceRoot::open(&src).unwrap();
+        let outside = tmp.path().join("outside");
+        let inside = src.join("nested").join("a.jpg");
+        let (outside, inside) = (outside.as_path(), inside.as_path());
+        root.refuse_destinations(&[outside]).unwrap();
+        for dests in [[outside, inside], [inside, outside]] {
+            let err = root.refuse_destinations(&dests).unwrap_err();
+            assert!(
+                matches!(err, IngestError::DestinationInsideSource { .. }),
+                "{err}"
+            );
+        }
+        assert!(!src.join("nested").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_8_3_short_name_of_the_source_is_refused() {
+        // Under the user's temp directory, which is on the system volume,
+        // where 8.3 names are on (`RUNNER~1` on the CI runners).
+        let tmp = Tmp::new();
+        let src = tmp.path().join("library-with-a-long-name");
+        fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "a.jpg", b"alpha", fixed_mtime());
+        // Every component with a short name is shortened, so the leaf or a
+        // parent such as `RUNNER~1` makes the two spellings differ.
+        let short = albumen_win::short_path(&src).unwrap();
+        let long = src.canonicalize().unwrap();
+        let spelled = |path: &Path| {
+            let text = path.to_string_lossy().to_ascii_lowercase();
+            text.strip_prefix(r"\\?\")
+                .map(str::to_string)
+                .unwrap_or(text)
+        };
+        assert_ne!(
+            spelled(&short),
+            spelled(&long),
+            "{} has no 8.3 component, so this test cannot show the alias",
+            src.display()
+        );
+        assert!(short.to_string_lossy().contains('~'), "{}", short.display());
+        let root = SourceRoot::open(&src).unwrap();
+        for dest in [
+            short.clone(),
+            short.join("nested"),
+            short.join("nested").join("a.jpg"),
+        ] {
+            let err = root.refuse_destination(&dest).unwrap_err();
+            assert!(
+                matches!(err, IngestError::DestinationInsideSource { .. }),
+                "{}: {err}",
+                dest.display()
+            );
+        }
+        let err = copy_verify_file(&source, &short.join("nested")).unwrap_err();
+        assert!(
+            matches!(err, IngestError::DestinationInsideSource { .. }),
+            "{err}"
+        );
+        assert!(!src.join("nested").exists());
+        assert_eq!(fs::read(&source).unwrap(), b"alpha");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_8_3_alias_of_an_existing_destination_file_is_not_overwritten() {
+        // A photo named like the 8.3 alias of a file already in the
+        // destination opens that file on Windows. The import refuses it and
+        // leaves both files as they were.
+        let tmp = Tmp::new();
+        let src = tmp.path().join("library");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+        let existing = dest_dir.join("a-long-photo-name.jpeg");
+        fs::write(&existing, b"already").unwrap();
+        let short = albumen_win::short_path(&existing).unwrap();
+        let alias = short.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            alias.contains('~'),
+            "no 8.3 alias for {}",
+            existing.display()
+        );
+        let source = write_file(&src, &alias, b"alpha", fixed_mtime());
+        let err = copy_verify_file(&source, &dest_dir).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IngestError::AlreadyExists { .. } | IngestError::CaseCollision { .. }
+            ),
+            "{err}"
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"already");
+        assert_eq!(fs::read(&source).unwrap(), b"alpha");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_source_under_another_letter_case_is_refused() {
+        let tmp = Tmp::new();
+        let src = tmp.path().join("Library");
+        fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "a.jpg", b"alpha", fixed_mtime());
+        let upper = PathBuf::from(src.to_string_lossy().to_uppercase()).join("nested");
+        let err = copy_verify_file(&source, &upper).unwrap_err();
+        assert!(
+            matches!(err, IngestError::DestinationInsideSource { .. }),
+            "{err}"
+        );
+        assert!(!src.join("nested").exists());
     }
 
     #[test]
