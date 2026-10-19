@@ -9,7 +9,8 @@
 //! object and restored on read. That sibling is transport metadata, not a
 //! camera sidecar. An existing object is not overwritten.
 
-use std::fs::{self, File};
+use crate::dest;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -290,7 +291,7 @@ impl RcloneStore {
             path: path.clone(),
             armed: true,
         };
-        let mut file = File::create(&path).map_err(|err| IngestError::io(&path, err))?;
+        let mut file = dest::create_file(&path)?;
         file.write_all(text.as_bytes())
             .map_err(|err| IngestError::io(&path, err))?;
         file.sync_all().map_err(|err| IngestError::io(&path, err))?;
@@ -375,7 +376,7 @@ impl BlobStore for RcloneStore {
 
     fn get_verified(&self, filename: &str, dest_dir: &Path) -> Result<VerifiedObject, IngestError> {
         check_filename(filename)?;
-        fs::create_dir_all(dest_dir).map_err(|err| IngestError::io(dest_dir, err))?;
+        dest::create_dir_all(dest_dir)?;
         let dest = dest_dir.join(filename);
         if dest.exists() {
             return Err(IngestError::AlreadyExists {
@@ -385,38 +386,38 @@ impl BlobStore for RcloneStore {
         }
         let data = self.remote(filename);
         if let Err(err) = self.copy_to(&data, path_arg(&dest)?, filename) {
-            let _ = fs::remove_file(&dest);
+            let _ = dest::remove_file(&dest);
             return Err(err);
         }
         let record = match self.cat(&self.remote(&Self::verify_name(filename)), filename) {
             Ok(text) => text,
             Err(err) => {
-                let _ = fs::remove_file(&dest);
+                let _ = dest::remove_file(&dest);
                 return Err(err);
             }
         };
         let (nanos, expected) = match parse_verify(&record) {
             Ok(parsed) => parsed,
             Err(err) => {
-                let _ = fs::remove_file(&dest);
+                let _ = dest::remove_file(&dest);
                 return Err(IngestError::store("verify record", filename, err));
             }
         };
         let mtime = match from_unix_nanos_string(&nanos, filename) {
             Ok(mtime) => mtime,
             Err(err) => {
-                let _ = fs::remove_file(&dest);
+                let _ = dest::remove_file(&dest);
                 return Err(err);
             }
         };
         if let Err(err) = set_mtime(&dest, mtime) {
-            let _ = fs::remove_file(&dest);
+            let _ = dest::remove_file(&dest);
             return Err(err);
         }
         let expected_bytes = match parse_hex32(&expected) {
             Ok(bytes) => bytes,
             Err(err) => {
-                let _ = fs::remove_file(&dest);
+                let _ = dest::remove_file(&dest);
                 return Err(IngestError::store("verify record", filename, err));
             }
         };
@@ -514,7 +515,7 @@ fn empty_rclone_config() -> Result<&'static Path, IngestError> {
         return Ok(path);
     }
     let path = std::env::temp_dir().join(format!("albumen-rclone-{}.conf", std::process::id()));
-    fs::write(&path, b"").map_err(|err| IngestError::io(&path, err))?;
+    dest::create_file(&path)?;
     Ok(CONFIG.get_or_init(|| path))
 }
 
@@ -556,7 +557,7 @@ struct TempPath {
 impl Drop for TempPath {
     fn drop(&mut self) {
         if self.armed {
-            let _ = fs::remove_file(&self.path);
+            let _ = dest::remove_file(&self.path);
         }
     }
 }

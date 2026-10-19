@@ -4,9 +4,9 @@ Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.i
 
 The commitment is [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). Read it before changing this repository.
 
-**First principle: metadata and original quality are never lost.**
+**First principle: metadata and original quality are never lost. Sources are read-only, forever.** A user's archive may be their only copy.
 
-Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy is checked with SHA-256 and fails loudly on mismatch. The default path never removes or alters a source.
+Originals are stored bit-exact: Albumen does not recompress, transcode, or strip them. EXIF, XMP, IPTC, and GPS stay. Sidecars stay. Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are non-destructive and are stored alongside the originals. Timestamps and filenames are preserved. Every copy is checked with SHA-256 and fails loudly on mismatch. The default path never removes or alters a source. Scan, export, and upload read a source only through a read-only open. A destination inside that source is refused, and there is no override.
 
 Albumen is an open-source photo library with the feel of classic iPhoto, built to keep working when the library is hundreds of thousands of items and multiple terabytes. You bring the storage. Agents can read the library; they do not get tools that delete or rewrite originals.
 
@@ -40,8 +40,10 @@ cd albumen
 cargo build --release --locked
 export PATH="$(scripts/install-exiftool.sh):$PATH"
 ./target/release/albumen-mcp --library ./library
-./target/release/albumen export --from ./library --to /backup/library
+./target/release/albumen export --from ./library --to /backup/library --apply
 ```
+
+`albumen export` and `albumen-receive` print a plan and write nothing until `--apply` or `--execute`. `albumen scan` only reads. The safety ladder, the per-binary threat model, and how to check a release are in [docs/test-ladder.md](docs/test-ladder.md), [docs/threat-model.md](docs/threat-model.md), and [docs/release-verify.md](docs/release-verify.md).
 
 That build produces `albumen-mcp`, `albumen`, and `albumen-receive`.
 
@@ -65,7 +67,7 @@ That mount is read-only. A writable directory for opt-in export or upload is a s
 5. Read the destination back, compute SHA-256, and compare. On mismatch, delete the destination copy and return an error that names both hashes. The source is left as it was.
 6. If a later file in the asset fails, delete the destination copies this call wrote. Sources stay.
 
-`copy_verify` is the only default path. There is no move in the CLI. `copy_verify_quarantine` is an explicit per-run opt-in: after the copy verifies, it renames sources into a trash directory you pass in for that call. It never unlinks a source. If the trash directory already has that name, the source stays. Nothing in the default API or the CLI calls it.
+`copy_verify` is the only default path. There is no move in the CLI. `copy_verify_quarantine` cannot target a source: it returns an error and does not copy or rename. There is no flag that turns that off. Nothing in the CLI or the MCP server calls it.
 
 ```rust
 use albumen_ingest::{copy_verify, discover, LocalStore};

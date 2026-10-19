@@ -55,7 +55,7 @@ The bytes on disk are the library. The catalog is a cache. If the catalog is del
 7. Keep the filename exactly. A requested name that differs from the source name is an error. Overwriting an existing destination is an error.
 8. If a later file in the asset fails, delete the destination files this call already wrote. The source is unchanged.
 
-`copy_verify` is the only default path. `copy_verify_quarantine` is an explicit per-run opt-in. After the copy verifies, it renames each source into a trash directory the caller supplies for that call. It never unlinks a source. If the rename would overwrite something in the trash, the source stays. The CLI does not call it.
+`copy_verify` is the only default path. `copy_verify_quarantine` cannot target a source. It returns an error and does not copy or rename. There is no flag that turns that off. The CLI does not call it.
 
 A stored original is not unlinked after that check. The receiver refuses WebDAV `DELETE` and `MOVE`, SFTP remove and rename, and FTP `DELE`, `RMD`, and rename. If the receipt sidecar cannot be written, or the library is asked to hide a file, Albumen writes `{filename}.albumen-tombstone` and leaves the original in place. Importers and the MCP server have no remove tool. `BlobStore::delete` and an export rollback remove only a destination this call just wrote, before that call has finished.
 

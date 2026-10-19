@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::{File, FileTimes, OpenOptions};
+use std::fs::File;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,15 +29,7 @@ pub(crate) fn representable_mtime(mtime: SystemTime) -> SystemTime {
 }
 
 pub(crate) fn set_mtime(path: &Path, mtime: SystemTime) -> Result<(), IngestError> {
-    let mtime = representable_mtime(mtime);
-    let file = OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|err| IngestError::io(path, err))?;
-    file.set_times(FileTimes::new().set_modified(mtime))
-        .map_err(|err| IngestError::io(path, err))?;
-    file.sync_all().map_err(|err| IngestError::io(path, err))?;
-    Ok(())
+    crate::dest::set_mtime(path, representable_mtime(mtime))
 }
 
 pub(crate) fn mtime_of(path: &Path) -> Result<SystemTime, IngestError> {

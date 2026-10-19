@@ -108,6 +108,7 @@ fn every_default_cli_path_leaves_the_source_in_place() {
         library.as_os_str(),
         OsStr::new("--to"),
         dest.as_os_str(),
+        OsStr::new("--apply"),
     ]);
     assert!(ok, "{text}");
     let manifest = dest.join("ALBUMEN-MANIFEST.txt");

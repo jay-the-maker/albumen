@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use albumen_ingest::{copy_verify_file, sha256_hex, VerifiedObject};
+use albumen_ingest::{copy_verify_file, dest, sha256_hex, VerifiedObject};
 
 const SIDECAR_SUFFIX: &str = ".albumen.json";
 const TOMBSTONE_SUFFIX: &str = ".albumen-tombstone";
@@ -33,7 +33,7 @@ pub struct Library {
 impl Library {
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
-        fs::create_dir_all(&root)?;
+        dest::create_dir_all(&root).map_err(|err| io::Error::other(err.to_string()))?;
         if !root.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -122,7 +122,7 @@ impl Library {
         };
         if let Err(err) = self.write_sidecar(&record) {
             // The original is already copy-verified. A failed receipt is a
-            // tombstone, not an unlink.
+            // tombstone, not an unlink. The source upload is not removed.
             let _ = self.write_tombstone(&verified.filename, "receipt sidecar was not written");
             return Err(err);
         }
@@ -198,7 +198,7 @@ impl Library {
         }
         let dir = tempfile::TempDir::new().map_err(|err| err.to_string())?;
         let path = dir.path().join(&name);
-        let mut file = File::create(&path).map_err(|err| err.to_string())?;
+        let mut file = dest::create_file(&path).map_err(|err| err.to_string())?;
         file.write_all(record.json().as_bytes())
             .map_err(|err| err.to_string())?;
         file.sync_all().map_err(|err| err.to_string())?;
@@ -240,7 +240,7 @@ impl Library {
         }
         let dir = tempfile::TempDir::new().map_err(|err| err.to_string())?;
         let path = dir.path().join(&name);
-        let mut file = File::create(&path).map_err(|err| err.to_string())?;
+        let mut file = dest::create_file(&path).map_err(|err| err.to_string())?;
         file.write_all(body.as_bytes())
             .map_err(|err| err.to_string())?;
         file.sync_all().map_err(|err| err.to_string())?;
@@ -259,12 +259,12 @@ impl Library {
             .root
             .join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
         let result = (|| {
-            let mut file = File::create(&tmp).map_err(|err| err.to_string())?;
+            let mut file = dest::create_file(&tmp).map_err(|err| err.to_string())?;
             file.write_all(bytes.as_bytes())
                 .map_err(|err| err.to_string())?;
             file.sync_all().map_err(|err| err.to_string())?;
             drop(file);
-            fs::rename(&tmp, &dest).map_err(|err| err.to_string())?;
+            dest::rename(&tmp, &dest).map_err(|err| err.to_string())?;
             sync_dir(&self.root)?;
             let again = fs::read(&dest).map_err(|err| err.to_string())?;
             if again != bytes.as_bytes() {
@@ -273,7 +273,7 @@ impl Library {
             Ok(())
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&tmp);
+            let _ = dest::remove_file(&tmp);
         }
         result
     }
@@ -335,7 +335,7 @@ impl Library {
             .root
             .join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
         let result = (|| {
-            let mut file = File::create(&tmp).map_err(|err| err.to_string())?;
+            let mut file = dest::create_file(&tmp).map_err(|err| err.to_string())?;
             file.write_all(record.json().as_bytes())
                 .map_err(|err| err.to_string())?;
             file.sync_all().map_err(|err| err.to_string())?;
@@ -343,12 +343,12 @@ impl Library {
             if sidecar_rename_should_fail(&dest) {
                 return Err("injected failure before sidecar rename".to_string());
             }
-            fs::rename(&tmp, &dest).map_err(|err| err.to_string())?;
+            dest::rename(&tmp, &dest).map_err(|err| err.to_string())?;
             sync_dir(&self.root)?;
             Ok(())
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&tmp);
+            let _ = dest::remove_file(&tmp);
         }
         result
     }
@@ -805,7 +805,7 @@ impl Spool {
         validate_filename(filename)?;
         let dir = tempfile::TempDir::new().map_err(|err| err.to_string())?;
         let path = dir.path().join(filename);
-        let file = File::create(&path).map_err(|err| err.to_string())?;
+        let file = dest::create_file(&path).map_err(|err| err.to_string())?;
         Ok(Self {
             _dir: dir,
             path,
@@ -859,7 +859,7 @@ impl Spool {
             .parent()
             .ok_or_else(|| "spool has no directory".to_string())?
             .join(stored_name);
-        fs::rename(&self.path, &dest).map_err(|err| err.to_string())?;
+        dest::rename(&self.path, &dest).map_err(|err| err.to_string())?;
         self.path = dest;
         Ok(())
     }

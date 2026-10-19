@@ -13,7 +13,7 @@ With Rust 1.94 or newer already installed (CI uses 1.99.1), the path is five ste
 1. Clone the repository and change into it: `git clone https://github.com/jay-the-maker/albumen.git && cd albumen`
 2. `cargo build --release --locked`
 3. `mkdir library`
-4. Start the receiver: `ALBUMEN_RECEIVE_PASSWORD='a receiver password' ./target/release/albumen-receive --to ./library --user camera --webdav 127.0.0.1:8080`
+4. Start the receiver: `ALBUMEN_RECEIVE_PASSWORD='a receiver password' ./target/release/albumen-receive --to ./library --user camera --webdav 127.0.0.1:8080 --apply`
 5. Put one original: `curl -T ./photo.jpg -u camera:'a receiver password' http://127.0.0.1:8080/photo.jpg`
 
 The password in that command is one you chose for this receiver. It is not an Albumen account. The file on your disk stays where it was.
@@ -48,7 +48,7 @@ Phone backup is not five steps. It sends to a receiver, so the five steps above 
 
 There is no Albumen account, no signup, and no cloud login. The receiver user and password are the ones you pass on the command line.
 
-A library on disk is readable and exportable with no network and no service. `albumen export` copies it to a directory, and `albumen verify-manifest` checks that copy. Neither command takes an account. After the check, the export is ordinary files.
+A library on disk is readable and exportable with no network and no service. `albumen export --apply` copies it to a directory, and `albumen verify-manifest` checks that copy. Neither command takes an account. After the check, the export is ordinary files.
 
 ### No nags
 

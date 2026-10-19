@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod checksum;
+pub mod dest;
 mod discover;
 mod error;
 mod exiftool;
@@ -21,6 +22,7 @@ mod photos_library;
 mod rclone;
 mod s3;
 mod scan;
+mod source;
 mod store;
 mod takeout;
 
@@ -37,6 +39,7 @@ pub use local::{copy_verify_file, LocalStore};
 pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};
 pub use scan::{scan_tree, verify_scan_manifest, ScanDrift, ScanStats};
+pub use source::SourceRoot;
 pub use store::{
     copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,
     VerifiedObject,

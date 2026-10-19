@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::checksum::{copy_hashed, sha256_file, to_hex};
+use crate::dest;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
 use crate::mtime::{mtime_of, set_mtime, sync_file, to_unix_nanos_string};
+use crate::source::{parent_dir, SourceRoot};
 use crate::store::{BlobStore, VerifiedObject};
 
 /// Filesystem destination. The directory is created if it is missing.
@@ -48,10 +50,14 @@ impl BlobStore for LocalStore {
     fn delete(&self, filename: &str) -> Result<(), IngestError> {
         check_filename(filename)?;
         let path = self.root.join(filename);
-        match fs::remove_file(&path) {
+        match dest::remove_file(&path) {
             Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(IngestError::io(path, err)),
+            Err(IngestError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(err),
         }
     }
 }
@@ -66,8 +72,11 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     }
     let filename = file_name_str(source)?;
     check_filename(&filename)?;
-    fs::create_dir_all(dest_dir).map_err(|err| IngestError::io(dest_dir, err))?;
+    let root = SourceRoot::open(parent_dir(source))?;
+    root.refuse_destination(dest_dir)?;
     let dest = dest_dir.join(&filename);
+    root.refuse_destination(&dest)?;
+    dest::create_dir_all(dest_dir)?;
     if dest.exists() {
         return Err(IngestError::AlreadyExists {
             filename: filename.clone(),
@@ -80,12 +89,8 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
         path: dest.clone(),
         armed: true,
     };
-    let input = File::open(source).map_err(|err| IngestError::io(source, err))?;
-    let output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&dest)
-        .map_err(|err| IngestError::io(&dest, err))?;
+    let input = root.open_read(source)?;
+    let output = dest::open_new(&dest)?;
     let written_hash = copy_hashed(input, &output, source, &dest)?;
     sync_file(&output, &dest)?;
     drop(output);
@@ -110,7 +115,7 @@ pub(crate) fn copy_verify_reader<R: Read>(
     check_filename(&filename)?;
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| IngestError::io(parent, err))?;
+            dest::create_dir_all(parent)?;
         }
     }
     if fs::symlink_metadata(dest).is_ok() {
@@ -124,11 +129,7 @@ pub(crate) fn copy_verify_reader<R: Read>(
         path: dest.to_path_buf(),
         armed: true,
     };
-    let output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dest)
-        .map_err(|err| IngestError::io(dest, err))?;
+    let output = dest::open_new(dest)?;
     let written_hash = copy_hashed(reader, &output, source_label, dest)?;
     sync_file(&output, dest)?;
     drop(output);
@@ -146,7 +147,7 @@ pub(crate) fn finalize_verified(
 ) -> Result<VerifiedObject, IngestError> {
     let actual = sha256_file(path)?;
     if actual != *expected {
-        let removed = fs::remove_file(path).is_ok();
+        let removed = dest::remove_file(path).is_ok();
         return Err(IngestError::checksum_mismatch(
             filename,
             to_hex(expected),
@@ -160,7 +161,7 @@ pub(crate) fn finalize_verified(
     set_mtime(path, expected_mtime)?;
     let stored_mtime = mtime_of(path)?;
     if stored_mtime != expected_mtime {
-        let removed = fs::remove_file(path).is_ok();
+        let removed = dest::remove_file(path).is_ok();
         return Err(IngestError::MtimeNotPreserved {
             filename: filename.to_string(),
             expected_unix_nanos: to_unix_nanos_string(expected_mtime),
@@ -189,7 +190,7 @@ struct RemoveOnDrop {
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
         if self.armed {
-            let _ = fs::remove_file(&self.path);
+            dest::remove_file_best_effort(&self.path);
         }
     }
 }
@@ -209,7 +210,9 @@ mod tests {
     fn copy_keeps_the_finest_mtime_the_filesystem_stores() {
         let tmp = Tmp::new();
         let requested = UNIX_EPOCH + Duration::new(1_339_746_000, 123_456_789);
-        let source = write_file(tmp.path(), "tick.jpg", b"tick-bytes", requested);
+        let src_dir = tmp.path().join("src");
+        fs::create_dir(&src_dir).unwrap();
+        let source = write_file(&src_dir, "tick.jpg", b"tick-bytes", requested);
         let stored = mtime_of(&source).unwrap();
         assert_eq!(stored, crate::mtime::representable_mtime(requested));
         let dest_dir = tmp.path().join("dest");
@@ -267,11 +270,49 @@ mod tests {
     #[test]
     fn refuses_to_overwrite() {
         let tmp = Tmp::new();
-        let source = write_file(tmp.path(), "a.jpg", b"one", fixed_mtime());
+        let src = tmp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "a.jpg", b"one", fixed_mtime());
         let dest = tmp.path().join("out");
         copy_verify_file(&source, &dest).unwrap();
         let err = copy_verify_file(&source, &dest).unwrap_err();
         assert!(matches!(err, IngestError::AlreadyExists { .. }));
         assert_eq!(fs::read(dest.join("a.jpg")).unwrap(), b"one");
+    }
+
+    #[test]
+    fn copy_refuses_a_destination_inside_the_source() {
+        let tmp = Tmp::new();
+        let src = tmp.path().join("library");
+        fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "a.txt", b"alpha", fixed_mtime());
+        let nested = src.join("nested");
+        let err = copy_verify_file(&source, &nested).unwrap_err();
+        assert!(
+            matches!(err, IngestError::DestinationInsideSource { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("sources are read-only"), "{err}");
+        assert!(!nested.exists());
+        assert_eq!(fs::read(&source).unwrap(), b"alpha");
+    }
+
+    #[test]
+    fn copy_refuses_a_hardlink_of_a_source_file() {
+        let tmp = Tmp::new();
+        let src = tmp.path().join("library");
+        fs::create_dir(&src).unwrap();
+        let source = write_file(&src, "a.txt", b"alpha", fixed_mtime());
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = outside.join("a.txt");
+        fs::hard_link(&source, &link).unwrap();
+        let err = copy_verify_file(&source, &outside).unwrap_err();
+        assert!(
+            matches!(err, IngestError::DestinationInsideSource { .. }),
+            "{err}"
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"alpha");
+        assert_eq!(fs::read(&link).unwrap(), b"alpha");
     }
 }

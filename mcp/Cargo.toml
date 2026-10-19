@@ -20,3 +20,4 @@ serde_json = "1"
 [dev-dependencies]
 albumen-ingest = { path = "../ingest" }
 tempfile = "3"
+xattr = "1"

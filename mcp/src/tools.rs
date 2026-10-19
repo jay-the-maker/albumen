@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use albumen_ingest::{
     copy_verify, discover, export_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest,
-    IngestError, LocalStore, S3Config, S3Store, WalkControl,
+    IngestError, LocalStore, S3Config, S3Store, SourceRoot, WalkControl,
 };
 use serde_json::{json, Value};
 
@@ -21,11 +21,17 @@ pub struct Library {
     root: PathBuf,
     pub enable_export: bool,
     pub enable_upload: bool,
+    pub apply: bool,
     metadata: Mutex<metadata::Cache>,
 }
 
 impl Library {
-    pub fn new(root: PathBuf, enable_export: bool, enable_upload: bool) -> Result<Self, String> {
+    pub fn new(
+        root: PathBuf,
+        enable_export: bool,
+        enable_upload: bool,
+        apply: bool,
+    ) -> Result<Self, String> {
         if !root.is_dir() {
             return Err(format!("library is not a directory: {}", root.display()));
         }
@@ -33,6 +39,7 @@ impl Library {
             root,
             enable_export,
             enable_upload,
+            apply,
             metadata: Mutex::new(metadata::Cache::default()),
         })
     }
@@ -207,9 +214,6 @@ impl Library {
 
     fn export(&self, arguments: &Value) -> Result<Value, String> {
         let to = required_string(arguments, "to")?;
-        if !to.starts_with("s3://") && destination_overlaps(&self.root, Path::new(to)) {
-            return Err("refusing to export into the library".to_string());
-        }
         let manifest = match optional_string(arguments, "manifest")? {
             Some(path) => PathBuf::from(path),
             None if to.starts_with("s3://") => {
@@ -217,6 +221,14 @@ impl Library {
             }
             None => Path::new(to).join("ALBUMEN-MANIFEST.txt"),
         };
+        let source = SourceRoot::open(&self.root).map_err(show)?;
+        if !to.starts_with("s3://") {
+            source.refuse_destination(Path::new(to)).map_err(show)?;
+        }
+        source.refuse_destination(&manifest).map_err(show)?;
+        if !self.apply {
+            return export_plan(&source, to, &manifest);
+        }
         let dest = open_target(to)?;
         let entries = export_tree(&self.root, dest.as_ref()).map_err(show)?;
         if !to.starts_with("s3://") {
@@ -240,6 +252,24 @@ impl Library {
     fn upload(&self, arguments: &Value) -> Result<Value, String> {
         let path = PathBuf::from(required_string(arguments, "path")?);
         let asset = discover(&path).map_err(show)?;
+        if !self.apply {
+            let files = asset
+                .files()
+                .iter()
+                .map(|file| {
+                    file.path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>();
+            return Ok(json!({
+                "dry_run": true,
+                "into": self.root.display().to_string(),
+                "files": files,
+                "network": "none",
+            }));
+        }
         let report = copy_verify(&asset, &LocalStore::new(&self.root)).map_err(show)?;
         let files = report
             .files
@@ -259,6 +289,34 @@ impl Library {
             .collect::<Vec<_>>();
         Ok(json!({"files": files}))
     }
+}
+
+fn export_plan(root: &SourceRoot, to: &str, manifest: &Path) -> Result<Value, String> {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    walk_sorted(root.canonical(), None, &mut |relative| {
+        let full = root.canonical().join(relative);
+        bytes += root
+            .metadata_nofollow(&full)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        files += 1;
+        WalkControl::Continue
+    })
+    .map_err(show)?;
+    let network = if to.starts_with("s3://") {
+        "on --apply, connect to ALBUMEN_S3_ENDPOINT and write objects"
+    } else {
+        "none"
+    };
+    Ok(json!({
+        "dry_run": true,
+        "destination": to,
+        "manifest": manifest.display().to_string(),
+        "files": files,
+        "bytes": bytes,
+        "network": network,
+    }))
 }
 
 fn show(err: IngestError) -> String {
@@ -363,21 +421,6 @@ fn open_target(spec: &str) -> Result<Box<dyn ExportDest>, String> {
         Ok(Box::new(store))
     } else {
         Ok(Box::new(DirectoryTree::new(spec)))
-    }
-}
-
-fn destination_overlaps(library: &Path, destination: &Path) -> bool {
-    let Ok(library) = library.canonicalize() else {
-        return false;
-    };
-    let mut cursor = destination.to_path_buf();
-    loop {
-        if let Ok(canonical) = cursor.canonicalize() {
-            return canonical == library || canonical.starts_with(&library);
-        }
-        if !cursor.pop() {
-            return false;
-        }
     }
 }
 
@@ -603,7 +646,7 @@ fn browse_def() -> Value {
 fn export_def() -> Value {
     json!({
         "name": "export",
-        "description": "Copy the library, sidecars, and pairs to a directory or s3://bucket/prefix with copy_verify. Skips identical files. Never overwrites. Does not modify the library.",
+        "description": "Copy the library, sidecars, and pairs to a directory or s3://bucket/prefix with copy_verify. Skips identical files. Never overwrites. Does not modify the library. Returns a plan and writes nothing unless albumen-mcp was started with --apply or --execute.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -619,7 +662,7 @@ fn export_def() -> Value {
 fn upload_def() -> Value {
     json!({
         "name": "upload",
-        "description": "Copy a file and its discovered sidecars and pairs into the library with copy_verify. Never overwrites. Does not modify or remove the source.",
+        "description": "Copy a file and its discovered sidecars and pairs into the library with copy_verify. Never overwrites. Does not modify or remove the source. Returns a plan and writes nothing unless albumen-mcp was started with --apply or --execute.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -641,7 +684,7 @@ mod tests {
         for index in 0..25 {
             fs::write(root.path().join(format!("f{index:02}.jpg")), b"x").unwrap();
         }
-        let library = Library::new(root.path().to_path_buf(), false, false).unwrap();
+        let library = Library::new(root.path().to_path_buf(), false, false, false).unwrap();
         let seen = collect_pages(&library, "browse", 10);
         assert_eq!(seen.len(), 25, "{seen:?}");
         let mut unique = seen.clone();

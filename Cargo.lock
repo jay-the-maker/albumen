@@ -66,6 +66,7 @@ dependencies = [
  "flate2",
  "tar",
  "tempfile",
+ "xattr",
  "zip",
 ]
 
@@ -106,6 +107,7 @@ dependencies = [
  "clap",
  "serde_json",
  "tempfile",
+ "xattr",
 ]
 
 [[package]]
@@ -120,6 +122,7 @@ dependencies = [
  "russh-sftp",
  "tempfile",
  "tokio",
+ "xattr",
 ]
 
 [[package]]

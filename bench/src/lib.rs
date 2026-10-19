@@ -269,7 +269,7 @@ pub fn measure(search_items: u64, copy_files: u64, copy_bytes_each: u64) -> Resu
         items_s.push(items);
         copy_ratio.push(ratio(mb, plain)?);
 
-        let library_handle = Library::new(library.clone(), false, false)?;
+        let library_handle = Library::new(library.clone(), false, false, false)?;
         let (value, ms) = timed(|| library_handle.call("search", &search_args));
         assert_hit(&value?, "cold search")?;
         cold.push(ms);

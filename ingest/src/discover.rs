@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::IngestError;
+use crate::source::SourceRoot;
 
 /// Why a file belongs to an asset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,9 +79,10 @@ pub(crate) fn companion_names(primary: &Path) -> Result<(Vec<String>, Vec<String
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
+    let root = SourceRoot::open(parent)?;
     let mut sidecars = Vec::new();
     for name in sidecar_candidates(&file_name, stem) {
-        if let Some(actual) = on_disk_name(parent, &name) {
+        if let Some(actual) = on_disk_name(&root, parent, &name) {
             if actual != file_name {
                 sidecars.push(actual);
             }
@@ -95,7 +97,7 @@ pub(crate) fn companion_names(primary: &Path) -> Result<(Vec<String>, Vec<String
                 format!("{stem}.{ext}"),
                 format!("{stem}.{}", ext.to_ascii_uppercase()),
             ] {
-                let Some(actual) = on_disk_name(parent, &name) else {
+                let Some(actual) = on_disk_name(&root, parent, &name) else {
                     continue;
                 };
                 if actual != file_name && !sidecars.iter().any(|existing| existing == &actual) {
@@ -113,10 +115,10 @@ pub(crate) fn companion_names(primary: &Path) -> Result<(Vec<String>, Vec<String
 ///
 /// On a case-insensitive volume, probing `Photo.XMP` finds `Photo.xmp`.
 /// The returned name is the one stored on disk, so the two probes collapse.
-fn on_disk_name(parent: &Path, name: &str) -> Option<String> {
+fn on_disk_name(root: &SourceRoot, parent: &Path, name: &str) -> Option<String> {
     let path = parent.join(name);
-    let meta = fs::symlink_metadata(&path).ok()?;
-    if !meta.file_type().is_file() {
+    let meta = root.probe(&path).ok().flatten()?;
+    if !meta.is_file() {
         return None;
     }
     fs::canonicalize(&path)
@@ -153,7 +155,13 @@ fn pair_extensions(class: Class) -> Vec<&'static str> {
 /// Photo). Android motion photos are a single file; copying that file
 /// bit-exactly keeps the embedded video.
 pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
-    if !primary.is_file() {
+    let parent = match primary.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let root = SourceRoot::open(parent)?;
+    let primary_meta = root.metadata_nofollow(primary)?;
+    if !primary_meta.is_file() {
         return Err(IngestError::NotAFile(primary.to_path_buf()));
     }
     let file_name = file_name_str(primary)?;
@@ -163,10 +171,6 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
         .ok_or_else(|| IngestError::NonUtf8Filename {
             path: primary.to_path_buf(),
         })?;
-    let parent = match primary.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
     let primary_ext = extension_lower(primary);
 
     let mut files = vec![AssetFile {
@@ -181,6 +185,7 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
 
     for name in sidecar_candidates(&file_name, stem) {
         consider_companion(
+            &root,
             parent,
             &name,
             Role::Sidecar,
@@ -192,12 +197,9 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
     files[1..].sort_by(|left, right| left.path.file_name().cmp(&right.path.file_name()));
 
     let mut pairs = Vec::new();
-    for entry in fs::read_dir(parent).map_err(|err| IngestError::io(parent, err))? {
+    for entry in root.read_dir(parent)? {
         let entry = entry.map_err(|err| IngestError::io(parent, err))?;
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
         let raw_name = entry.file_name();
         let Some(name) = raw_name.to_str() else {
             if stem_matches_os(&raw_name, stem) {
@@ -211,6 +213,14 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
         if !stem_matches_os(&raw_name, stem) {
             continue;
         }
+        let meta = match root.metadata_nofollow(&path) {
+            Ok(meta) => meta,
+            Err(IngestError::Symlink(_)) => continue,
+            Err(err) => return Err(err),
+        };
+        if !meta.is_file() {
+            continue;
+        }
         if is_pair_extension(&primary_ext, &extension_lower(&path)) {
             pairs.push((name.to_string(), path));
         }
@@ -218,6 +228,7 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
     pairs.sort_by(|left, right| left.0.cmp(&right.0));
     for (name, _) in pairs {
         consider_companion(
+            &root,
             parent,
             &name,
             Role::Pair,
@@ -231,6 +242,7 @@ pub fn discover(primary: &Path) -> Result<Asset, IngestError> {
 }
 
 fn consider_companion(
+    root: &SourceRoot,
     parent: &Path,
     name: &str,
     role: Role,
@@ -238,12 +250,13 @@ fn consider_companion(
     seen_names: &mut BTreeSet<String>,
     seen_ids: &mut BTreeSet<(u64, u64)>,
 ) -> Result<(), IngestError> {
-    let Some(actual) = on_disk_name(parent, name) else {
+    let Some(actual) = on_disk_name(root, parent, name) else {
         return Ok(());
     };
     check_filename(&actual)?;
     let path = parent.join(&actual);
-    if !path.is_file() {
+    let meta = root.metadata_nofollow(&path)?;
+    if !meta.is_file() {
         return Ok(());
     }
     if let Some(id) = file_identity(&path) {
@@ -353,7 +366,10 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let meta = fs::metadata(path).ok()?;
+        let meta = fs::symlink_metadata(path).ok()?;
+        if meta.file_type().is_symlink() {
+            return None;
+        }
         Some((meta.dev(), meta.ino()))
     }
     #[cfg(not(unix))]
