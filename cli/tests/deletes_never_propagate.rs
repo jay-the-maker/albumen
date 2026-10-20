@@ -20,6 +20,7 @@ fn receivers_importers_and_mcp_have_no_unlink_of_a_stored_original() {
         "mcp/src/main.rs",
         "mcp/src/tools.rs",
         "cli/src/main.rs",
+        "cli/src/receive.rs",
         "ingest/src/takeout.rs",
     ];
     for extra in ["ingest/src/icloud.rs", "ingest/src/photos_library.rs"] {
