@@ -607,7 +607,10 @@ where
     // against it here, for this file, every time.
     let dest = dest_dir.join(&filename);
     root.refuse_destinations(&[dest_dir, &dest])?;
-    dest::create_dir_all(dest_dir)?;
+    let create_at = crate::copy_profile::tic();
+    let created = dest::create_dir_all(dest_dir);
+    crate::copy_profile::add_preflight_step(crate::copy_profile::PreflightStep::Create, create_at);
+    created?;
     crate::copy_profile::add_preflight(preflight_at);
     let case_at = crate::copy_profile::tic();
     let collision = crate::platform::case_collision(dest_dir, &filename);
