@@ -24,6 +24,23 @@ use albumen_ingest::{copy_verify_file, dest, sha256_hex, VerifiedObject};
 const SIDECAR_SUFFIX: &str = ".albumen.json";
 const TOMBSTONE_SUFFIX: &str = ".albumen-tombstone";
 
+/// Whether a stored original is hidden on this copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HideState {
+    Visible,
+    Hidden,
+}
+
+/// The plan for a hide or unhide. Building it reads only.
+#[derive(Debug)]
+pub struct HidePlan {
+    pub original: PathBuf,
+    pub tombstone: PathBuf,
+    pub current: HideState,
+    /// `false` when the original is already in the requested state.
+    pub change: bool,
+}
+
 #[derive(Debug)]
 pub struct Library {
     root: PathBuf,
@@ -272,13 +289,72 @@ impl Library {
     }
 
     fn hide_locked(&self, stored_name: &str) -> Result<(), String> {
+        self.stored_original(stored_name)?;
+        self.write_tombstone(stored_name, "hide")
+    }
+
+    /// Mark `stored_name` visible again. The tombstone is not removed: it is
+    /// replaced by an fsynced rename with `"hidden":false`, so an unhide is a
+    /// record, not a delete. Returns `false` when it was already visible, and
+    /// then writes nothing.
+    pub fn unhide(&self, stored_name: &str) -> Result<bool, String> {
+        let _guard = self
+            .commit_lock
+            .lock()
+            .map_err(|_| "receive commit lock was poisoned".to_string())?;
+        let plan = self.plan_hide(stored_name, false)?;
+        if !plan.change {
+            return Ok(false);
+        }
+        let body = format!(
+            "{{\"hidden\":false,\"reason\":\"unhide\",\"stored_name\":{}}}\n",
+            json_string(stored_name)
+        );
+        self.write_atomic(&format!("{stored_name}{TOMBSTONE_SUFFIX}"), &body)?;
+        Ok(true)
+    }
+
+    /// What a hide (`hidden = true`) or unhide would do. Reads only.
+    pub fn plan_hide(&self, stored_name: &str, hidden: bool) -> Result<HidePlan, String> {
+        let original = self.stored_original(stored_name)?;
+        let tombstone = self.root.join(format!("{stored_name}{TOMBSTONE_SUFFIX}"));
+        let current = match fs::read_to_string(&tombstone) {
+            Ok(text) if text.contains("\"hidden\":true") => HideState::Hidden,
+            Ok(_) => HideState::Visible,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => HideState::Visible,
+            Err(err) => return Err(err.to_string()),
+        };
+        let change = (current == HideState::Hidden) != hidden;
+        Ok(HidePlan {
+            original,
+            tombstone,
+            current,
+            change,
+        })
+    }
+
+    /// The stored original for `stored_name`, which must be a regular file
+    /// directly in this library's root. In a member namespace the root is
+    /// `members/<id>/`, so a name that resolves anywhere else (another
+    /// member's namespace included) is refused before any write.
+    fn stored_original(&self, stored_name: &str) -> Result<PathBuf, String> {
         check_stored_name(stored_name)?;
+        if stored_name.ends_with(TOMBSTONE_SUFFIX) || stored_name.ends_with(SIDECAR_SUFFIX) {
+            return Err(format!("{stored_name} is not a stored original"));
+        }
         let original = self.root.join(stored_name);
         let meta = fs::symlink_metadata(&original).map_err(|err| err.to_string())?;
         if !meta.is_file() {
             return Err(format!("{stored_name} is not a stored original"));
         }
-        self.write_tombstone(stored_name, "hide")
+        let root = self.root.canonicalize().map_err(|err| err.to_string())?;
+        let resolved = original.canonicalize().map_err(|err| err.to_string())?;
+        if resolved.parent() != Some(root.as_path()) {
+            return Err(format!(
+                "refusing {stored_name}: it is not in this library's own namespace"
+            ));
+        }
+        Ok(original)
     }
 
     fn write_tombstone(&self, stored_name: &str, reason: &str) -> Result<(), String> {
@@ -931,6 +1007,7 @@ mod tests {
         arm_fail_before_sidecar_rename, disambiguated, Arrival, Library, MtimeProtocol, Record,
         Spool,
     };
+    use crate::store::HideState;
     use std::path::Path;
     use std::time::UNIX_EPOCH;
 
@@ -1104,5 +1181,147 @@ mod tests {
         library.hide("IMG_0001.JPG").unwrap();
         assert_eq!(std::fs::read(&photo).unwrap(), b"original-bytes");
         assert!(library.hide("../IMG_0001.JPG").is_err());
+    }
+
+    fn snapshot(root: &Path) -> Vec<(String, Vec<u8>, std::time::SystemTime)> {
+        let mut out: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                let bytes = if meta.is_file() {
+                    std::fs::read(&path).unwrap()
+                } else {
+                    Vec::new()
+                };
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    bytes,
+                    meta.modified().unwrap(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn stored_original(root: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = root.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000))
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn hide_unhide_hide_keeps_the_original_and_never_removes_the_tombstone() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let photo = stored_original(root.path(), "IMG_0002.JPG", b"synthetic-original");
+        let inode = file_id(&photo);
+        let mtime = std::fs::metadata(&photo).unwrap().modified().unwrap();
+        let tombstone = root.path().join("IMG_0002.JPG.albumen-tombstone");
+        let unchanged = |step: &str| {
+            assert_eq!(
+                std::fs::read(&photo).unwrap(),
+                b"synthetic-original",
+                "{step}"
+            );
+            assert_eq!(
+                std::fs::metadata(&photo).unwrap().modified().unwrap(),
+                mtime,
+                "{step}"
+            );
+            assert_eq!(file_id(&photo), inode, "{step}");
+        };
+
+        assert_eq!(
+            library.plan_hide("IMG_0002.JPG", true).unwrap().current,
+            HideState::Visible
+        );
+        library.hide("IMG_0002.JPG").unwrap();
+        unchanged("hide");
+        assert!(std::fs::read_to_string(&tombstone)
+            .unwrap()
+            .contains("\"hidden\":true"));
+        let plan = library.plan_hide("IMG_0002.JPG", true).unwrap();
+        assert_eq!(plan.current, HideState::Hidden);
+        assert!(!plan.change);
+
+        assert!(library.unhide("IMG_0002.JPG").unwrap());
+        unchanged("unhide");
+        let shown = std::fs::read_to_string(&tombstone).unwrap();
+        assert!(shown.contains("\"hidden\":false"), "{shown}");
+        assert!(shown.contains("\"reason\":\"unhide\""), "{shown}");
+        assert_eq!(
+            library.plan_hide("IMG_0002.JPG", false).unwrap().current,
+            HideState::Visible
+        );
+        assert!(
+            !library.unhide("IMG_0002.JPG").unwrap(),
+            "second unhide is a no-op"
+        );
+
+        library.hide("IMG_0002.JPG").unwrap();
+        unchanged("hide again");
+        assert!(std::fs::read_to_string(&tombstone)
+            .unwrap()
+            .contains("\"hidden\":true"));
+        let names: Vec<_> = snapshot(root.path())
+            .into_iter()
+            .map(|entry| entry.0)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["IMG_0002.JPG", "IMG_0002.JPG.albumen-tombstone"]
+        );
+    }
+
+    #[test]
+    fn unhide_and_plans_write_nothing_when_there_is_nothing_to_change() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        stored_original(root.path(), "IMG_0003.JPG", b"visible");
+        let before = snapshot(root.path());
+        assert!(!library.unhide("IMG_0003.JPG").unwrap());
+        library.plan_hide("IMG_0003.JPG", true).unwrap();
+        library.plan_hide("IMG_0003.JPG", false).unwrap();
+        assert_eq!(snapshot(root.path()), before);
+    }
+
+    #[test]
+    fn hide_and_unhide_refuse_names_outside_this_library() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("library");
+        std::fs::create_dir(&root).unwrap();
+        let library = Library::open(&root).unwrap();
+        stored_original(&root, "IMG_0004.JPG", b"mine");
+        library.hide("IMG_0004.JPG").unwrap();
+        let other = parent.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let theirs = stored_original(&other, "THEIRS.JPG", b"theirs");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&theirs, root.join("LINK.JPG")).unwrap();
+        let before_root = snapshot(&root);
+        let before_other = snapshot(&other);
+        for name in [
+            "../other/THEIRS.JPG",
+            "..",
+            "",
+            "/etc/hosts",
+            "sub/IMG_0004.JPG",
+            "IMG_0004.JPG.albumen-tombstone",
+            "IMG_0004.JPG.albumen.json",
+            "MISSING.JPG",
+            "LINK.JPG",
+        ] {
+            assert!(library.hide(name).is_err(), "hide {name:?}");
+            assert!(library.unhide(name).is_err(), "unhide {name:?}");
+            assert!(library.plan_hide(name, true).is_err(), "plan {name:?}");
+        }
+        assert_eq!(snapshot(&root), before_root);
+        assert_eq!(snapshot(&other), before_other);
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"theirs");
     }
 }
