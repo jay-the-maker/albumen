@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use store::Library;
+pub use store::{HidePlan, HideState, Library};
 
 #[derive(Clone)]
 pub struct Settings {
