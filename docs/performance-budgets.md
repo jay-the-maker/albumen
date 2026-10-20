@@ -331,3 +331,5 @@ CI runs on 2026-10-19, CPU seconds per GB per 5 GB round:
 **Why cpu_percent stopped being the target.**
 - On ubuntu-24.04 the runner's disk was half as fast in the #112 run: the plain fsync copy in the same job fell from 417 to 163 MB/s. `cpu_percent` fell from 36% to 9.5%, well past the 46% drop in work per GB.
 - On macos-14 the import ran 45% faster. Work per GB fell 57%, yet `cpu_percent` stayed at 34%.
+
+**Disk-class compare in CI (report only).** Each `import throughput` leg uploads its JSON as `throughput-json-<leg>`. The next run fetches the artifact from the last successful main push run, sets `ALBUMEN_THROUGHPUT_COMPARE_JSON`, and the bench prints `import-cpu-compare`. It prints `compared=true` with the median delta only when `disk_model` and the runner image both match, and `compared=false reason=disk_class_differs_or_unknown` otherwise. The separate-volume step does not compare. No gate reads the line.
