@@ -89,9 +89,35 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
         false,
         |root, output, dest| {
             let input = root.open_read(source)?;
-            copy_hashed(input, output, source, dest)
+            if cfg!(windows) {
+                // Unbuffered destination write (#138). If the volume refuses
+                // the unbuffered open, the same aligned writes go through
+                // the buffered handle.
+                let direct = open_unbuffered(dest);
+                crate::checksum::copy_hashed_aligned(input, output, direct, source, dest)
+            } else {
+                copy_hashed(input, output, source, dest)
+            }
         },
     )
+}
+
+/// A second handle on a destination this call just created, opened with
+/// `FILE_FLAG_NO_BUFFERING`. Write-only; it never creates or truncates.
+#[cfg(windows)]
+fn open_unbuffered(dest: &Path) -> Option<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
+    fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_NO_BUFFERING)
+        .open(crate::platform::io_path(dest))
+        .ok()
+}
+
+#[cfg(not(windows))]
+fn open_unbuffered(_dest: &Path) -> Option<fs::File> {
+    None
 }
 
 /// Files at or under this size are read into memory by [`prefetch_source`].
@@ -817,6 +843,54 @@ impl Drop for RemoveOnDrop {
 
 #[cfg(test)]
 mod tests {
+
+    /// Unbuffered write (#138): an exact EOF passes the read-back; a padded
+    /// last sector (EOF not set) or a lost partial sector fails it.
+    #[test]
+    fn partial_sector_write_fails_the_readback() {
+        use crate::checksum::{copy_hashed_aligned, copy_hashed_aligned_eof, SECTOR_BYTES};
+        let dir = tempfile::tempdir().unwrap();
+        let len = 3 * SECTOR_BYTES + 1000;
+        let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8 + 1).collect();
+        let src = dir.path().join("src.bin");
+        fs::write(&src, &data).unwrap();
+        let mtime = mtime_of(&src).unwrap();
+        let write = |name: &str, set_eof: bool| {
+            let dest = dir.path().join(name);
+            let out = dest::open_new(&dest).unwrap();
+            let direct = open_unbuffered(&dest);
+            let input = fs::File::open(&src).unwrap();
+            let digest = if set_eof {
+                copy_hashed_aligned(input, &out, direct, &src, &dest).unwrap()
+            } else {
+                copy_hashed_aligned_eof(input, &out, direct, &src, &dest, false).unwrap()
+            };
+            out.sync_all().unwrap();
+            (dest, digest)
+        };
+        let (exact, digest) = write("exact.bin", true);
+        assert_eq!(fs::read(&exact).unwrap(), data);
+        finalize_verified(&exact, "exact.bin", &digest, mtime).unwrap();
+
+        let (padded, digest) = write("padded.bin", false);
+        assert_eq!(
+            fs::metadata(&padded).unwrap().len() as usize,
+            4 * SECTOR_BYTES
+        );
+        assert!(finalize_verified(&padded, "padded.bin", &digest, mtime).is_err());
+
+        let (short, digest) = write("short.bin", true);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&short)
+            .unwrap()
+            .set_len((3 * SECTOR_BYTES) as u64)
+            .unwrap();
+        assert!(finalize_verified(&short, "short.bin", &digest, mtime).is_err());
+
+        assert_eq!(fs::read(&src).unwrap(), data, "source unchanged");
+        assert_eq!(mtime_of(&src).unwrap(), mtime, "source mtime unchanged");
+    }
     use super::*;
     use crate::test_support::{write_file, Tmp};
     use std::time::{Duration, UNIX_EPOCH};

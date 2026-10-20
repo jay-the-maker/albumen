@@ -126,6 +126,92 @@ pub(crate) fn copy_hashed<R: Read, W: std::io::Write>(
     Ok(digest.into())
 }
 
+/// Sector size the unbuffered Windows write is aligned to. A multiple of
+/// 4096 is also a multiple of 512, so this covers both sector sizes.
+pub(crate) const SECTOR_BYTES: usize = 4096;
+
+/// [`copy_hashed`] for a destination opened with `FILE_FLAG_NO_BUFFERING`.
+///
+/// Each write starts on a sector boundary, from a sector-aligned buffer,
+/// and is a whole number of sectors. The hash covers only the source bytes.
+/// The last partial sector is written zero-padded, and the end of file is
+/// then set explicitly on `output` to the exact source length. `direct` is
+/// the unbuffered handle. With `None`, the same aligned writes go through
+/// `output`. The fsync and the read-back stay with the caller.
+pub(crate) fn copy_hashed_aligned<R: Read>(
+    reader: R,
+    output: &File,
+    direct: Option<File>,
+    source_path: &Path,
+    dest_path: &Path,
+) -> Result<[u8; 32], IngestError> {
+    copy_hashed_aligned_eof(reader, output, direct, source_path, dest_path, true)
+}
+
+pub(crate) fn copy_hashed_aligned_eof<R: Read>(
+    mut reader: R,
+    output: &File,
+    direct: Option<File>,
+    source_path: &Path,
+    dest_path: &Path,
+    set_eof: bool,
+) -> Result<[u8; 32], IngestError> {
+    use std::io::Write;
+    let mut hasher = Sha256::new();
+    let mut backing = vec![0u8; IO_BUF_BYTES + SECTOR_BYTES];
+    let skew = backing.as_ptr() as usize % SECTOR_BYTES;
+    let start = (SECTOR_BYTES - skew) % SECTOR_BYTES;
+    let buf = &mut backing[start..start + IO_BUF_BYTES];
+    let mut total: u64 = 0;
+    {
+        let mut writer: &File = direct.as_ref().unwrap_or(output);
+        loop {
+            // Fill the whole buffer, so only the last write is partial.
+            let mut filled = 0;
+            while filled < buf.len() {
+                let read_at = crate::copy_profile::tic();
+                let n = reader
+                    .read(&mut buf[filled..])
+                    .map_err(|err| IngestError::io(source_path, err))?;
+                crate::copy_profile::add_source_read(read_at);
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled == 0 {
+                break;
+            }
+            let hash_at = crate::copy_profile::tic();
+            hasher.update(&buf[..filled]);
+            crate::copy_profile::add_hash(hash_at);
+            let write_at = crate::copy_profile::tic();
+            let padded = filled.div_ceil(SECTOR_BYTES) * SECTOR_BYTES;
+            buf[filled..padded].fill(0);
+            writer
+                .write_all(&buf[..padded])
+                .map_err(|err| IngestError::io(dest_path, err))?;
+            crate::copy_profile::add_write(write_at);
+            total += filled as u64;
+            if filled < buf.len() {
+                break;
+            }
+        }
+    }
+    drop(direct);
+    if set_eof {
+        let write_at = crate::copy_profile::tic();
+        output
+            .set_len(total)
+            .map_err(|err| IngestError::io(dest_path, err))?;
+        crate::copy_profile::add_write(write_at);
+    }
+    let hash_at = crate::copy_profile::tic();
+    let digest = hasher.finalize();
+    crate::copy_profile::add_hash(hash_at);
+    Ok(digest.into())
+}
+
 /// Hash a destination that was just written, splitting the read from the hash.
 ///
 /// [`sha256_file`] is the untimed read-back used everywhere else. This one
