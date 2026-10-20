@@ -1,0 +1,316 @@
+{
+  "schema": 1,
+  "source": "Wikimedia Commons",
+  "note": "Pinned real-camera test corpus. Media is downloaded at CI run time by scripts/fetch-commons-corpus.py and never committed. expect.tags are ExifTool 13.59 family-0 group counts (-G0 -a -u) taken when the manifest was written.",
+  "files": [
+    {
+      "local_name": "commons-01-2023-10-15-fussball-google-pixel-frauen.jpg",
+      "title": "File:2023-10-15 Fussball, Google Pixel Frauen-Bundesliga, RB Leipzig - VfL Wolfsburg 1DX 3310.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:2023-10-15_Fussball,_Google_Pixel_Frauen-Bundesliga,_RB_Leipzig_-_VfL_Wolfsburg_1DX_3310.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/a/af/2023-10-15_Fussball%2C_Google_Pixel_Frauen-Bundesliga%2C_RB_Leipzig_-_VfL_Wolfsburg_1DX_3310.jpg",
+      "revision_timestamp": "2025-05-08T02:28:36Z",
+      "size": 2885463,
+      "sha1": "4adb0e32a936de267b28f18c5cde78f556042ee7",
+      "sha256": "50a8702800e91a2a45d3a4e7e7612b9224c5044d3c916b07760e5ac7d8c067f5",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "author": "Steffen Prößdorf",
+      "attribution": "Steffen Prößdorf, CC BY-SA 4.0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "Canon EOS-1D X Mark II",
+        "gps": true,
+        "tags": {
+          "APP14": 4,
+          "EXIF": 52,
+          "ICC_Profile": 39,
+          "IPTC": 23,
+          "Photoshop": 8,
+          "XMP": 196
+        }
+      }
+    },
+    {
+      "local_name": "commons-02-air-france-f-hepb-at-lisbon-portela-airp.jpg",
+      "title": "File:Air France F-HEPB at Lisbon Portela Airport 2025 283.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Air_France_F-HEPB_at_Lisbon_Portela_Airport_2025_283.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/d/d0/Air_France_F-HEPB_at_Lisbon_Portela_Airport_2025_283.jpg",
+      "revision_timestamp": "2025-11-19T21:50:19Z",
+      "size": 4640872,
+      "sha1": "b10a6e847003b40d1dedad6f7e86a20c13351d28",
+      "sha256": "0407b0f3e4c1eace0dc3e0665e6019140e475c7cf82d1806823b0976a7184113",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "author": "Mike Peel (www.mikepeel.net)",
+      "attribution": "Mike Peel (www.mikepeel.net), CC BY-SA 4.0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "iPhone 16 Pro",
+        "gps": true,
+        "tags": {
+          "APP14": 4,
+          "EXIF": 59,
+          "ICC_Profile": 39,
+          "IPTC": 14,
+          "Photoshop": 6,
+          "XMP": 194
+        }
+      }
+    },
+    {
+      "local_name": "commons-03-argiope-bruennichi-08oct10.jpg",
+      "title": "File:Argiope bruennichi 08Oct10.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Argiope_bruennichi_08Oct10.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/ca/Argiope_bruennichi_08Oct10.jpg",
+      "revision_timestamp": "2008-10-10T08:35:21Z",
+      "size": 2374665,
+      "sha1": "7862f1eda6efb97ecfe984dbcb963c4629e5652d",
+      "sha256": "52565193c50dabdb764137d44279307ac17fc16774dcdda41bb93821d9d89258",
+      "license": "Public domain",
+      "license_url": null,
+      "author": "池田正樹 masaki ikeda",
+      "attribution": "池田正樹 masaki ikeda, Public domain, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "FinePix S3Pro",
+        "gps": false,
+        "tags": {
+          "APP14": 4,
+          "EXIF": 29,
+          "ICC_Profile": 26,
+          "IPTC": 1,
+          "JFIF": 4,
+          "Photoshop": 29,
+          "XMP": 61
+        }
+      }
+    },
+    {
+      "local_name": "commons-04-balaclava-as-suggested-fashion-piece-for.jpg",
+      "title": "File:Balaclava as suggested fashion piece for winter 2018 - modelled by ModelTanja.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Balaclava_as_suggested_fashion_piece_for_winter_2018_-_modelled_by_ModelTanja.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/8/89/Balaclava_as_suggested_fashion_piece_for_winter_2018_-_modelled_by_ModelTanja.jpg",
+      "revision_timestamp": "2019-05-01T22:21:00Z",
+      "size": 5836752,
+      "sha1": "452d738002e71796d38fb9bd919c06f6f02f0217",
+      "sha256": "22cd53a29cbebaccb2eff20f182517a6cc6fc638bcbaf3cbdde8d0720e8730eb",
+      "license": "CC BY-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+      "author": "Tobias ToMar Maier",
+      "attribution": "Tobias ToMar Maier, CC BY-SA 3.0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "ILCE-7M3",
+        "gps": true,
+        "tags": {
+          "APP14": 4,
+          "EXIF": 53,
+          "ICC_Profile": 39,
+          "IPTC": 9,
+          "Photoshop": 7,
+          "XMP": 175
+        }
+      }
+    },
+    {
+      "local_name": "commons-05-chlosyne-lacinia.jpg",
+      "title": "File:Chlosyne lacinia.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Chlosyne_lacinia.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/4/4f/Chlosyne_lacinia.jpg",
+      "revision_timestamp": "2013-05-17T03:31:09Z",
+      "size": 1360163,
+      "sha1": "a221b3bdbd2cf81b5fe9bff34577e98fe905288d",
+      "sha256": "11c878f294e0a38c44ab800f093f625db87c20ffb909a88c1d261dc0df0ef74e",
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "Wilfredor",
+      "attribution": "Wilfredor, CC0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "NIKON D300",
+        "gps": true,
+        "tags": {
+          "APP14": 4,
+          "EXIF": 57,
+          "ICC_Profile": 39,
+          "IPTC": 8,
+          "Photoshop": 6,
+          "XMP": 117
+        }
+      }
+    },
+    {
+      "local_name": "commons-06-faroese-sheep-sumba-1.jpg",
+      "title": "File:Faroese sheep Sumba 1.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Faroese_sheep_Sumba_1.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/0e/Faroese_sheep_Sumba_1.jpg",
+      "revision_timestamp": "2019-07-25T09:32:55Z",
+      "size": 4889832,
+      "sha1": "bf0ecab818614151aa00267316f0a0d1164bb300",
+      "sha256": "39b93ceb3c489264e3363d337f3caf7ff9736b8380a9aa5bd45e8b2071a23211",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "author": "kallerna",
+      "attribution": "kallerna, CC BY-SA 4.0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "ILCE-6000",
+        "gps": false,
+        "tags": {
+          "APP14": 4,
+          "EXIF": 58,
+          "ICC_Profile": 39,
+          "IPTC": 4,
+          "Photoshop": 27,
+          "PrintIM": 4,
+          "XMP": 20
+        }
+      }
+    },
+    {
+      "local_name": "commons-07-koyaike-park-from-airplane-window.jpg",
+      "title": "File:Koyaike Park from airplane window.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Koyaike_Park_from_airplane_window.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/e/ea/Koyaike_Park_from_airplane_window.jpg",
+      "revision_timestamp": "2018-05-21T23:43:57Z",
+      "size": 1337591,
+      "sha1": "96882461873b14e35ae20cf7d30ead6793f9bbe2",
+      "sha256": "7183febad58a1d4bfc6471604617d23a7b50a8c5de6845e88a2898d0ac31c5f4",
+      "license": "CC BY-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+      "author": "Grendelkhan",
+      "attribution": "Grendelkhan, CC BY-SA 3.0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "Pixel XL",
+        "gps": true,
+        "tags": {
+          "EXIF": 65,
+          "ICC_Profile": 36,
+          "JFIF": 4,
+          "XMP": 1
+        }
+      }
+    },
+    {
+      "local_name": "commons-08-malva-moschata-mitterbach-02.jpg",
+      "title": "File:Malva moschata Mitterbach 02.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Malva_moschata_Mitterbach_02.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/7/70/Malva_moschata_Mitterbach_02.jpg",
+      "revision_timestamp": "2019-07-18T04:46:12Z",
+      "size": 5638476,
+      "sha1": "9ee525f89fe1f3fc47b6b69d39a086d7df72cc86",
+      "sha256": "a92435451c55f971ac8b078c409ca22cf089f1584f34ef115335f9f29e298919",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "author": "Uoaei1",
+      "attribution": "Uoaei1, CC BY-SA 4.0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "NIKON D7100",
+        "gps": true,
+        "tags": {
+          "APP14": 4,
+          "EXIF": 59,
+          "ICC_Profile": 39,
+          "IPTC": 14,
+          "Photoshop": 7,
+          "XMP": 154
+        }
+      }
+    },
+    {
+      "local_name": "commons-09-monte-serrat-funicular-2017-03.webm",
+      "title": "File:Monte Serrat funicular 2017 03.webm",
+      "page": "https://commons.wikimedia.org/wiki/File:Monte_Serrat_funicular_2017_03.webm",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Monte_Serrat_funicular_2017_03.webm",
+      "revision_timestamp": "2018-01-02T10:35:21Z",
+      "size": 1818250,
+      "sha1": "a8529d221566f0db46f4473c9d377884ba41e890",
+      "sha256": "340e0140f0dd32847ef4e5c348731388173f755edfa8f2542f004f3ba237b84d",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "author": "Mike Peel (www.mikepeel.net)",
+      "attribution": "Mike Peel (www.mikepeel.net), CC BY-SA 4.0, via Wikimedia Commons",
+      "kind": "video",
+      "expect": {
+        "exif_model": null,
+        "gps": false,
+        "tags": {
+          "Matroska": 27
+        }
+      }
+    },
+    {
+      "local_name": "commons-10-snag-diving.mpg",
+      "title": "File:Snag diving.mpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Snag_diving.mpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/08/Snag_diving.mpg",
+      "revision_timestamp": "2022-08-10T18:49:27Z",
+      "size": 1255424,
+      "sha1": "cfc279bc0c3b4655d005d92b90be6bf4e01ae999",
+      "sha256": "f3b401256e68499b208fd4dba919c81beac1abc6ca28b0ea0549a197fbd30455",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "author": "Sezerpal",
+      "attribution": "Sezerpal, CC BY-SA 4.0, via Wikimedia Commons",
+      "kind": "video",
+      "expect": {
+        "exif_model": null,
+        "gps": false,
+        "tags": {
+          "MPEG": 14
+        }
+      }
+    },
+    {
+      "local_name": "commons-11-un-bus-colibri-direction-miribel-a-l-int.jpg",
+      "title": "File:Un bus Colibri direction Miribel à l'intersection de la rue des Gravelles et de la rue des Andrés (Saint-Maurice-de-Beynost) en octobre 2021.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Un_bus_Colibri_direction_Miribel_%C3%A0_l%27intersection_de_la_rue_des_Gravelles_et_de_la_rue_des_Andr%C3%A9s_(Saint-Maurice-de-Beynost)_en_octobre_2021.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/f/fb/Un_bus_Colibri_direction_Miribel_%C3%A0_l%27intersection_de_la_rue_des_Gravelles_et_de_la_rue_des_Andr%C3%A9s_%28Saint-Maurice-de-Beynost%29_en_octobre_2021.jpg",
+      "revision_timestamp": "2021-10-19T08:37:58Z",
+      "size": 4495261,
+      "sha1": "60536e63fd5940d1fbb001e45c08b2dab9923040",
+      "sha256": "3c0507b7c08de34743d09ce222144b8090b31a4b49a85ba27d4e0e2860f45ea4",
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "Benoît Prieur",
+      "attribution": "Benoît Prieur, CC0, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "iPhone 13",
+        "gps": true,
+        "tags": {
+          "EXIF": 55,
+          "ICC_Profile": 26,
+          "JFIF": 4,
+          "MakerNotes": 48
+        }
+      }
+    },
+    {
+      "local_name": "commons-12-wasp-and-spider-02.jpg",
+      "title": "File:Wasp and spider 02.jpg",
+      "page": "https://commons.wikimedia.org/wiki/File:Wasp_and_spider_02.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/4/49/Wasp_and_spider_02.jpg",
+      "revision_timestamp": "2007-03-26T12:14:12Z",
+      "size": 628531,
+      "sha1": "f45e8579e0e56528cdb73f2f3642c02d12b8eb74",
+      "sha256": "9cc61f02603bb2934d23c0c52a35ad90f65b56f95c32d3bd7ecdff1bbb1ba75d",
+      "license": "CC BY 2.5",
+      "license_url": "https://creativecommons.org/licenses/by/2.5/",
+      "author": "Tony Wills",
+      "attribution": "Tony Wills, CC BY 2.5, via Wikimedia Commons",
+      "kind": "jpeg",
+      "expect": {
+        "exif_model": "C750UZ",
+        "gps": false,
+        "tags": {
+          "EXIF": 43,
+          "JFIF": 4,
+          "PrintIM": 21
+        }
+      }
+    }
+  ]
+}
