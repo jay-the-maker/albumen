@@ -192,6 +192,7 @@ fn run() -> Result<(), String> {
                 report.sha_hw,
                 report.sha256_mb_s,
             );
+            eprintln!("{}", albumen_bench::cpu_gate_line(&report));
             let (contig, any, failed, errno) = albumen_win::reserve_stats();
             eprintln!(
                 "import-preallocate leg={} f_preallocate_contig={contig} f_preallocate_any={any} f_preallocate_failed={failed} f_preallocate_last_errno={errno}",
