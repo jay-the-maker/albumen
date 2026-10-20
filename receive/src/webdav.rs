@@ -157,6 +157,16 @@ async fn handle(
         return write_status(&mut socket, 400, "bad body", &[]).await;
     }
 
+    if method == "POST" && (target == "/albumen/hide" || target == "/albumen/unhide") {
+        return hide_route(
+            &mut socket,
+            &library,
+            target == "/albumen/hide",
+            &leftover,
+            length,
+        )
+        .await;
+    }
     if method == "PUT" {
         return put(
             &mut socket,
@@ -178,7 +188,7 @@ async fn handle(
                 &mut socket,
                 200,
                 "OK",
-                &[("Allow", "OPTIONS, GET, HEAD, PUT, PROPFIND, MKCOL")],
+                &[("Allow", "OPTIONS, GET, HEAD, PUT, PROPFIND, MKCOL, POST")],
             )
             .await
         }
@@ -443,6 +453,82 @@ fn constant_eq(left: &[u8], right: &[u8]) -> bool {
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+/// Largest hide/unhide request body.
+const HIDE_BODY_MAX: u64 = 4096;
+
+/// `POST /albumen/hide` and `POST /albumen/unhide` with
+/// `{"name": "<stored name>", "apply": false}`.
+///
+/// The default is a dry run: only `"apply": true` writes. A hide writes or
+/// renames `{name}.albumen-tombstone`; an unhide rewrites it with
+/// `"hidden":false`. The original is never unlinked, renamed or rewritten.
+/// The name must be a stored original in this library's own root, which in
+/// a member namespace is `members/<id>/`; anything else is refused before
+/// any write. The reply is JSON with the plan and whether it was applied.
+async fn hide_route(
+    socket: &mut impl Stream,
+    library: &Library,
+    hidden: bool,
+    leftover: &[u8],
+    length: u64,
+) -> std::io::Result<()> {
+    if length > HIDE_BODY_MAX {
+        return write_status(socket, 413, "hide request too large", &[]).await;
+    }
+    let mut body = leftover.to_vec();
+    let mut buf = [0u8; 1024];
+    while (body.len() as u64) < length {
+        let n = socket.read(&mut buf).await?;
+        if n == 0 {
+            return write_status(socket, 400, "truncated body", &[]).await;
+        }
+        body.extend_from_slice(&buf[..n]);
+    }
+    if body.len() as u64 != length {
+        return write_status(socket, 400, "body longer than Content-Length", &[]).await;
+    }
+    let request: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return write_status(socket, 400, "body is not JSON", &[]).await,
+    };
+    let Some(name) = request["name"].as_str() else {
+        return write_status(socket, 400, "name is required", &[]).await;
+    };
+    let apply = request["apply"].as_bool() == Some(true);
+    let plan = match library.plan_hide(name, hidden) {
+        Ok(plan) => plan,
+        Err(err) => return write_status(socket, 403, &err, &[]).await,
+    };
+    let mut applied = false;
+    if apply && plan.change {
+        let result = if hidden {
+            library.hide(name)
+        } else {
+            library.unhide(name).map(|_| ())
+        };
+        if let Err(err) = result {
+            return write_status(socket, 500, &err, &[]).await;
+        }
+        applied = true;
+    }
+    let reply = serde_json::json!({
+        "name": name,
+        "hidden_before": plan.current == crate::store::HideState::Hidden,
+        "hidden": if applied { hidden } else { plan.current == crate::store::HideState::Hidden },
+        "change": plan.change,
+        "applied": applied,
+        "dry_run": !apply,
+        "original_kept": true,
+    })
+    .to_string();
+    let text = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+        reply.len()
+    );
+    socket.write_all(text.as_bytes()).await?;
+    socket.shutdown().await
 }
 
 async fn write_status(

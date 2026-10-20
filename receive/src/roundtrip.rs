@@ -1083,3 +1083,165 @@ fn parse_pasv(line: &str) -> SocketAddr {
     let port = u16::from(nums[4]) * 256 + u16::from(nums[5]);
     SocketAddr::from(([nums[0], nums[1], nums[2], nums[3]], port))
 }
+
+async fn http_hide(addr: SocketAddr, route: &str, name: &str, apply: bool) -> String {
+    let body = format!(
+        "{{\"name\":{},\"apply\":{apply}}}",
+        serde_json::Value::String(name.to_string())
+    );
+    http_exchange(addr, "POST", route, body.as_bytes(), None).await
+}
+
+fn reply_json(response: &str) -> serde_json::Value {
+    let body = response.split("\r\n\r\n").nth(1).unwrap_or("");
+    serde_json::from_str(body).unwrap_or_else(|err| panic!("{err}: {response}"))
+}
+
+#[tokio::test]
+async fn hide_route_is_dry_run_by_default_reversible_and_stays_in_the_member_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    let founder = albumen_ingest::family::create_key(&tmp.path().join("founder.key")).unwrap();
+    let library = albumen_ingest::family::init_library(&parent, &founder, "ada").unwrap();
+    let mtime = UNIX_EPOCH + Duration::new(1_400_000_222, 0);
+    let photo = tmp.path().join("founder.jpg");
+    stamp_file(&photo, b"synthetic-founder-original", mtime);
+    let added = albumen_ingest::family::add_object(&library, &founder, &photo, None).unwrap();
+    let phone = albumen_ingest::family::create_key(&tmp.path().join("phone.key")).unwrap();
+    let token = albumen_ingest::family::invite(&library, &founder, phone.member_id()).unwrap();
+    albumen_ingest::family::join(&library, &phone, &token, "phone").unwrap();
+    albumen_ingest::family::admit(&library, &founder, phone.member_id(), &token).unwrap();
+    let founder_tree = library.join("members").join(founder.member_id());
+    let founder_before = snapshot_tree(&founder_tree);
+
+    let listening = listen(
+        Settings {
+            library: library.clone(),
+            user: "camera".into(),
+            password: "roll".into(),
+            member: Some(phone.member_id().to_string()),
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let webdav = listening.webdav.unwrap();
+    let member = phone.member_id();
+    let body = b"synthetic-phone-original";
+    let source = tmp.path().join("phone.jpg");
+    fs::write(&source, body).unwrap();
+    let sha = albumen_ingest::sha256_hex(&source).unwrap();
+    http_put(
+        webdav,
+        &format!("/members/{member}/phone.jpg"),
+        body,
+        "201",
+        &sha,
+    )
+    .await;
+    let ns = library.join("members").join(member);
+    let stored = ns.join("phone.jpg");
+    let tombstone = ns.join("phone.jpg.albumen-tombstone");
+    let stored_meta = || {
+        let meta = fs::metadata(&stored).unwrap();
+        (fs::read(&stored).unwrap(), meta.modified().unwrap())
+    };
+    let original = stored_meta();
+
+    // Dry run by default: no "apply", or "apply": false, writes nothing.
+    let ns_before = snapshot_tree(&ns);
+    let raw = http_exchange(
+        webdav,
+        "POST",
+        "/albumen/hide",
+        br#"{"name":"phone.jpg"}"#,
+        None,
+    )
+    .await;
+    assert!(raw.starts_with("HTTP/1.1 200"), "{raw}");
+    let dry = reply_json(&raw);
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["applied"], false);
+    assert_eq!(dry["change"], true);
+    let dry = reply_json(&http_hide(webdav, "/albumen/hide", "phone.jpg", false).await);
+    assert_eq!(dry["applied"], false);
+    assert_eq!(snapshot_tree(&ns), ns_before, "a dry run wrote");
+
+    // Apply writes only the tombstone; the original is unchanged.
+    let hidden = reply_json(&http_hide(webdav, "/albumen/hide", "phone.jpg", true).await);
+    assert_eq!(hidden["applied"], true);
+    assert_eq!(hidden["hidden"], true);
+    assert!(fs::read_to_string(&tombstone)
+        .unwrap()
+        .contains("\"hidden\":true"));
+    assert_eq!(stored_meta(), original);
+
+    // Unhide is a record: the tombstone stays, with hidden:false.
+    let shown = reply_json(&http_hide(webdav, "/albumen/unhide", "phone.jpg", true).await);
+    assert_eq!(shown["applied"], true);
+    assert_eq!(shown["hidden"], false);
+    assert!(fs::read_to_string(&tombstone)
+        .unwrap()
+        .contains("\"hidden\":false"));
+    assert_eq!(stored_meta(), original);
+    let again = reply_json(&http_hide(webdav, "/albumen/unhide", "phone.jpg", true).await);
+    assert_eq!(again["change"], false);
+    assert_eq!(again["applied"], false);
+
+    // Nothing outside this member's namespace can be hidden.
+    let founder_name = added
+        .object_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&added.object_path, ns.join("link.jpg")).unwrap();
+    let ns_before = snapshot_tree(&ns);
+    for name in [
+        founder_name.clone(),
+        format!("../{}/objects/{founder_name}", founder.member_id()),
+        "../../genesis.json".to_string(),
+        "link.jpg".to_string(),
+    ] {
+        for route in ["/albumen/hide", "/albumen/unhide"] {
+            let reply = http_hide(webdav, route, &name, true).await;
+            assert!(reply.starts_with("HTTP/1.1 403"), "{route} {name}: {reply}");
+        }
+    }
+    assert_eq!(snapshot_tree(&ns), ns_before);
+    assert_eq!(
+        snapshot_tree(&founder_tree),
+        founder_before,
+        "founder namespace changed"
+    );
+    assert!(added.object_path.is_file());
+
+    // Removal stays refused, and the route needs the receiver password.
+    http_request(
+        webdav,
+        "DELETE",
+        &format!("/members/{member}/phone.jpg"),
+        b"",
+        "405",
+    )
+    .await;
+    let mut socket = TcpStream::connect(webdav).await.unwrap();
+    let body = br#"{"name":"phone.jpg","apply":true}"#;
+    let request = format!(
+        "POST /albumen/hide HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    socket.write_all(body).await.unwrap();
+    let mut response = Vec::new();
+    let _ = socket.read_to_end(&mut response).await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 401"));
+    assert!(fs::read_to_string(&tombstone)
+        .unwrap()
+        .contains("\"hidden\":false"));
+    assert_eq!(stored_meta(), original);
+}
