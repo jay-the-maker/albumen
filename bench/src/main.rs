@@ -183,7 +183,7 @@ fn run() -> Result<(), String> {
                 albumen_bench::cpu_rounds_line(&report.cpu_rounds),
                 report.round_order,
                 albumen_bench::CPU_SECONDS_PER_GB_TARGET,
-                albumen_bench::CPU_SECONDS_PER_GB_GATE,
+                albumen_bench::cpu_gate_for(&report.leg),
                 report.cores,
                 report.cpu_percent,
                 albumen_bench::CPU_PERCENT_TARGET,
