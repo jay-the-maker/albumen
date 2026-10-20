@@ -73,6 +73,7 @@ name = "albumen"
 version = "0.1.0"
 dependencies = [
  "albumen-ingest",
+ "albumen-receive",
  "clap",
  "flate2",
  "tar",
