@@ -59,19 +59,19 @@ pub const CPU_SECONDS_PER_GB_TARGET: f64 = 2.0;
 /// Team regression gate for normalized CPU seconds per GB imported: the
 /// import throughput job fails above it on any leg.
 pub const CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
-/// Temporary macOS best-of-6 gate while the macos-14 runners vary (see
-/// docs/performance-budgets.md). Every other leg keeps
-/// [`CPU_SECONDS_PER_GB_GATE`] for the best round and the median.
-pub const MACOS_CPU_SECONDS_PER_GB_GATE: f64 = 3.2;
+/// macOS absolute best-of-6 gate. Back at 3.0, the same as every other
+/// leg, after main ran at absolute best <= 3.0 on macos-14 four times in a
+/// row (#149). The median stays ungated on macOS; every other leg also
+/// gates the median at [`CPU_SECONDS_PER_GB_GATE`].
+pub const MACOS_CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
 /// Reference raw write rate (F_FULLFSYNC, measured in the same job) that the
 /// macOS calibrated score is scaled to, in MB/s.
 ///
 /// Rationale: 650 is the top of the 600-650 MB/s band the macos-14 leg
 /// usually lands in, so on most runners raw_mb_s <= 650 and the calibrated
-/// score is at or below the absolute one. That makes the calibration
-/// lenient on slow-disk runners, which is acceptable only because the
-/// absolute [`MACOS_CPU_SECONDS_PER_GB_GATE`] (3.2) stays gated as a
-/// backstop; the calibrated score never replaces the absolute one.
+/// score is at or below the absolute one. The calibrated score is printed
+/// and checked at 3.0 beside the absolute [`MACOS_CPU_SECONDS_PER_GB_GATE`]
+/// (now 3.0 too) and never replaces it.
 ///
 /// Data (9 macos-14 runs, image 20260828.587, 2026-10-19): absolute best
 /// 1.921-3.152 (spread 1.23) at raw 517-704 MB/s, with higher best on
@@ -80,7 +80,7 @@ pub const MACOS_CPU_SECONDS_PER_GB_GATE: f64 = 3.2;
 /// gate and calibrates to 2.507. See docs/performance-budgets.md and #149.
 pub const MACOS_RAW_REFERENCE_MB_S: f64 = 650.0;
 /// Gate for the calibrated macOS best round. The absolute best round stays
-/// gated at [`MACOS_CPU_SECONDS_PER_GB_GATE`] as a backstop.
+/// gated at [`MACOS_CPU_SECONDS_PER_GB_GATE`] as well.
 pub const MACOS_CALIBRATED_CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
 /// Reference one-thread in-memory SHA-256 rate the hash phases are
 /// normalized to, in MB/s.
@@ -343,7 +343,7 @@ pub fn cpu_spread(rounds: &[CpuRound]) -> f64 {
     (worst - cpu_best(rounds)).max(0.0)
 }
 
-/// The best-round gate for this leg: 3.2 on macOS, 3.0 on every other leg.
+/// The best-round gate for this leg: 3.0 on every leg, macOS included.
 pub fn cpu_gate_for(leg: &str) -> f64 {
     if leg.to_ascii_lowercase().contains("macos") {
         MACOS_CPU_SECONDS_PER_GB_GATE
@@ -381,7 +381,7 @@ pub fn median_is_gated(leg: &str) -> bool {
 
 /// Whether the CPU gate passes: the best round on every leg, and the median
 /// too on legs other than macOS. On macOS the calibrated best round must
-/// also be at or under 3.0, with the absolute 3.2 kept as a backstop.
+/// also be at or under 3.0, next to the absolute 3.0.
 pub fn cpu_round_gate_passes(report: &ThroughputReport) -> bool {
     cpu_gate_passes_at(cpu_best(&report.cpu_rounds), cpu_gate_for(&report.leg))
         && (!median_is_gated(&report.leg) || cpu_gate_passes(report.cpu_seconds_per_gb_median))
@@ -1599,24 +1599,24 @@ mod tests {
         for round in &mut slow.cpu_rounds {
             round.normalized = 3.001;
         }
-        // macOS gates the best round at 3.2; every other leg at 3.0.
-        assert!(throughput_problems(&slow).is_empty());
+        // The best round is gated at 3.0 on every leg, macOS included.
+        assert!(!throughput_problems(&slow).is_empty());
         slow.leg = "windows-2025".to_string();
         assert!(!throughput_problems(&slow).is_empty());
         slow.leg = "ubuntu-26.04".to_string();
         assert!(!throughput_problems(&slow).is_empty());
         slow.leg = "macos-14".to_string();
-        for round in &mut slow.cpu_rounds {
-            round.normalized = 3.201;
-        }
+        // A slow disk does not excuse the absolute gate: 3.001 at 500 MB/s
+        // calibrates to 2.308 and still fails.
+        slow.raw_mb_s = 500.0;
         assert!(!throughput_problems(&slow).is_empty());
         for round in &mut slow.cpu_rounds {
-            round.normalized = 3.2;
+            round.normalized = 3.0;
         }
-        // 3.2 at 625 MB/s calibrates to 3.077: the calibrated gate fails it.
-        assert!(!throughput_problems(&slow).is_empty());
-        slow.raw_mb_s = 600.0;
         assert!(throughput_problems(&slow).is_empty());
+        // 3.0 at 700 MB/s calibrates to 3.231: the calibrated check fails it.
+        slow.raw_mb_s = 700.0;
+        assert!(!throughput_problems(&slow).is_empty());
         let mut missed = report.clone();
         missed.source_changed = 1;
         assert!(!missed.reconciled());
@@ -1658,7 +1658,7 @@ mod tests {
         assert!(calibration_is_gated("macos-14"));
         assert!(!calibration_is_gated("ubuntu-24.04"));
         assert!(!calibration_is_gated("windows-2025"));
-        assert_eq!(MACOS_CPU_SECONDS_PER_GB_GATE, 3.2);
+        assert_eq!(MACOS_CPU_SECONDS_PER_GB_GATE, 3.0);
         assert_eq!(CPU_SECONDS_PER_GB_GATE, 3.0);
         assert_eq!(CPU_SECONDS_PER_GB_TARGET, 2.0);
     }
@@ -1685,7 +1685,7 @@ mod tests {
         assert!(median_is_gated("windows-2025"));
         assert!(median_is_gated("ubuntu-26.04"));
         assert!(!median_is_gated("macos-14"));
-        assert_eq!(cpu_gate_for("macos-14"), 3.2);
+        assert_eq!(cpu_gate_for("macos-14"), 3.0);
         assert_eq!(cpu_gate_for("windows-2025"), 3.0);
         assert_eq!(cpu_gate_for("ubuntu-24.04"), 3.0);
         assert_eq!(cpu_gate_for("ubuntu-26.04"), 3.0);
