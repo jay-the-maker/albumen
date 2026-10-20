@@ -76,6 +76,10 @@ enum Command {
         /// JSONL manifest to write. Must not resolve inside the library.
         #[arg(long)]
         manifest: PathBuf,
+        /// Ledger directory. Default: under ALBUMEN_HOME or the platform data
+        /// directory, keyed by source. Refused inside the source or its parent.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
     },
     /// Copy a Google Takeout archive or extracted folder into a library.
     ///
@@ -148,9 +152,12 @@ enum Command {
         /// Library root.
         #[arg(long)]
         library: PathBuf,
-        /// Extra connection log. The log beside the library is always read.
+        /// Extra connection log. The library's own ledger log is always read.
         #[arg(long)]
         connection_log: Option<PathBuf>,
+        /// Ledger directory used by an earlier `scan --ledger`.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
         /// Print JSON. The default is a short text account.
         #[arg(long)]
         json: bool,
@@ -204,8 +211,15 @@ fn run() -> Result<(), IngestError> {
             println!("manifest {}", manifest_path.display());
             Ok(())
         }
-        Command::Scan { dir, manifest } => {
+        Command::Scan {
+            dir,
+            manifest,
+            ledger,
+        } => {
             let source = SourceRoot::open(&dir)?;
+            if let Some(ledger) = ledger.as_deref() {
+                albumen_ingest::ledger::set_ledger_dir(ledger, source.canonical())?;
+            }
             let stats = scan_tree(&source, &manifest)?;
             println!(
                 "scanned {} files ({} bytes) into {}",
@@ -294,8 +308,12 @@ fn run() -> Result<(), IngestError> {
         Command::Ledger {
             library,
             connection_log,
+            ledger: ledger_dir,
             json,
         } => {
+            if let Some(dir) = ledger_dir.as_deref() {
+                albumen_ingest::ledger::set_ledger_dir(dir, &library)?;
+            }
             let ledger = albumen_ingest::ledger::build(&library, connection_log.as_deref())?;
             if json {
                 println!("{}", ledger.to_json()?);
