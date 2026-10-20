@@ -152,6 +152,17 @@ impl ExportDest for DirectoryTree {
     }
 }
 
+/// Suffix of a receiver hide record (`<stored name>.albumen-tombstone`).
+pub const TOMBSTONE_SUFFIX: &str = ".albumen-tombstone";
+
+/// A receiver tombstone records a hide on this copy only. It is not library
+/// content, so export does not carry it to another copy: a hide on copy A
+/// never changes what copy B holds or what B's manifest lists. The
+/// tombstone and its original both stay on A.
+pub fn is_copy_local_tombstone(relative: &str) -> bool {
+    relative.ends_with(TOMBSTONE_SUFFIX)
+}
+
 /// Copy every file under `source`, keeping sidecars and pairs together.
 ///
 /// The source tree is not modified. Relative paths are preserved.
@@ -168,7 +179,9 @@ pub fn export_tree(
     }
     let mut files = Vec::new();
     source.walk(None, &mut |relative| {
-        files.push(relative.to_string());
+        if !is_copy_local_tombstone(relative) {
+            files.push(relative.to_string());
+        }
         true
     })?;
     let assets = plan_assets(root, &files)?;
