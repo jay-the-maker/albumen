@@ -78,6 +78,15 @@ pub fn export_family(
                 count_in += 1;
                 let relative = item.relative();
                 let dest_path = join_relative(dest, &relative);
+                if let Some(byte_len) = already_exported(&dest_path, &item.expected_sha)? {
+                    count_out += 1;
+                    entries.push(ManifestEntry {
+                        relative_path: relative,
+                        sha256: item.expected_sha.clone(),
+                        byte_len,
+                    });
+                    continue;
+                }
                 let verified = copy_verify_reader(
                     &mut namespace.open_read(&item.source)?,
                     &item.source,
@@ -102,14 +111,30 @@ pub fn export_family(
             }
         }
         let provenance = provenance_bytes(&source, namespace, member, &manifest_value)?;
-        let relative = format!("members/{member}/provenance.json");
+        let relative = provenance_relative(dest, member, &provenance)?;
         let path = join_relative(dest, &relative);
-        write_bytes(&path, &provenance)?;
+        if !path.exists() {
+            write_bytes(&path, &provenance)?;
+        }
         entries.push(ManifestEntry {
-            relative_path: relative,
+            relative_path: relative.clone(),
             sha256: sha256_hex(&path)?,
             byte_len: provenance.len() as u64,
         });
+        // Earlier provenance kept by an update is still part of this copy.
+        for earlier in earlier_provenance(dest, member)? {
+            if earlier == relative {
+                continue;
+            }
+            let path = join_relative(dest, &earlier);
+            entries.push(ManifestEntry {
+                relative_path: earlier,
+                sha256: sha256_hex(&path)?,
+                byte_len: std::fs::metadata(&path)
+                    .map_err(|err| IngestError::io(&path, err))?
+                    .len(),
+            });
+        }
     }
     if count_in == 0 || count_in != count_out {
         return Err(family(format!(
@@ -278,6 +303,77 @@ fn provenance_bytes(
     });
     serde_json::to_vec_pretty(&body)
         .map_err(|err| family(format!("could not encode provenance: {err}")))
+}
+
+/// An earlier export already holds this file with the expected digest.
+///
+/// Returns its length so the update can skip it. A file with other bytes is
+/// refused: an update never overwrites, and never removes, a destination
+/// file.
+fn already_exported(path: &Path, expected_sha: &str) -> Result<Option<u64>, IngestError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(IngestError::io(path, err)),
+    };
+    if !meta.is_file() {
+        return Err(family(format!(
+            "refusing to overwrite {}: it is not a regular file",
+            path.display()
+        )));
+    }
+    let actual = sha256_hex(path)?;
+    if actual != expected_sha {
+        return Err(family(format!(
+            "refusing to overwrite existing file {} (sha256 {actual}, expected {expected_sha})",
+            path.display()
+        )));
+    }
+    Ok(Some(meta.len()))
+}
+
+/// Where this member's provenance goes.
+///
+/// The first export writes `members/<member>/provenance.json`. When an
+/// update finds different provenance there (a hide, an omit, a revoke), the
+/// new state is added beside it as `provenance-<sha256>.json`. Earlier
+/// provenance is kept, so hides and revokes reach the copy as added state,
+/// never as an overwrite or a deletion.
+fn provenance_relative(dest: &Path, member: &str, bytes: &[u8]) -> Result<String, IngestError> {
+    let first = format!("members/{member}/provenance.json");
+    let path = join_relative(dest, &first);
+    if !path.exists() {
+        return Ok(first);
+    }
+    let digest = to_hex(&sha256_slice(bytes));
+    if sha256_hex(&path)? == digest {
+        return Ok(first);
+    }
+    Ok(format!("members/{member}/provenance-{digest}.json"))
+}
+
+/// Provenance files an earlier export left for `member` in `dest`.
+fn earlier_provenance(dest: &Path, member: &str) -> Result<Vec<String>, IngestError> {
+    let dir = join_relative(dest, &format!("members/{member}"));
+    let read = match std::fs::read_dir(&dir) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(IngestError::io(&dir, err)),
+    };
+    let mut out = Vec::new();
+    for entry in read {
+        let entry = entry.map_err(|err| IngestError::io(&dir, err))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let is_provenance = name == "provenance.json"
+            || (name.starts_with("provenance-") && name.ends_with(".json"));
+        if is_provenance && entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            out.push(format!("members/{member}/{name}"));
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), IngestError> {
