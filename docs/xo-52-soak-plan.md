@@ -26,7 +26,7 @@ This is the "Done when" condition in #166. The copy-local receiver tombstone is 
 | `SOAK_APPLY` | Unset or `0`: dry runs only. `1`: each step runs as a dry run, then with `--apply`. | `1` |
 | `ALBUMEN` | Path to the `albumen` binary, if it is not on `PATH`. | `albumen` |
 
-Run the script from the repo checkout: `bash scripts/xo52-soak.sh day0`, then `bash scripts/xo52-soak.sh day N`.
+Prerequisites: an `albumen` build and `exiftool` on `PATH` (`albumen import-icloud` records key metadata with it; `scripts/install-exiftool.sh` installs the pinned version), plus `python3`. Run the script from the repo checkout: `bash scripts/xo52-soak.sh day0`, then `bash scripts/xo52-soak.sh day N`.
 
 ## Ground rules
 

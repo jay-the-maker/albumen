@@ -260,6 +260,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.2
 
+      # albumen import-icloud records key metadata with ExifTool.
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
+
       # docs/xo-52-soak-plan.md (#166): every command of the real-device
       # soak, run on synthetic files in a temp dir. No real photos.
       - name: Run the XO-52 soak script on synthetic files
