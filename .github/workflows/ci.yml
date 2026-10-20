@@ -249,6 +249,29 @@ jobs:
       - name: Prove the default library mount cannot change originals
         run: scripts/check-library-mount.sh albumen-mcp:ci
 
+  soak-plan:
+    name: soak plan self-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      # albumen import-icloud records key metadata with ExifTool.
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
+
+      # docs/xo-52-soak-plan.md (#166): every command of the real-device
+      # soak, run on synthetic files in a temp dir. No real photos.
+      - name: Run the XO-52 soak script on synthetic files
+        run: |
+          cargo build --release --locked -p albumen
+          ALBUMEN="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/release/albumen" \
+            bash scripts/xo52-soak.sh selftest
+
   bench:
     name: performance regression
     runs-on: ubuntu-24.04
