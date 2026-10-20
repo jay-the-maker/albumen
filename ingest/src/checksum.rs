@@ -13,7 +13,7 @@ use crate::error::IngestError;
 const IO_BUF_BYTES: usize = 1024 * 1024;
 
 thread_local! {
-    static SPARE: std::cell::Cell<Option<Vec<u8>>> = const { std::cell::Cell::new(None) };
+    static SPARE: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// One I/O buffer per thread, reused across files. Reads land in it and
@@ -24,7 +24,7 @@ struct IoBuf(Vec<u8>);
 impl IoBuf {
     fn take() -> Self {
         let buf = SPARE
-            .with(|spare| spare.take())
+            .with(|spare| spare.borrow_mut().pop())
             .unwrap_or_else(|| vec![0u8; IO_BUF_BYTES]);
         Self(buf)
     }
@@ -33,7 +33,15 @@ impl IoBuf {
 impl Drop for IoBuf {
     fn drop(&mut self) {
         let buf = std::mem::take(&mut self.0);
-        SPARE.with(|spare| spare.set(Some(buf)));
+        if buf.len() == IO_BUF_BYTES {
+            SPARE.with(|spare| {
+                let mut spare = spare.borrow_mut();
+                // The pipelined read-back keeps two buffers per thread.
+                if spare.len() < 2 {
+                    spare.push(buf);
+                }
+            });
+        }
     }
 }
 
@@ -148,6 +156,11 @@ pub(crate) fn sha256_readback(path: &Path) -> Result<[u8; 32], IngestError> {
         let hash_at = crate::copy_profile::tic();
         hasher.update(&buf[..n]);
         crate::copy_profile::add_readback_hash(hash_at);
+        if n == buf.len() {
+            // More than one buffer: overlap the rest of the read with the hash.
+            hasher = readback_overlapped(&mut file, path, hasher, buf)?;
+            break;
+        }
     }
     let hash_at = crate::copy_profile::tic();
     let digest = hasher.finalize();
@@ -155,9 +168,91 @@ pub(crate) fn sha256_readback(path: &Path) -> Result<[u8; 32], IngestError> {
     Ok(digest.into())
 }
 
+/// The rest of [`sha256_readback`], with the read of one buffer running
+/// while the hasher thread hashes the one before (#138, wall time only).
+///
+/// Verification is the same: the same fresh read of the stored file, in
+/// order, into the same hasher, which only this read-back ever fed. Each
+/// buffer is hashed before the reader may reuse it. The caller still
+/// compares the digest with the copy's.
+fn readback_overlapped(
+    file: &mut File,
+    path: &Path,
+    hasher: Sha256,
+    first: IoBuf,
+) -> Result<Sha256, IngestError> {
+    use std::sync::mpsc::{channel, sync_channel};
+    let profile = crate::copy_profile::thread_enabled();
+    let (full_tx, full_rx) = sync_channel::<(IoBuf, usize)>(1);
+    let (empty_tx, empty_rx) = channel::<IoBuf>();
+    std::thread::scope(|scope| {
+        let hashing = scope.spawn(move || {
+            if profile {
+                crate::copy_profile::enable_thread();
+            }
+            let mut hasher = hasher;
+            for (buf, n) in full_rx {
+                let hash_at = crate::copy_profile::tic();
+                hasher.update(&buf[..n]);
+                crate::copy_profile::add_readback_hash(hash_at);
+                if empty_tx.send(buf).is_err() {
+                    break;
+                }
+            }
+            hasher
+        });
+        let mut spare = Some(first);
+        let mut second = Some(IoBuf::take());
+        let read = (|| loop {
+            let mut buf = match spare.take().or_else(|| second.take()) {
+                Some(buf) => buf,
+                None => match empty_rx.recv() {
+                    Ok(buf) => buf,
+                    Err(_) => return Ok(()),
+                },
+            };
+            let read_at = crate::copy_profile::tic();
+            let n = file
+                .read(&mut buf)
+                .map_err(|err| IngestError::io(path, err))?;
+            crate::copy_profile::add_readback_read(read_at);
+            if n == 0 {
+                return Ok(());
+            }
+            if full_tx.send((buf, n)).is_err() {
+                return Ok(());
+            }
+        })();
+        drop(full_tx);
+        let hasher = hashing.join().expect("read-back hasher thread panicked");
+        read.map(|()| hasher)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The overlapped read-back gives the same digest as one plain pass,
+    /// across buffer-boundary sizes.
+    #[test]
+    fn overlapped_readback_matches_a_plain_hash() {
+        let tmp = crate::test_support::Tmp::new();
+        for len in [
+            0,
+            1,
+            IO_BUF_BYTES - 1,
+            IO_BUF_BYTES,
+            IO_BUF_BYTES + 1,
+            3 * IO_BUF_BYTES + 12345,
+        ] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 7 % 253) as u8).collect();
+            let path = tmp.path().join(format!("f{len}"));
+            std::fs::write(&path, &data).unwrap();
+            let plain: [u8; 32] = Sha256::digest(&data).into();
+            assert_eq!(sha256_readback(&path).unwrap(), plain, "len {len}");
+        }
+    }
 
     #[test]
     fn empty_file_is_the_well_known_sha256() {
