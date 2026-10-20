@@ -1109,6 +1109,26 @@ fn phase_cpu_ms(report: &ThroughputReport) -> Value {
     Value::Object(map)
 }
 
+/// Preflight sub-step times per round (#138), report only:
+/// `preflight-steps leg=.. cpu_ms=resolve:..,.. wall_ms=resolve:..,..`.
+pub fn preflight_steps_line(report: &ThroughputReport) -> String {
+    let rounds = report.rounds.max(1) as f64;
+    let fmt = |values: &[u64]| {
+        albumen_ingest::PREFLIGHT_STEP_NAMES
+            .iter()
+            .zip(values)
+            .map(|(name, ns)| format!("{name}:{:.0}", ns_to_ms(*ns) / rounds))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        "preflight-steps leg={} cpu_ms={} wall_ms={}",
+        report.leg,
+        fmt(&report.phases.preflight_step_cpu_ns),
+        fmt(&report.phases.preflight_step_wall_ns)
+    )
+}
+
 /// One short line per leg with the CPU gate result and the two likely causes
 /// of a flap: the raw disk rate and the CPU of both SHA-256 passes per round.
 /// Report only; the gate decision is [`cpu_round_gate_passes`].
