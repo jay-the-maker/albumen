@@ -14,10 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 albumen-ingest = { path = "../ingest" }
+albumen-receive = { path = "../receive" }
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
-albumen-receive = { path = "../receive" }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"

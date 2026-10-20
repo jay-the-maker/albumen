@@ -24,6 +24,7 @@ use albumen_ingest::{
 use clap::{Parser, Subcommand};
 
 mod family;
+mod receive;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -138,6 +139,14 @@ enum Command {
     Family {
         #[command(subcommand)]
         action: family::Command,
+    },
+    /// Hide or unhide a stored original in a receiver library, on this copy only.
+    ///
+    /// Writes only `{name}.albumen-tombstone`. Never unlinks the original or
+    /// the tombstone. Dry-run unless --apply/--execute.
+    Receive {
+        #[command(subcommand)]
+        action: receive::Command,
     },
     /// List every stored file, every analysis, and every recorded destination.
     ///
@@ -291,6 +300,7 @@ fn run() -> Result<(), IngestError> {
             Ok(())
         }
         Command::Family { action } => family::run(action),
+        Command::Receive { action } => receive::run(action),
         Command::Ledger {
             library,
             connection_log,
