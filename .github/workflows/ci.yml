@@ -485,6 +485,50 @@ jobs:
       - name: Metadata round-trip on every media file
         run: cargo test --locked -p albumen-ingest --test commons_corpus media_corpus_round_trip -- --nocapture --test-threads=1
 
+  raw-corpus:
+    name: RAW corpus round-trip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ALBUMEN_RAW_CORPUS_REQUIRED: "1"
+      ALBUMEN_S3_UNAVAILABLE: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
+
+      # The runner context is not available in job-level env, so set the path here.
+      - name: Corpus directory
+        run: echo "ALBUMEN_RAW_CORPUS=$RUNNER_TEMP/raw-corpus" >> "$GITHUB_ENV"
+
+      - name: Attribution file matches the manifest
+        run: python3 scripts/fetch-commons-corpus.py --corpus raw attribution --check
+
+      # Keyed only by the manifest hash. No restore-keys: a changed manifest
+      # always starts from an empty directory.
+      - name: Restore the RAW corpus
+        id: raw-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/raw-corpus
+          key: raw-corpus-v1-${{ hashFiles('corpus/raw.manifest.json') }}
+
+      - name: Download the pinned files (cache miss)
+        if: steps.raw-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/fetch-commons-corpus.py --corpus raw fetch "$ALBUMEN_RAW_CORPUS"
+
+      # Runs on a cache hit too. Any size, SHA-1, or SHA-256 mismatch fails the job.
+      - name: Verify size, SHA-1, and SHA-256 against the manifest
+        run: python3 scripts/fetch-commons-corpus.py --corpus raw verify "$ALBUMEN_RAW_CORPUS"
+
+      - name: Metadata round-trip on every RAW file
+        run: cargo test --locked -p albumen-ingest --test commons_corpus raw_corpus_round_trip -- --nocapture --test-threads=1
+
   zero-network:
     name: zero network (${{ matrix.label }})
     runs-on: ${{ matrix.os }}

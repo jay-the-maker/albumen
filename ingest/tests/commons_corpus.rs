@@ -7,6 +7,7 @@
 //! - `commons.manifest.json`: 12 Wikimedia Commons files (`ALBUMEN_COMMONS_CORPUS`).
 //! - `media.manifest.json`: CC0 HEIC, MOV and MP4 from the Internet Archive
 //!   (`ALBUMEN_MEDIA_CORPUS`).
+//! - `raw.manifest.json`: CC0 camera RAW from raw.pixls.us (`ALBUMEN_RAW_CORPUS`).
 //!
 //! A CI job per corpus downloads the files with `scripts/fetch-commons-corpus.py`,
 //! sets the directory variable and `<VARIABLE>_REQUIRED=1`. Elsewhere the
@@ -88,6 +89,27 @@ struct Entry {
     gps_tag: Option<Option<String>>,
     gps: bool,
     tags: BTreeMap<String, u64>,
+}
+
+const RAW: Corpus = Corpus {
+    name: "raw",
+    manifest: "raw.manifest.json",
+    attribution: "RAW_ATTRIBUTION.md",
+    dir_var: "ALBUMEN_RAW_CORPUS",
+    required_var: "ALBUMEN_RAW_CORPUS_REQUIRED",
+    files: 10,
+    total_bytes: 201_436_872,
+    licenses: &["CC0"],
+};
+
+#[test]
+fn raw_manifest_is_well_formed_and_attributed() {
+    check_manifest(&RAW);
+}
+
+#[test]
+fn raw_corpus_round_trip() {
+    run_corpus(&RAW);
 }
 
 #[test]
