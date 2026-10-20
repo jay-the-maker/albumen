@@ -44,10 +44,30 @@ fn stamp(path: &Path, bytes: &[u8]) {
         .unwrap();
 }
 
+/// Append a line to the GitHub Actions job summary when it is available,
+/// so a skip is visible on the run page and not only in captured output.
+fn record_in_job_summary(line: &str) {
+    if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
+        if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(path) {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 #[test]
 fn a_delete_or_tombstone_on_copy_a_never_reaches_the_s3_copy() {
     if std::env::var("ALBUMEN_S3_UNAVAILABLE").ok().as_deref() == Some("1") {
-        eprintln!("skipping S3: ALBUMEN_S3_UNAVAILABLE=1 (no pinned MinIO for this runner)");
+        // Linux always has a pinned MinIO, so a skip there is a failure.
+        if cfg!(target_os = "linux") {
+            panic!("MinIO is missing on Linux; the S3 two-copy test must run here");
+        }
+        let line = format!(
+            "SKIPPED two_copy_s3 on {}: ALBUMEN_S3_UNAVAILABLE=1 (no pinned MinIO for this runner)",
+            std::env::consts::OS
+        );
+        eprintln!("{line}");
+        record_in_job_summary(&line);
         return;
     }
     if std::env::var("ALBUMEN_S3_ENDPOINT").is_err() {
@@ -124,4 +144,9 @@ fn a_delete_or_tombstone_on_copy_a_never_reaches_the_s3_copy() {
     let second = fs::read_to_string(&m2).unwrap();
     assert!(!second.contains("albumen-tombstone"), "{second}");
     assert!(copy_a.join("DCIM/IMG_0002.jpg").is_file());
+    record_in_job_summary(&format!(
+        "RAN two_copy_s3 on {} against MinIO at {}",
+        std::env::consts::OS,
+        std::env::var("ALBUMEN_S3_ENDPOINT").unwrap_or_default()
+    ));
 }
