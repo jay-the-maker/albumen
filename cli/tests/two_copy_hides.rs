@@ -364,6 +364,27 @@ fn family_hide_omit_and_revoke_on_copy_a_leave_copy_b_and_a_originals() {
         "{merged}"
     );
 
+    // Every file on copy A (originals, sidecars, signed hide/omit/revoke
+    // records, manifests) with its bytes and mtime, after A's own changes
+    // and before any update. Updates only read A.
+    let a_settled = snapshot(&copy_a);
+    let a_unchanged = |label: &str| {
+        let now = snapshot(&copy_a);
+        assert_eq!(
+            now.keys().collect::<Vec<_>>(),
+            a_settled.keys().collect::<Vec<_>>(),
+            "{label}: copy A file set changed"
+        );
+        for (name, (bytes, modified)) in &a_settled {
+            let (now_bytes, now_modified) = &now[name];
+            assert!(now_bytes == bytes, "{label}: copy A {name} bytes changed");
+            assert_eq!(
+                now_modified, modified,
+                "{label}: copy A {name} mtime changed"
+            );
+        }
+    };
+
     // Update B from A (#145). The update is additive: files B already holds
     // with the right digest are skipped, nothing in B is overwritten or
     // removed, and the hides, omit and revoke arrive as added provenance
@@ -426,6 +447,7 @@ fn family_hide_omit_and_revoke_on_copy_a_leave_copy_b_and_a_originals() {
         "--apply",
     ]);
     assert_eq!(snapshot(&copy_b), b_after, "an idle update changed copy B");
+    a_unchanged("after two updates");
 
     // A copy whose original was altered is refused, not repaired over.
     let tampered = b_before
@@ -451,6 +473,7 @@ fn family_hide_omit_and_revoke_on_copy_a_leave_copy_b_and_a_originals() {
     assert!(!updated, "{text}");
     assert!(text.contains("refusing to overwrite"), "{text}");
     assert_eq!(fs::read(&tampered_path).unwrap(), bytes);
+    a_unchanged("after a refused update");
     let restore = b_before[&tampered].0.clone();
     fs::write(&tampered_path, &restore).unwrap();
     OpenOptions::new()
