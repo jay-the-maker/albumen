@@ -365,6 +365,35 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Measurement only (#138): the same import with the sources on another
+      # volume, as from a camera card or phone to a different drive. A RAM
+      # disk on macOS, tmpfs on Linux; 400 files so the sources fit in RAM.
+      # Windows has no RAM disk without a driver, so it is skipped there.
+      # The gated 1000-file run above is unchanged; this step reports only.
+      - name: Import with the sources on a separate volume (report only)
+        if: runner.os != 'Windows'
+        continue-on-error: true
+        env:
+          ALBUMEN_THROUGHPUT_LEG: ${{ matrix.label }}
+          ALBUMEN_THROUGHPUT_DIR: ${{ github.workspace }}/throughput-data
+          ALBUMEN_THROUGHPUT_FILES: "400"
+          ALBUMEN_THROUGHPUT_ALLOW_SMALL: "1"
+        run: |
+          if [ "$(uname -s)" = Darwin ]; then
+            dev="$(hdiutil attach -nomount ram://5000000 | awk '{print $1}')"
+            diskutil erasevolume APFS AlbumenSrc "$dev"
+            src=/Volumes/AlbumenSrc
+          else
+            src=/mnt/albumen-src
+            sudo mkdir -p "$src"
+            sudo mount -t tmpfs -o size=2600m tmpfs "$src"
+            sudo chown "$(id -u):$(id -g)" "$src"
+          fi
+          df -h "$src" "${GITHUB_WORKSPACE}" || true
+          mkdir -p "${ALBUMEN_THROUGHPUT_DIR}"
+          ALBUMEN_THROUGHPUT_SOURCE_DIR="$src" cargo run --release --locked -p albumen-bench -- --throughput > "${RUNNER_TEMP}/throughput-separate.json"
+          echo "---- same-volume run for comparison: import-source-volume mode=same is in the step above"
+
   sandbox:
     name: no unexpected egress
     runs-on: ubuntu-24.04
