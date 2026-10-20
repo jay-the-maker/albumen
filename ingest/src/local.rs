@@ -1422,4 +1422,87 @@ mod tests {
             b"\xff\xd8\xff\xd9"
         );
     }
+
+    fn assert_short_copy_fails_readback(reserve: usize) {
+        let tmp = Tmp::new();
+        let full = vec![0x5au8; 4096];
+        let expected: [u8; 32] = {
+            use sha2::Digest;
+            sha2::Sha256::digest(&full).into()
+        };
+        let dest = tmp.path().join("short.jpg");
+        let output = dest::open_new(&dest).unwrap();
+        reserve_space(&output, reserve);
+        use std::io::Write as _;
+        (&output).write_all(&full[..100]).unwrap();
+        output.sync_all().unwrap();
+        drop(output);
+        if !cfg!(target_vendor = "apple") {
+            // The reservation never moves the end-of-file.
+            assert_eq!(fs::metadata(&dest).unwrap().len(), 100);
+        }
+        let mtime = fs::metadata(&dest).unwrap().modified().unwrap();
+        let err = finalize_verified(&dest, "short.jpg", &expected, mtime)
+            .expect_err("a short copy must fail the read-back");
+        assert!(
+            matches!(err, IngestError::ChecksumMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_write_after_a_reservation_fails_the_readback() {
+        assert_short_copy_fails_readback(4096);
+    }
+
+    #[test]
+    fn a_short_write_after_a_refused_reservation_fails_the_readback() {
+        // Far beyond any disk: the reservation is refused and the plain
+        // write is used.
+        assert_short_copy_fails_readback(usize::MAX / 2);
+    }
+
+    #[test]
+    fn a_reserved_copy_leaves_every_source_byte_and_mtime_unchanged() {
+        let tmp = Tmp::new();
+        let source = tmp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let mut paths = Vec::new();
+        for index in 0..4u8 {
+            let bytes: Vec<u8> = (0..300_000u32).map(|i| (i as u8) ^ index).collect();
+            let name = format!("IMG_{index}.jpg");
+            write_file(&source, &name, &bytes, fixed_mtime());
+            paths.push(source.join(name));
+        }
+        let before: Vec<_> = paths
+            .iter()
+            .map(|p| {
+                (
+                    fs::read(p).unwrap(),
+                    fs::metadata(p).unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        let library = tmp.path().join("library");
+        fs::create_dir(&library).unwrap();
+        let done = std::sync::Mutex::new(Vec::new());
+        copy_verify_files_pipelined(&paths, &library, 2, |index, result| {
+            done.lock()
+                .unwrap()
+                .push((index, result.map(|o| o.byte_len)));
+            true
+        });
+        let done = done.into_inner().unwrap();
+        assert_eq!(done.len(), paths.len());
+        for (index, result) in done {
+            assert_eq!(result.unwrap(), 300_000, "file {index}");
+        }
+        for (path, (bytes, mtime)) in paths.iter().zip(&before) {
+            assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+            assert_eq!(&fs::metadata(path).unwrap().modified().unwrap(), mtime);
+            let copy = library.join(path.file_name().unwrap());
+            assert_eq!(&fs::read(&copy).unwrap(), bytes);
+            assert_eq!(fs::metadata(&copy).unwrap().len(), 300_000);
+        }
+    }
 }
