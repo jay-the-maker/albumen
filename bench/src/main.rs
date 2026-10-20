@@ -194,6 +194,22 @@ fn run() -> Result<(), String> {
             );
             eprintln!("{}", albumen_bench::cpu_gate_line(&report));
             eprintln!("{}", albumen_bench::preflight_steps_line(&report));
+            // Report only (#138): compare with a baseline run's JSON, but
+            // only within the same disk model and runner image.
+            if let Some(path) = env::var_os("ALBUMEN_THROUGHPUT_COMPARE_JSON") {
+                match std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                {
+                    Some(baseline) => {
+                        eprintln!("{}", albumen_bench::cpu_compare_line(&report, &baseline))
+                    }
+                    None => eprintln!(
+                        "import-cpu-compare leg={} compared=false reason=baseline_unreadable",
+                        report.leg
+                    ),
+                }
+            }
             eprintln!(
                 "import-source-volume leg={} mode={} import_mb_s={:.3} copy_ceiling_mb_s={:.3} import_of_copy_ceiling={:.4}",
                 report.leg,
