@@ -270,6 +270,11 @@ jobs:
     name: import throughput (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # actions: read lets the report-only compare below fetch the last main
+    # run's throughput JSON. Nothing is written.
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -331,6 +336,28 @@ jobs:
           Write-Host "disk model under ${env:GITHUB_WORKSPACE}: $model"
           "ALBUMEN_DISK_MODEL=$model" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Report only (#138): fetch the last successful main run's throughput
+      # JSON for this leg. The bench prints import-cpu-compare from it, and
+      # compares only when disk_model and runner image both match. A missing
+      # baseline leaves the variable unset; no gate reads the comparison.
+      - name: Fetch the main baseline for the disk-class compare (report only)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list -R "${GITHUB_REPOSITORY}" --workflow ci.yml --branch main --status success --event push --limit 1 --json databaseId --jq '.[0].databaseId' || true)"
+          if [ -z "${run_id}" ] || [ "${run_id}" = "null" ]; then
+            echo "no main baseline run; import-cpu-compare will not print"
+            exit 0
+          fi
+          dir="${RUNNER_TEMP}/throughput-baseline"
+          if gh run download "${run_id}" -R "${GITHUB_REPOSITORY}" -n "throughput-json-${{ matrix.label }}" -D "${dir}" && [ -s "${dir}/throughput.json" ]; then
+            echo "baseline: main run ${run_id}"
+            echo "ALBUMEN_THROUGHPUT_COMPARE_JSON=${dir}/throughput.json" >> "$GITHUB_ENV"
+          else
+            echo "main run ${run_id} has no throughput-json-${{ matrix.label }} artifact yet"
+          fi
+
       - name: Import 1000 synthetic files and compare with a raw write
         env:
           ALBUMEN_THROUGHPUT_LEG: ${{ matrix.label }}
@@ -365,6 +392,17 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # The next run's disk-class compare reads this as its baseline.
+      - name: Keep this run's throughput JSON for the next compare
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: throughput-json-${{ matrix.label }}
+          path: ${{ runner.temp }}/throughput.json
+          if-no-files-found: ignore
+          retention-days: 30
+
       # Measurement only (#138): the same import with the sources on another
       # volume, as from a camera card or phone to a different drive. A RAM
       # disk on macOS, tmpfs on Linux; 400 files so the sources fit in RAM.
@@ -391,6 +429,8 @@ jobs:
           fi
           df -h "$src" "${GITHUB_WORKSPACE}" || true
           mkdir -p "${ALBUMEN_THROUGHPUT_DIR}"
+          # The baseline is a same-volume run; do not compare this mode with it.
+          unset ALBUMEN_THROUGHPUT_COMPARE_JSON
           ALBUMEN_THROUGHPUT_SOURCE_DIR="$src" cargo run --release --locked -p albumen-bench -- --throughput > "${RUNNER_TEMP}/throughput-separate.json"
           echo "---- same-volume run for comparison: import-source-volume mode=same is in the step above"
 
