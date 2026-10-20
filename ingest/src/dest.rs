@@ -73,6 +73,14 @@ fn opened(path: &Path) -> PathBuf {
 
 pub fn create_dir_all(path: &Path) -> Result<(), IngestError> {
     let opened = opened(path);
+    // Usually the destination directory already exists. The match below
+    // then returns Ok too, but only after a create call fails and the same
+    // is_dir check runs. Checking first makes that case one lookup instead
+    // of a failed create plus a lookup (#138). A missing directory takes
+    // exactly the path it took before.
+    if opened.is_dir() {
+        return Ok(());
+    }
     match fs::create_dir_all(&opened) {
         Ok(()) => Ok(()),
         // Windows can deny CreateDirectory on a directory that already exists,
@@ -325,6 +333,23 @@ pub fn set_mtime(path: &Path, mtime: SystemTime) -> Result<(), IngestError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #138 fast path: same outcome as before for an existing directory,
+    /// a missing nested one, and a path that is a file.
+    #[test]
+    fn create_dir_all_outcomes_are_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        super::create_dir_all(dir.path()).unwrap();
+        let nested = dir.path().join("a").join("b");
+        super::create_dir_all(&nested).unwrap();
+        assert!(nested.is_dir());
+        super::create_dir_all(&nested).unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(super::create_dir_all(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"x");
+        assert!(super::create_dir_all(&file.join("under")).is_err());
+    }
     use super::{last_dir_sync, sync_dir, DirSyncKind};
     use crate::test_support::Tmp;
     use std::fs;
