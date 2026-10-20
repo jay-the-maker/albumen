@@ -22,7 +22,7 @@ Synthetic fixtures cover both imports. The throughput bench is 100,000 generated
 
 Next, after the importers above. Deletes never propagate. Library content is append-only, and a removal is a tombstone or a hide. The stored original stays. Receivers and importers leave the source and the stored library in place. How that is met, and the gaps that remain, are in [docs/architecture.md](docs/architecture.md).
 
-Test idea: a delete-propagation test. Two copies of one library. A hide or a tombstone on the first copy leaves the second copy's original bytes, name, and mtime in place. `cli/tests/deletes_never_propagate.rs` already runs in CI. It rejects an unlink in the receiver, the importers, the CLI, and the MCP server. It does not yet use two copies.
+Test: met on synthetic CI. Two-copy delete-propagation tests run on ubuntu-24.04, windows-2025 and macos-14. They cover a delete, a receiver hide or tombstone, family hides, tombstones and revokes, an additive family update, a live two-library merge, an S3 copy, and MCP. In each, the other copy keeps every original's bytes, name and mtime. `cli/tests/deletes_never_propagate.rs` still rejects an unlink in the receiver, the importers, the CLI and the MCP server. The list of tests and the two kinds of removal are in [docs/architecture.md](docs/architecture.md). Remaining: an `albumen family sync` command, and the real-device soak (XO-52).
 
 ## No account lockout
 

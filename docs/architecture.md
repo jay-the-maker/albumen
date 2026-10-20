@@ -72,7 +72,30 @@ The receiver refuses WebDAV `DELETE` and `MOVE`, SFTP remove and rename, and FTP
 
 Receivers and importers are tested. The receiver round-trip sends `DELETE` and `DELE`, and the stored file stays. The receiver store tests a hide and a failed receipt. `cli/tests/deletes_never_propagate.rs` fails the build when the receiver, either importer, the CLI, or the MCP server unlinks a stored original.
 
-Current gaps. A hide stays on the library where it was written. Nothing yet carries that hide to a second copy, and there is no sync. The delete-propagation test still to add uses two copies: a hide or a tombstone on the first, and the second copy's original bytes, name, and mtime stay. The test that runs today is a source scan, so it does not yet do that. A per-viewer hide is described in [design/family-sharing.md](design/family-sharing.md) and is not built. The library is a directory of ordinary files, so another program that can write the directory can unlink a file. Albumen's own commands leave the stored original in place.
+Two kinds of removal, and where each lives:
+
+| Surface | What "remove" does | Where it is recorded | Does it reach another copy? |
+| --- | --- | --- | --- |
+| Receiver library (`albumen-receive`, `Library::hide`) | Hide | `{stored name}.albumen-tombstone` beside the original, on this copy only | No. `albumen export` skips tombstones (#152), so copy B keeps its originals and passes its own manifest |
+| Family library, one viewer | Per-viewer hide (`albumen family hide`) | Signed `hide` record in the member's device log, merged into `hides` | Yes, as signed state: `family export` updates add it as `provenance-<sha256>.json` (#154), and live libraries merge it as a new log file |
+| Family library, owner | Tombstone (`albumen family tombstone`, #155) | Signed `tombstone` record, merged into `tombstones` | Yes, as signed state, the same way as a hide |
+| Family library, founder | Revoke (`albumen family revoke`) | Signed `revoke` record | Yes, as signed state. The revoked member's originals stay |
+| MCP server | Refused. There is no delete, remove, hide or move tool | Nothing | Nothing to carry |
+| S3 copy | Nothing is removed from the bucket by a later export | The bucket's objects and the export manifest | A local delete or tombstone never removes an object |
+
+In every row the stored original and sidecar stay, on the copy where the removal happened and on every other copy.
+
+Two-copy tests run on ubuntu-24.04, windows-2025 and macos-14 with synthetic fixtures. Each checks that the other copy keeps every original's bytes, name and mtime, and that the source copy's originals stay bit-exact:
+
+- `cli/tests/two_copy_deletes.rs`: a delete at the source or in one copy.
+- `cli/tests/two_copy_hides.rs`: a receiver hide, plus family hides, an album omit, a revoke and a signed manifest merge. The family update is additive and leaves copy A byte-identical.
+- `cli/tests/receiver_tombstones.rs`: receiver tombstones stay on copy A.
+- `cli/tests/family_tombstone.rs`: a family tombstone keeps every original.
+- `cli/tests/two_library_merge.rs`: two live family libraries merge signed records both ways.
+- `cli/tests/two_copy_s3.rs`: an S3 copy on the pinned local MinIO.
+- `mcp/tests/two_copy_mcp.rs`: MCP remove and hide calls are refused and change nothing.
+
+Current gaps. There is no `albumen family sync` command between two live family libraries yet; the merge test carries new signed files with an additive copy. A copy made with plain `albumen export` records family state but does not interpret it. The library is a directory of ordinary files, so another program that can write the directory can unlink a file. Albumen's own commands leave the stored original in place.
 
 ### No account lockout
 
