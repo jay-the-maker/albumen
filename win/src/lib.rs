@@ -214,6 +214,21 @@ pub fn raw_stream_names(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     Ok(Vec::new())
 }
 
+/// Ask macOS to read this open file without the buffer cache
+/// (`F_NOCACHE` on this descriptor only). A page-aligned read can then land
+/// in the caller's buffer without the extra kernel copy through cached
+/// pages. It is only a per-descriptor cache hint: it opens nothing for
+/// writing and changes nothing about the file, its bytes, or its mtime.
+/// Elsewhere it does nothing.
+pub fn uncached_reads(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        rustix::fs::fcntl_nocache(file, true)?;
+    }
+    let _ = file;
+    Ok(())
+}
+
 /// Ask macOS not to keep this file's written pages in the buffer cache
 /// (`F_NOCACHE`). Writes then go to the device without the extra copy into
 /// cached pages. It is only a cache hint: the bytes, the fsync, and a later

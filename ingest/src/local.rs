@@ -193,6 +193,9 @@ fn read_source_into(source: &Path, mut data: Vec<u8>) -> Result<Option<ReadSourc
     crate::copy_profile::add_preflight(preflight_at);
     data.clear();
     data.reserve(usize::try_from(len).unwrap_or(0));
+    // macOS: read around the buffer cache (a per-descriptor hint on this
+    // read-only handle). A refusal leaves the cached read.
+    let _ = albumen_win::uncached_reads(&input);
     let read_at = crate::copy_profile::tic();
     input
         .read_to_end(&mut data)
