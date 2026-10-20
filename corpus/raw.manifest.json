@@ -1,0 +1,310 @@
+{
+  "schema": 1,
+  "source": "raw.pixls.us",
+  "page_label": "raw.pixls.us camera page",
+  "note": "Pinned CC0 camera RAW test corpus. Wikimedia Commons cannot host RAW. Media is downloaded at CI run time by scripts/fetch-commons-corpus.py --corpus raw and never committed. The license is read from each file's own raw.pixls.us repository row; rows under CC BY-NC-SA were excluded. raw.pixls.us does not publish uploader names. expect.tags are ExifTool 13.59 family-0 group counts (-G0 -a -u) taken when the manifest was written.",
+  "files": [
+    {
+      "local_name": "raw-01-canon-eos-5d-mark-iii.cr2",
+      "title": "raw.pixls.us id 771: Canon - EOS 5D Mark III.CR2",
+      "page": "https://raw.pixls.us/data/Canon/EOS%205D%20Mark%20III/",
+      "url": "https://raw.pixls.us/getfile.php/771/nice/Canon%20-%20EOS%205D%20Mark%20III.CR2",
+      "revision_timestamp": "2017-01-05T00:00:00Z",
+      "size": 25965009,
+      "sha1": "62bfa2a4f6cf3d17447fe90462336b89a1774bb8",
+      "sha256": "ec069b178b9383d80c72f8cdc1b79bd54ca451e7c20793b109d8ad73bef6bdf6",
+      "publisher_checksums": {
+        "sha256": "ec069b178b9383d80c72f8cdc1b79bd54ca451e7c20793b109d8ad73bef6bdf6"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 771 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "cr2",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "Canon EOS 5D Mark III",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 70,
+          "MakerNotes": 340,
+          "XMP": 1
+        }
+      }
+    },
+    {
+      "local_name": "raw-02-canon-eos-r6.cr3",
+      "title": "raw.pixls.us id 4661: Canon - EOS R6 - 3:2.CR3",
+      "page": "https://raw.pixls.us/data/Canon/EOS%20R6/",
+      "url": "https://raw.pixls.us/getfile.php/4661/nice/Canon%20-%20EOS%20R6%20-%203%3A2.CR3",
+      "revision_timestamp": "2021-05-14T00:00:00Z",
+      "size": 9815638,
+      "sha1": "3f880209b764600fd13ad138ab73a999b9f6847b",
+      "sha256": "6156ee9cfd1a61e08719a8309095d05162891fd2adb8dd1505b31d4716dcee05",
+      "publisher_checksums": {
+        "sha256": "6156ee9cfd1a61e08719a8309095d05162891fd2adb8dd1505b31d4716dcee05"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 4661 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "cr3",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "Canon EOS R6",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 53,
+          "MakerNotes": 331,
+          "QuickTime": 59,
+          "XMP": 1
+        }
+      }
+    },
+    {
+      "local_name": "raw-03-nikon-d750.nef",
+      "title": "raw.pixls.us id 897: Nikon - D750 - 12bit 12bit compressed (Lossless) (3:2).NEF",
+      "page": "https://raw.pixls.us/data/Nikon/D750/",
+      "url": "https://raw.pixls.us/getfile.php/897/nice/Nikon%20-%20D750%20-%2012bit%2012bit%20compressed%20%28Lossless%29%20%283%3A2%29.NEF",
+      "revision_timestamp": "2017-01-15T00:00:00Z",
+      "size": 20095707,
+      "sha1": "2afa1bee41c2f57b9ec6582f69c3df25b7db9d93",
+      "sha256": "baae8dfc05a81a4a4034831a49ed99d129e797858ad876d31173a46d33b7d3ea",
+      "publisher_checksums": {
+        "sha256": "baae8dfc05a81a4a4034831a49ed99d129e797858ad876d31173a46d33b7d3ea"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 897 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "nef",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "NIKON D750",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 66,
+          "MakerNotes": 134,
+          "XMP": 2
+        }
+      }
+    },
+    {
+      "local_name": "raw-04-sony-ilce-7m3.arw",
+      "title": "raw.pixls.us id 2415: Sony - ILCE-7M3 - 12bit 12bit compressed (3:2).ARW",
+      "page": "https://raw.pixls.us/data/Sony/ILCE-7M3/",
+      "url": "https://raw.pixls.us/getfile.php/2415/nice/Sony%20-%20ILCE-7M3%20-%2012bit%2012bit%20compressed%20%283%3A2%29.ARW",
+      "revision_timestamp": "2018-03-14T00:00:00Z",
+      "size": 25631488,
+      "sha1": "274e02c422f086c03bea75f32b6c882cb9f6d987",
+      "sha256": "3ae2ff75cfa7240d0b4458f662afd28665c5fd1e83d230ac73f5ad69d3df8592",
+      "publisher_checksums": {
+        "sha256": "3ae2ff75cfa7240d0b4458f662afd28665c5fd1e83d230ac73f5ad69d3df8592"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 2415 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "arw",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "ILCE-7M3",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 93,
+          "MakerNotes": 511,
+          "PrintIM": 4,
+          "XMP": 1
+        }
+      }
+    },
+    {
+      "local_name": "raw-05-fujifilm-x-t3.raf",
+      "title": "raw.pixls.us id 2783: Fujifilm - X-T3 - 14bit 14bit compressed (3:2).RAF",
+      "page": "https://raw.pixls.us/data/Fujifilm/X-T3/",
+      "url": "https://raw.pixls.us/getfile.php/2783/nice/Fujifilm%20-%20X-T3%20-%2014bit%2014bit%20compressed%20%283%3A2%29.RAF",
+      "revision_timestamp": "2018-09-25T00:00:00Z",
+      "size": 27313968,
+      "sha1": "3bb393dcf50f81048765c951eb3dfea6f0a057a7",
+      "sha256": "95b33021160b239ceb1a09d46a1b29cb60cb7dd47581feb126b337c219091754",
+      "publisher_checksums": {
+        "sha256": "95b33021160b239ceb1a09d46a1b29cb60cb7dd47581feb126b337c219091754"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 2783 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "raf",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "X-T3",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 59,
+          "MakerNotes": 75,
+          "PrintIM": 4,
+          "RAF": 30
+        }
+      }
+    },
+    {
+      "local_name": "raw-06-olympus-e-m1markii.orf",
+      "title": "raw.pixls.us id 1993: Olympus - E-M1MarkII - 16bit (4:3).ORF",
+      "page": "https://raw.pixls.us/data/Olympus/E-M1MarkII/",
+      "url": "https://raw.pixls.us/getfile.php/1993/nice/Olympus%20-%20E-M1MarkII%20-%2016bit%20%284%3A3%29.ORF",
+      "revision_timestamp": "2017-12-01T00:00:00Z",
+      "size": 17260285,
+      "sha1": "7140ef498c453131da2e0245ac3dd249fa2421a7",
+      "sha256": "0b433019e5fa61548d7eb0eb7bb90894251542c056da72355202382696d0ceb8",
+      "publisher_checksums": {
+        "sha256": "0b433019e5fa61548d7eb0eb7bb90894251542c056da72355202382696d0ceb8"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 1993 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "orf",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "E-M1MarkII",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 52,
+          "MakerNotes": 397
+        }
+      }
+    },
+    {
+      "local_name": "raw-07-panasonic-dc-g9.rw2",
+      "title": "raw.pixls.us id 2348: Panasonic - DC-G9 - 4:3.RW2",
+      "page": "https://raw.pixls.us/data/Panasonic/DC-G9/",
+      "url": "https://raw.pixls.us/getfile.php/2348/nice/Panasonic%20-%20DC-G9%20-%204%3A3.RW2",
+      "revision_timestamp": "2018-02-22T00:00:00Z",
+      "size": 24256000,
+      "sha1": "5794153d04150f440f8b8b0b4ded397f2d2d6662",
+      "sha256": "16282357ce0143ff7d36737f82074662db7aa0790ecd309196f406baf0f586a7",
+      "publisher_checksums": {
+        "sha256": "16282357ce0143ff7d36737f82074662db7aa0790ecd309196f406baf0f586a7"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 2348 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "rw2",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "DC-G9",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 106,
+          "MakerNotes": 162,
+          "PanasonicRaw": 127,
+          "PrintIM": 15,
+          "XMP": 2
+        }
+      }
+    },
+    {
+      "local_name": "raw-08-pentax-k-1-mark-ii.pef",
+      "title": "raw.pixls.us id 7133: Pentax - K-1 Mark II - 14bit (3:2).PEF",
+      "page": "https://raw.pixls.us/data/Pentax/K-1%20Mark%20II/",
+      "url": "https://raw.pixls.us/getfile.php/7133/nice/Pentax%20-%20K-1%20Mark%20II%20-%2014bit%20%283%3A2%29.PEF",
+      "revision_timestamp": "2023-12-25T00:00:00Z",
+      "size": 23970443,
+      "sha1": "292c21340924fba690faea3fd2714feb5e47bf38",
+      "sha256": "fe2330254c5313d4dde97cbd01e2987f6f1137f1c9c687d30e951f4668979381",
+      "publisher_checksums": {
+        "sha256": "fe2330254c5313d4dde97cbd01e2987f6f1137f1c9c687d30e951f4668979381"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 7133 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "pef",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "PENTAX K-1 Mark II",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 50,
+          "MakerNotes": 217
+        }
+      }
+    },
+    {
+      "local_name": "raw-09-google-pixel-7-pro.dng",
+      "title": "raw.pixls.us id 6168: Google - Pixel 7 Pro - 16bit (4:3).dng",
+      "page": "https://raw.pixls.us/data/Google/Pixel%207%20Pro/",
+      "url": "https://raw.pixls.us/getfile.php/6168/nice/Google%20-%20Pixel%207%20Pro%20-%2016bit%20%284%3A3%29.dng",
+      "revision_timestamp": "2022-12-04T00:00:00Z",
+      "size": 12243982,
+      "sha1": "a4ec08ae281d2c75bfc4c97f99095d8d6bbbbe27",
+      "sha256": "6b921558944db5fdb4f1c63dc64919b6666ef700857a187e18500099c6e7c6c6",
+      "publisher_checksums": {
+        "sha256": "6b921558944db5fdb4f1c63dc64919b6666ef700857a187e18500099c6e7c6c6"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 6168 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "dng",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "Pixel 7 Pro",
+        "gps_tag": "GPS:GPSLatitude",
+        "gps": true,
+        "tags": {
+          "EXIF": 99,
+          "MakerNotes": 4
+        }
+      }
+    },
+    {
+      "local_name": "raw-10-dji-fc4382.dng",
+      "title": "raw.pixls.us id 7823: DJI - FC4382 - 16bit (4:3).DNG",
+      "page": "https://raw.pixls.us/data/DJI/FC4382/",
+      "url": "https://raw.pixls.us/getfile.php/7823/nice/DJI%20-%20FC4382%20-%2016bit%20%284%3A3%29.DNG",
+      "revision_timestamp": "2025-05-07T00:00:00Z",
+      "size": 14884352,
+      "sha1": "f95597e611c64c7a0eb95c00f1b07e64f22589a7",
+      "sha256": "f33ddaf2a7fa70b395abced251faccea11100d2ab7e54ae0a6adbff043d72027",
+      "publisher_checksums": {
+        "sha256": "f33ddaf2a7fa70b395abced251faccea11100d2ab7e54ae0a6adbff043d72027"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "raw.pixls.us repository row id 7823 (json/getrepository.php?set=all) links https://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not published by raw.pixls.us (anonymous public-domain upload)",
+      "attribution": "raw.pixls.us, CC0",
+      "kind": "dng",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "FC4382",
+        "gps_tag": "XMP-drone-dji:GPSLatitude",
+        "gps": true,
+        "tags": {
+          "EXIF": 109,
+          "MakerNotes": 14,
+          "XMP": 35
+        }
+      }
+    }
+  ]
+}
