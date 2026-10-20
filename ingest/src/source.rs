@@ -343,17 +343,30 @@ fn destination_aliases(
     lookups: &Lookups,
     walked: &mut Option<(DestIds, bool)>,
 ) -> Result<bool, IngestError> {
-    let resolved = resolve_dest(dest)?;
-    if path_is_inside(&root.canonical, &resolved, lookups) {
+    use crate::copy_profile::{add_preflight_step, tic, PreflightStep};
+    let at = tic();
+    let resolved = resolve_dest(dest);
+    add_preflight_step(PreflightStep::Resolve, at);
+    let resolved = resolved?;
+    let at = tic();
+    let inside = path_is_inside(&root.canonical, &resolved, lookups);
+    add_preflight_step(PreflightStep::Ancestors, at);
+    if inside {
         return Ok(true);
     }
-    let ids = dest_ids(root, dest, lookups)?;
+    let at = tic();
+    let ids = dest_ids(root, dest, lookups);
+    add_preflight_step(PreflightStep::DestIds, at);
+    let ids = ids?;
     if let Some((seen, found)) = walked.as_ref() {
         if *seen == ids {
             return Ok(*found);
         }
     }
-    let found = hardlink_aliases(root, &ids)?;
+    let at = tic();
+    let found = hardlink_aliases(root, &ids);
+    add_preflight_step(PreflightStep::SourceWalk, at);
+    let found = found?;
     *walked = Some((ids, found));
     Ok(found)
 }

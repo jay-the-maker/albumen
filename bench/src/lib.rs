@@ -50,8 +50,8 @@ pub use throughput::{
     cpu_best, cpu_gate_for, cpu_gate_line, cpu_gate_passes, cpu_gate_passes_at,
     cpu_round_gate_passes, cpu_rounds_line, cpu_scorecard, cpu_spread, measure_throughput,
     median_is_gated, normalized_cpu_seconds_per_gb, optional_rate, phase_cpu_line,
-    phase_share_line, ratio_passes, throughput_problems, CpuRound, ThroughputReport,
-    CPU_PERCENT_TARGET, CPU_SECONDS_PER_GB_GATE, CPU_SECONDS_PER_GB_TARGET,
+    phase_share_line, preflight_steps_line, ratio_passes, throughput_problems, CpuRound,
+    ThroughputReport, CPU_PERCENT_TARGET, CPU_SECONDS_PER_GB_GATE, CPU_SECONDS_PER_GB_TARGET,
     DEFAULT_THROUGHPUT_BYTES, DEFAULT_THROUGHPUT_FILES, MACOS_CPU_SECONDS_PER_GB_GATE,
     MIN_CPU_ROUNDS, SHA256_REFERENCE_MB_S, THROUGHPUT_RATIO_FLOOR,
 };
