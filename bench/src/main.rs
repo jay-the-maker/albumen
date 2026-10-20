@@ -194,6 +194,18 @@ fn run() -> Result<(), String> {
             );
             eprintln!("{}", albumen_bench::cpu_gate_line(&report));
             eprintln!("{}", albumen_bench::preflight_steps_line(&report));
+            eprintln!(
+                "import-source-volume leg={} mode={} import_mb_s={:.3} copy_ceiling_mb_s={:.3} import_of_copy_ceiling={:.4}",
+                report.leg,
+                if env::var_os("ALBUMEN_THROUGHPUT_SOURCE_DIR").is_some() {
+                    "separate"
+                } else {
+                    "same"
+                },
+                report.import_mb_s,
+                report.copy_ceiling_mb_s,
+                report.import_mb_s / report.copy_ceiling_mb_s.max(1e-9),
+            );
             let (contig, any, failed, errno) = albumen_win::reserve_stats();
             eprintln!(
                 "import-preallocate leg={} f_preallocate_contig={contig} f_preallocate_any={any} f_preallocate_failed={failed} f_preallocate_last_errno={errno}",

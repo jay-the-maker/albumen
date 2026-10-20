@@ -528,7 +528,17 @@ pub fn measure_throughput(
         );
     }
     let root = TempDir::new()?;
-    let sources = root.path.join("sources");
+    // `ALBUMEN_THROUGHPUT_SOURCE_DIR` puts the sources on another volume
+    // (CI: a RAM disk or tmpfs), as when importing from a camera card or a
+    // phone to a different drive. Destination, raw and ceiling samples stay
+    // under `ALBUMEN_THROUGHPUT_DIR`. Harness only (#138).
+    let source_root = match std::env::var_os("ALBUMEN_THROUGHPUT_SOURCE_DIR") {
+        Some(parent) => Some(TempDir::new_in(PathBuf::from(parent))?),
+        None => None,
+    };
+    let sources = source_root
+        .as_ref()
+        .map_or_else(|| root.path.join("sources"), |src| src.path.join("sources"));
     let dest = root.path.join("dest");
     fs::create_dir_all(&sources).map_err(|err| format!("create sources: {err}"))?;
     let (snaps, _unlock) = generate(&sources, files, bytes_each)?;
@@ -1466,13 +1476,17 @@ struct TempDir {
 
 impl TempDir {
     fn new() -> Result<Self, String> {
+        let parent = std::env::var_os("ALBUMEN_THROUGHPUT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        Self::new_in(parent)
+    }
+
+    fn new_in(parent: PathBuf) -> Result<Self, String> {
         let nanos = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|err| err.to_string())?
             .as_nanos();
-        let parent = std::env::var_os("ALBUMEN_THROUGHPUT_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
         let path = parent.join(format!("albumen-throughput-{nanos}-{}", std::process::id()));
         fs::create_dir_all(&path).map_err(|err| format!("create temp dir: {err}"))?;
         Ok(Self { path })
