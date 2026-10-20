@@ -63,9 +63,21 @@ pub const CPU_SECONDS_PER_GB_GATE: f64 = 3.0;
 /// docs/performance-budgets.md). Every other leg keeps
 /// [`CPU_SECONDS_PER_GB_GATE`] for the best round and the median.
 pub const MACOS_CPU_SECONDS_PER_GB_GATE: f64 = 3.2;
-/// Reference raw write rate (F_FULLFSYNC, same job) the macOS calibrated
-/// score is scaled to, in MB/s: the top of the 600-650 band the macos-14
-/// leg normally lands in. See docs/performance-budgets.md.
+/// Reference raw write rate (F_FULLFSYNC, measured in the same job) that the
+/// macOS calibrated score is scaled to, in MB/s.
+///
+/// Rationale: 650 is the top of the 600-650 MB/s band the macos-14 leg
+/// usually lands in, so on most runners raw_mb_s <= 650 and the calibrated
+/// score is at or below the absolute one. That makes the calibration
+/// lenient on slow-disk runners, which is acceptable only because the
+/// absolute [`MACOS_CPU_SECONDS_PER_GB_GATE`] (3.2) stays gated as a
+/// backstop; the calibrated score never replaces the absolute one.
+///
+/// Data (9 macos-14 runs, image 20260828.587, 2026-10-19): absolute best
+/// 1.921-3.152 (spread 1.23) at raw 517-704 MB/s, with higher best on
+/// slower raw and SHA-256 flat at 1918-2131 MB/s. Calibrated: 2.029-2.666
+/// (spread 0.64). One run (3.152 at 517 MB/s) failed the old absolute 3.0
+/// gate and calibrates to 2.507. See docs/performance-budgets.md and #149.
 pub const MACOS_RAW_REFERENCE_MB_S: f64 = 650.0;
 /// Gate for the calibrated macOS best round. The absolute best round stays
 /// gated at [`MACOS_CPU_SECONDS_PER_GB_GATE`] as a backstop.
