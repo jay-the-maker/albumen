@@ -228,9 +228,9 @@ pub fn uncached_writes(file: &std::fs::File) -> std::io::Result<()> {
 }
 
 /// Reserve disk blocks for `len` bytes at the end of a new, empty file
-/// (macOS `F_PREALLOCATE`, contiguous first, then any blocks). It allocates
-/// only and never changes the file's logical size. Elsewhere it does
-/// nothing. An error means nothing was reserved; the caller writes as usual.
+/// (macOS `F_PREALLOCATE`, contiguous first, then any blocks; Windows
+/// `FileAllocationInfo`). It allocates only and never changes the file's
+/// logical size. Elsewhere it does nothing. An error means nothing was reserved; the caller writes as usual.
 static RESERVE_CONTIG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static RESERVE_ANY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static RESERVE_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -299,7 +299,41 @@ pub fn reserve_blocks(file: &std::fs::File, len: u64) -> std::io::Result<()> {
         );
         Err(err)
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileAllocationInfo, SetFileInformationByHandle, FILE_ALLOCATION_INFO,
+        };
+        let size = i64::try_from(len).map_err(|_| std::io::Error::other("length too large"))?;
+        let info = FILE_ALLOCATION_INFO {
+            AllocationSize: size,
+        };
+        // SAFETY: the handle is open and owned by `file`, and `info` is a
+        // valid FILE_ALLOCATION_INFO of the size passed, for the call.
+        // Allocation only: the end-of-file stays at the bytes written, so a
+        // short copy is still short and fails the read-back.
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as _,
+                FileAllocationInfo,
+                &info as *const FILE_ALLOCATION_INFO as *const _,
+                std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
+            )
+        };
+        if ok != 0 {
+            RESERVE_ANY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        RESERVE_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RESERVE_LAST_ERRNO.store(
+            err.raw_os_error().unwrap_or(-1),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Err(err)
+    }
+    #[cfg(not(any(target_vendor = "apple", windows)))]
     {
         let _ = (file, len);
         Ok(())

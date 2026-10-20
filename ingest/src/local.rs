@@ -540,7 +540,11 @@ fn write_prefetched(
 /// macOS this is `F_PREALLOCATE`, which allocates blocks only: the logical
 /// size stays at the bytes actually written, so a copy cut short is still
 /// short and fails the read-back. A refusal (no space, unsupported
-/// filesystem) leaves the plain write. Elsewhere it does nothing.
+/// filesystem) leaves the plain write. On Windows it sets the allocation
+/// size (`FileAllocationInfo`) so the write does not grow the file in
+/// steps; the end-of-file still moves only with the bytes written, so a
+/// short copy stays short and fails the read-back. Elsewhere it does
+/// nothing.
 fn reserve_space(output: &fs::File, len: usize) {
     let len = u64::try_from(len).unwrap_or(u64::MAX);
     if albumen_win::reserve_blocks(output, len).is_ok() && cfg!(target_vendor = "apple") {
