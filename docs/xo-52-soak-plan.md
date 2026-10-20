@@ -11,7 +11,7 @@ Two real copies of a library, with sync and removals exercised over a soak perio
 - every removal stays a signed record (`albumen family hide` or `albumen family tombstone`);
 - no original is unlinked.
 
-This is the "Done when" condition in #166. The copy-local receiver tombstone is not runnable yet; see [Receiver hide](#receiver-hide).
+This is the "Done when" condition in #166. It also proves a receiver-library hide only writes a tombstone; see [Receiver hide](#receiver-hide).
 
 ## Variables Jay sets
 
@@ -23,6 +23,7 @@ This is the "Done when" condition in #166. The copy-local receiver tombstone is 
 | `SOAK_NEW` | Optional, per day. A folder of that day's new photos. It is only read. | `"$HOME/Pictures/soak-new-day1"` |
 | `SOAK_HIDE` | Optional, per day. SHA-256s to hide, space-separated. | from `logs/FA-day0.jsonl` |
 | `SOAK_TOMBSTONE` | Optional, per day. SHA-256s to tombstone, space-separated. | from `logs/FA-day0.jsonl` |
+| `SOAK_RECEIVER_HIDE` | Optional, per day. Stored names in receiver library R to hide, space-separated. | `IMG_0001.jpg` |
 | `SOAK_APPLY` | Unset or `0`: dry runs only. `1`: each step runs as a dry run, then with `--apply`. | `1` |
 | `ALBUMEN` | Path to the `albumen` binary, if it is not on `PATH`. | `albumen` |
 
@@ -32,7 +33,8 @@ Prerequisites: an `albumen` build and `exiftool` on `PATH` (`albumen import-iclo
 
 - **Read-only sources.** `SOAK_SOURCE` and `SOAK_NEW` are only read. `albumen scan` and `albumen import-icloud` open them read-only, and the daily source scan has to match day 0.
 - **The ledger folder.** `albumen scan` writes nothing inside or beside the folder it scans. Its ledger goes under `ALBUMEN_HOME/ledgers/<name>-<key>/`, keyed by the canonical source path; with `ALBUMEN_HOME` unset that is the platform data directory (for example `~/.local/share/albumen` or `~/Library/Application Support/albumen`). `--ledger <dir>` picks another place. Either way a ledger inside the source, or directly in the folder that holds it, is refused. An old `<dir>.ledger/` from an earlier build is only read (and copied into the new place), never changed or removed.
-- **Fresh copies.** Copy A (`$SOAK_HOME/A`), the family libraries and copy B (`$SOAK_B`) are new folders that Albumen creates.
+- **Fresh copies.** Copy A (`$SOAK_HOME/A`), the family libraries, receiver library R (`$SOAK_HOME/R`) and copy B (`$SOAK_B`) are new folders.
+- **No real photos in R.** R is filled only from the repository's synthetic CC0 fixture corpus (`fixtures/`), after `sha256sum --check fixtures/SHA256SUMS` passes. Nothing from `SOAK_SOURCE` or `SOAK_NEW` goes into R.
 - **Plan before apply.** Every write runs first as a dry run. Run each stage with `SOAK_APPLY` unset first and read the plan, then rerun it with `SOAK_APPLY=1`.
 - **Checksums.** Verification is by SHA-256 throughout: `copy_verify` on every write, `albumen verify-manifest` on copy B, and the daily scan diff over path, size, mtime and SHA-256.
 
@@ -53,13 +55,14 @@ The commands the script runs:
 5. `albumen family keygen --key "$SOAK_HOME/keys/soak.key" --apply`, then `albumen family init --to "$SOAK_HOME/family" --key ... --name soak --apply`. This creates family library FA.
 6. For each original in A: `albumen family add --library <FA> --key ... --from <file> --apply`
 7. `albumen family sync --from <FA> --to "$SOAK_B/family/<library id>"` as a dry run, then with `--apply`. This creates family library FB on the RAID.
-8. Scan the source, A, B, FA and FB into `logs/<copy>-day0.jsonl`. These are the reference manifests.
+8. Fill receiver library R: check `fixtures/SHA256SUMS`, then copy the 15 fixture files flat into `$SOAK_HOME/R` (only with `SOAK_APPLY=1`, and only if R is new or empty).
+9. Scan the source, A, B, FA, FB and R into `logs/<copy>-day0.jsonl`. These are the reference manifests.
 
 ## Each soak day (N = 1 … 7, or as long as Jay chooses)
 
 ```bash
-SOAK_NEW=... SOAK_HIDE="<sha256> ..." SOAK_TOMBSTONE="<sha256>" bash scripts/xo52-soak.sh day N              # dry run
-SOAK_NEW=... SOAK_HIDE="<sha256> ..." SOAK_TOMBSTONE="<sha256>" SOAK_APPLY=1 bash scripts/xo52-soak.sh day N
+SOAK_NEW=... SOAK_HIDE="<sha256> ..." SOAK_TOMBSTONE="<sha256>" SOAK_RECEIVER_HIDE="<name> ..." bash scripts/xo52-soak.sh day N              # dry run
+SOAK_NEW=... SOAK_HIDE="<sha256> ..." SOAK_TOMBSTONE="<sha256>" SOAK_RECEIVER_HIDE="<name> ..." SOAK_APPLY=1 bash scripts/xo52-soak.sh day N
 ```
 
 The commands the script runs:
@@ -68,16 +71,17 @@ The commands the script runs:
 2. **Removals.**
    - `albumen family hide --library <FA> --key ... --sha256 <sha>` for each entry in `SOAK_HIDE`.
    - `albumen family tombstone --library <FA> --key ... --sha256 <sha>` for each entry in `SOAK_TOMBSTONE`.
+   - `albumen receive hide --library "$SOAK_HOME/R" --name <name>` for each entry in `SOAK_RECEIVER_HIDE`.
    - Each runs as a dry run, then with `--apply`, and is logged in `logs/removals.txt`.
 3. **Carry the records to B.** `albumen family sync --from <FA> --to <FB>` as a dry run, then with `--apply`. The output must contain `removed: 0`, or the day fails.
 4. **Verify.** `albumen verify-manifest` on B.
-5. **Diff.** Scan the source, A, B, FA and FB into `logs/<copy>-dayN.jsonl`. The script checks that every day-0 file is still there with the same path, size, mtime and SHA-256. New files are allowed. B's `ALBUMEN-MANIFEST.txt` is rewritten by each export, so it is checked by `verify-manifest` instead. The script prints `day N: PASS` or exits non-zero with `CHANGED OR MISSING: <path>`.
+5. **Diff.** Scan the source, A, B, FA, FB and R into `logs/<copy>-dayN.jsonl`. The script checks that every day-0 file is still there with the same path, size, mtime and SHA-256. New files are allowed. B's `ALBUMEN-MANIFEST.txt` is rewritten by each export, so it is checked by `verify-manifest` instead. The script prints `day N: PASS` or exits non-zero with `CHANGED OR MISSING: <path>`.
 
 ## Receiver hide
 
-**There is no exact command for a receiver-library hide today.** `Library::hide` in `receive/src/store.rs` writes `{stored name}.albumen-tombstone` beside the original. However, no CLI subcommand, receiver route or MCP tool calls it; only the store tests do. This is tracked in #196.
+`albumen receive hide --library <R> --name <stored name>` (#196, #202) is a dry run by default: it prints the plan and writes nothing. With `--apply` it writes only `<stored name>.albumen-tombstone` (`"hidden":true`) beside the original in R; it never deletes, and `albumen receive unhide` reverses it. It refuses names outside the library root and family libraries. MCP still has no hide tool.
 
-Until #196 lands, the soak covers removals with the signed `family hide` and `family tombstone` records only. #166 is not fully done until the receiver hide is added to this plan. Its success check will be: the tombstone sidecar exists on copy A only, and the original is still on both copies.
+The soak runs it on R, a receiver library filled only from the synthetic fixtures. Check: the tombstone exists in R only (none in A or B), and the original is unchanged. The CI self-test runs this, including a dry run that must leave R byte-for-byte unchanged.
 
 ## Success criteria
 
@@ -85,7 +89,8 @@ All of these must hold on every soak day:
 
 - The script prints `day N: PASS`.
 - Every `verify-manifest` passes, with 0 missing, 0 extra and 0 different.
-- No file from day 0 disappears from, or changes in, the source, A, B, FA or FB.
+- No file from day 0 disappears from, or changes in, the source, A, B, FA, FB or R.
+- Every `SOAK_RECEIVER_HIDE` name has a tombstone with `"hidden":true` in R, and its original is still there.
 - Every entry in `removals.txt` exists as a signed record, and its original is still in FA and FB.
 - Every `family sync --apply` prints `removed: 0` and `replaced: 0`.
 
@@ -94,7 +99,7 @@ Any failure stops the soak. Keep `SOAK_HOME`, `SOAK_B` and the logs exactly as t
 ## Rollback
 
 - **Sources:** nothing to roll back. They are only read, nothing is written beside them, and the daily scan proves it. No step touches anything near a source.
-- **Copies:** A, FA, FB and B are new soak folders. To roll back, delete `"$SOAK_HOME"` and `"$SOAK_B"` by hand, after the logs are copied somewhere safe. All scan ledgers, including those of the sources, are under `ALBUMEN_HOME/ledgers`; delete the soak entries there by hand if you want them gone. No Albumen command deletes anything.
+- **Copies:** A, FA, FB, R and B are new soak folders. A receiver hide is undone with `albumen receive unhide --library "$SOAK_HOME/R" --name <name> --apply`. To roll back, delete `"$SOAK_HOME"` and `"$SOAK_B"` by hand, after the logs are copied somewhere safe. All scan ledgers, including those of the sources, are under `ALBUMEN_HOME/ledgers`; delete the soak entries there by hand if you want them gone. No Albumen command deletes anything.
 - **Key:** `$SOAK_HOME/keys/soak.key` is only for the soak, and goes with `SOAK_HOME`.
 - **Phones:** this plan does not pair a phone or change a camera roll.
 
