@@ -621,6 +621,7 @@ struct View {
     conflicts: Vec<String>,
     albums: Vec<AlbumAdd>,
     hides: Vec<Value>,
+    tombstones: Vec<Value>,
     heads: Vec<Head>,
     gaps: Vec<Value>,
     ignored: Vec<Value>,
@@ -877,6 +878,28 @@ fn build_view(library: &Path) -> Result<View, IngestError> {
         ]));
     }
 
+    // A tombstone counts only from the member whose object it names. It is
+    // a record: the stored original and sidecar stay on every copy.
+    let mut tombstoned: BTreeSet<(String, String)> = BTreeSet::new();
+    for record in &applied {
+        if record.kind != "tombstone" {
+            continue;
+        }
+        let Some(sha) = body_str(&record.body, "sha256") else {
+            continue;
+        };
+        if objects
+            .iter()
+            .any(|obj| obj.member == record.member && obj.sha256 == sha)
+        {
+            tombstoned.insert((record.member.clone(), sha.to_string()));
+        }
+    }
+    let tombstones = tombstoned
+        .into_iter()
+        .map(|(member, sha)| object(&[("member", json_str(&member)), ("sha256", json_str(&sha))]))
+        .collect();
+
     let mut snapshots = Vec::new();
     for record in &applied {
         if record.kind != "snapshot" {
@@ -901,6 +924,7 @@ fn build_view(library: &Path) -> Result<View, IngestError> {
         conflicts,
         albums,
         hides,
+        tombstones,
         heads,
         gaps,
         ignored,
@@ -1019,6 +1043,20 @@ fn manifest_value(view: &View) -> Value {
         ("objects", Value::Array(objects)),
         ("snapshots", Value::Array(view.snapshots.clone())),
     ]);
+    // Present only once a tombstone exists, so libraries without one keep
+    // the manifest bytes and hash they had.
+    let body = if view.tombstones.is_empty() {
+        body
+    } else {
+        let mut body = body;
+        if let Value::Object(map) = &mut body {
+            map.insert(
+                "tombstones".to_string(),
+                Value::Array(view.tombstones.clone()),
+            );
+        }
+        body
+    };
     let hash = encode_hex(&sha256_bytes(&canonical_bytes(&body).unwrap_or_default()));
     let mut with_hash = body;
     if let Value::Object(map) = &mut with_hash {
@@ -1597,6 +1635,42 @@ pub fn hide(
             ("hidden", Value::Bool(hidden)),
             ("sha256", json_str(&sha256)),
         ]),
+    )?;
+    Ok(())
+}
+
+/// Tombstone one of this member's own objects.
+///
+/// The removal is a signed record merged through the family manifest. The
+/// stored original and sidecar are not opened for write and stay in place,
+/// here and on every copy.
+pub fn tombstone(library: &Path, key: &FamilyKey, sha256: &str) -> Result<(), IngestError> {
+    let sha256 = check_sha(sha256)?;
+    require_writer(library, key, "tombstone")?;
+    let json = manifest_json(library)?;
+    let value: Value =
+        serde_json::from_str(&json).map_err(|err| family(format!("manifest: {err}")))?;
+    let owns = value
+        .get("objects")
+        .and_then(Value::as_array)
+        .map(|objects| {
+            objects.iter().any(|obj| {
+                obj.get("member").and_then(Value::as_str) == Some(key.member_id())
+                    && obj.get("sha256").and_then(Value::as_str) == Some(sha256.as_str())
+            })
+        })
+        .unwrap_or(false);
+    if !owns {
+        return Err(family(format!(
+            "member {} can tombstone only an object they added; {sha256} stays as it is",
+            key.member_id()
+        )));
+    }
+    append_record(
+        library,
+        key,
+        "tombstone",
+        object(&[("sha256", json_str(&sha256))]),
     )?;
     Ok(())
 }
