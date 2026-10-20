@@ -89,6 +89,15 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
         false,
         |root, output, dest| {
             let input = root.open_read(source)?;
+            // Windows imports take this streamed path. Reserve the
+            // allocation first; the end-of-file still moves only with the
+            // bytes written. Only on Windows: on macOS a reservation also
+            // sizes the file, which needs the staged name this path skips.
+            if cfg!(windows) {
+                if let Ok(meta) = input.metadata() {
+                    reserve_space(output, usize::try_from(meta.len()).unwrap_or(usize::MAX));
+                }
+            }
             copy_hashed(input, output, source, dest)
         },
     )
