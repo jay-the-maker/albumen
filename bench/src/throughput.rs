@@ -1147,7 +1147,7 @@ pub fn cpu_gate_line(report: &ThroughputReport) -> String {
     let hash_ms = ns_to_ms(phase_cpu_ns(&report.phases, "hash")) / rounds;
     let readback_ms = ns_to_ms(phase_cpu_ns(&report.phases, "readback_hash")) / rounds;
     format!(
-        "import-cpu-gate leg={} best={:.3} calibrated={:.3} median={:.3} gate={:.1} calibrated_gate={} median_gated={} passed={} image={} raw_mb_s={:.0} sha_pass_ms={:.0} hash_ms={:.0} readback_hash_ms={:.0} sha256_mb_s={:.0}",
+        "import-cpu-gate leg={} best={:.3} calibrated={:.3} median={:.3} gate={:.1} calibrated_gate={} median_gated={} passed={} image={} disk_model={} raw_mb_s={:.0} sha_pass_ms={:.0} hash_ms={:.0} readback_hash_ms={:.0} sha256_mb_s={:.0}",
         report.leg,
         cpu_best(&report.cpu_rounds),
         cpu_calibrated(report),
@@ -1161,12 +1161,54 @@ pub fn cpu_gate_line(report: &ThroughputReport) -> String {
         median_is_gated(&report.leg),
         cpu_round_gate_passes(report),
         runner_image(),
+        disk_model_label(&report.disk_model),
         report.raw_mb_s,
         hash_ms + readback_ms,
         hash_ms,
         readback_ms,
         report.sha256_mb_s,
     )
+}
+
+/// The disk model as one token for log lines.
+pub fn disk_model_label(model: &str) -> String {
+    let label = model.trim().replace(char::is_whitespace, "_");
+    if label.is_empty() {
+        "unknown".to_string()
+    } else {
+        label
+    }
+}
+
+/// A run's disk class: the disk model and the runner image. Report only
+/// (#138): medians are compared only within one class.
+pub fn disk_class(disk_model: &str, image: &str) -> String {
+    format!("{}@{}", disk_model_label(disk_model), image.trim())
+}
+
+/// Compare this run's median with a baseline run's JSON (the bench's
+/// `--throughput` output), only when both are in the same disk class and
+/// neither class is unknown. Report only; no gate reads it.
+pub fn cpu_compare_line(report: &ThroughputReport, baseline: &Value) -> String {
+    let class = disk_class(&report.disk_model, &runner_image());
+    let base_class = disk_class(
+        baseline["disk_model"].as_str().unwrap_or("unknown"),
+        baseline["runner_image"].as_str().unwrap_or("unknown"),
+    );
+    let base_median = baseline["cpu_seconds_per_gb_median"].as_f64();
+    let unknown = class.starts_with("unknown@") || base_class.starts_with("unknown@");
+    match base_median {
+        Some(base) if class == base_class && !unknown => format!(
+            "import-cpu-compare leg={} class={class} compared=true median={:.3} baseline_median={base:.3} delta={:+.3}",
+            report.leg,
+            report.cpu_seconds_per_gb_median,
+            report.cpu_seconds_per_gb_median - base,
+        ),
+        _ => format!(
+            "import-cpu-compare leg={} class={class} baseline_class={base_class} compared=false reason=disk_class_differs_or_unknown",
+            report.leg
+        ),
+    }
 }
 
 /// Thread CPU per phase for one round in milliseconds, then `untimed`: the
@@ -1502,6 +1544,81 @@ impl Drop for TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_report_for_compare() -> ThroughputReport {
+        ThroughputReport {
+            leg: "test".to_string(),
+            disk_model: "unknown".to_string(),
+            files: 1_000,
+            bytes_each: 5_000_000,
+            bytes: 5_000_000_000,
+            import_seconds: 18.0,
+            import_mb_s: 280.0,
+            import_items_s: 56.0,
+            raw_seconds: 8.0,
+            raw_mb_s: 625.0,
+            raw_sync: "fsync".to_string(),
+            raw_fsync_mb_s: Some(625.0),
+            raw_fullfsync_mb_s: None,
+            raw_samples: vec![600.0, 625.0, 650.0],
+            phases: CopyPhases::default(),
+            ratio: 0.448,
+            ceiling_mb_s: 600.0,
+            ceiling_samples: vec![600.0],
+            ceiling_ratio: 0.96,
+            copy_ceiling_mb_s: 500.0,
+            copy_ceiling_samples: vec![500.0],
+            copy_ceiling_ratio: 0.8,
+            count_in: 1_000,
+            count_out: 1_000,
+            mismatched: 0,
+            source_changed: 0,
+            workers: 1,
+            cpu_seconds: 4.0,
+            cores: 4,
+            cpu_percent: 5.6,
+            cpu_seconds_per_1000: 4.0,
+            cpu_seconds_per_gb: 0.8,
+            cpu_seconds_per_gb_normalized: 0.8,
+            cpu_rounds: vec![
+                CpuRound {
+                    raw: 0.8,
+                    normalized: 0.8,
+                    write_ms: 1.0,
+                };
+                6
+            ],
+            cpu_seconds_per_gb_median: 0.8,
+            round_order: "raw-first".to_string(),
+            sha_hw: true,
+            sha256_mb_s: 2000.0,
+            verifiers: 2,
+            rounds: 6,
+            import_samples: vec![480.0],
+            resident_before_raw: vec![Some(1.0)],
+            resident_before_import: vec![Some(0.5)],
+            resident_before_copy_ceiling: vec![None],
+        }
+    }
+
+    #[test]
+    fn cpu_compare_only_within_one_disk_class() {
+        let mut report = sample_report_for_compare();
+        report.disk_model = "Msft Virtual Disk".to_string();
+        report.cpu_seconds_per_gb_median = 2.5;
+        let image = runner_image();
+        let same = json!({"disk_model": "Msft Virtual Disk", "runner_image": image, "cpu_seconds_per_gb_median": 2.7});
+        let line = cpu_compare_line(&report, &same);
+        assert!(line.contains("compared=true"), "{line}");
+        assert!(line.contains("delta=-0.200"), "{line}");
+        let other = json!({"disk_model": "NVMe Direct Disk", "runner_image": image, "cpu_seconds_per_gb_median": 2.0});
+        assert!(cpu_compare_line(&report, &other).contains("compared=false"));
+        let other_image = json!({"disk_model": "Msft Virtual Disk", "runner_image": "other-image", "cpu_seconds_per_gb_median": 2.0});
+        assert!(cpu_compare_line(&report, &other_image).contains("compared=false"));
+        report.disk_model = "unknown".to_string();
+        let unknown = json!({"disk_model": "unknown", "runner_image": image, "cpu_seconds_per_gb_median": 2.0});
+        assert!(cpu_compare_line(&report, &unknown).contains("compared=false"));
+    }
 
     #[test]
     fn normalizing_rescales_only_the_hash_phases() {
