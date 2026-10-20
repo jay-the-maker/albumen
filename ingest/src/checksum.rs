@@ -12,8 +12,20 @@ use crate::error::IngestError;
 /// fall out of cache between the read, the hash, and the write.
 const IO_BUF_BYTES: usize = 1024 * 1024;
 
+/// Bytes per read in the destination read-back on macOS (#138). The
+/// destination was written with `F_NOCACHE`, so each read-back read goes to
+/// the device; fewer, larger reads cut the per-read device round trips. The
+/// bytes read and hashed are the same. Other platforms keep [`IO_BUF_BYTES`].
+const READBACK_BUF_BYTES: usize = if cfg!(target_vendor = "apple") {
+    8 * 1024 * 1024
+} else {
+    IO_BUF_BYTES
+};
+
 thread_local! {
     static SPARE: std::cell::Cell<Option<Vec<u8>>> = const { std::cell::Cell::new(None) };
+    /// The read-back buffer, reused across files on each verifier thread.
+    static READBACK_SPARE: std::cell::Cell<Option<Vec<u8>>> = const { std::cell::Cell::new(None) };
 }
 
 /// One I/O buffer per thread, reused across files. Reads land in it and
@@ -135,20 +147,24 @@ pub(crate) fn sha256_readback(path: &Path) -> Result<[u8; 32], IngestError> {
     let mut file =
         File::open(crate::platform::io_path(path)).map_err(|err| IngestError::io(path, err))?;
     let mut hasher = Sha256::new();
-    let mut buf = IoBuf::take();
-    loop {
+    let mut buf = READBACK_SPARE
+        .with(|spare| spare.take())
+        .unwrap_or_else(|| vec![0u8; READBACK_BUF_BYTES]);
+    let result = (|| loop {
         let read_at = crate::copy_profile::tic();
         let n = file
             .read(&mut buf)
             .map_err(|err| IngestError::io(path, err))?;
         crate::copy_profile::add_readback_read(read_at);
         if n == 0 {
-            break;
+            return Ok(());
         }
         let hash_at = crate::copy_profile::tic();
         hasher.update(&buf[..n]);
         crate::copy_profile::add_readback_hash(hash_at);
-    }
+    })();
+    READBACK_SPARE.with(|spare| spare.set(Some(buf)));
+    result?;
     let hash_at = crate::copy_profile::tic();
     let digest = hasher.finalize();
     crate::copy_profile::add_readback_hash(hash_at);
@@ -158,6 +174,28 @@ pub(crate) fn sha256_readback(path: &Path) -> Result<[u8; 32], IngestError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The read-back digest equals a plain hash around the read-back buffer
+    /// size, and repeated read-backs on one thread agree.
+    #[test]
+    fn readback_matches_a_plain_hash_at_buffer_edges() {
+        let tmp = crate::test_support::Tmp::new();
+        for len in [
+            0,
+            1,
+            READBACK_BUF_BYTES - 1,
+            READBACK_BUF_BYTES,
+            READBACK_BUF_BYTES + 1,
+            2 * READBACK_BUF_BYTES + 777,
+        ] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 7 % 253) as u8).collect();
+            let path = tmp.path().join(format!("f{len}"));
+            std::fs::write(&path, &data).unwrap();
+            let plain: [u8; 32] = Sha256::digest(&data).into();
+            assert_eq!(sha256_readback(&path).unwrap(), plain, "len {len}");
+            assert_eq!(sha256_readback(&path).unwrap(), plain, "again {len}");
+        }
+    }
 
     #[test]
     fn empty_file_is_the_well_known_sha256() {
