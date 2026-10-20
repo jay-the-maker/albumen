@@ -137,6 +137,19 @@ pub enum Command {
         #[arg(long)]
         execute: bool,
     },
+    /// Tombstone one of your own photos. The original and sidecar stay on every copy.
+    Tombstone {
+        #[arg(long)]
+        library: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        sha256: String,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        execute: bool,
+    },
     /// Hide or show a photo in this viewer's library. Other members' files stay.
     Hide {
         #[arg(long)]
@@ -424,6 +437,26 @@ pub fn run(command: Command) -> Result<(), IngestError> {
             println!("viewer {}", signing.member_id());
             println!("sha256 {sha256}");
             println!("hidden {}", !show);
+            Ok(())
+        }
+        Command::Tombstone {
+            library,
+            key,
+            sha256,
+            apply,
+            execute,
+        } => {
+            let signing = family::load_key(&key)?;
+            if !(apply || execute) {
+                println!("dry-run: no tombstone written. Pass --apply or --execute to record it.");
+                println!("family tombstone");
+                println!("  sha256: {sha256}");
+                return Ok(());
+            }
+            family::tombstone(&library, &signing, &sha256)?;
+            println!("member {}", signing.member_id());
+            println!("tombstone {sha256}");
+            println!("original kept");
             Ok(())
         }
         Command::AlbumAdd {
