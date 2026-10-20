@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 
 use albumen_ingest::family::{self, FamilyKey};
-use albumen_ingest::{export_family, plan_family_export, IngestError};
+use albumen_ingest::{
+    export_family, plan_family_export, plan_family_sync, sync_family, IngestError,
+};
 use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
@@ -202,6 +204,19 @@ pub enum Command {
         /// When set with `--apply`, append a signed snapshot in this member's log.
         #[arg(long)]
         key: Option<PathBuf>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Add to one live family library the files another holds and it lacks.
+    /// Additive only: never replaces or removes, refuses when a shared file
+    /// differs, and reads `--from` only. Dry-run unless --apply/--execute.
+    Sync {
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long)]
+        to: PathBuf,
         #[arg(long)]
         apply: bool,
         #[arg(long)]
@@ -514,6 +529,36 @@ pub fn run(command: Command) -> Result<(), IngestError> {
             }
             let json = family::manifest_json(&library)?;
             println!("{json}");
+            Ok(())
+        }
+        Command::Sync {
+            from,
+            to,
+            apply,
+            execute,
+        } => {
+            if !(apply || execute) {
+                let plan = plan_family_sync(&from, &to)?;
+                println!("dry-run: no files written. Pass --apply or --execute to sync.");
+                println!("family sync");
+                println!("  from: {}", from.display());
+                println!("  to: {}", to.display());
+                println!("  same: {}", plan.same);
+                println!("  add: {}", plan.add.len());
+                for name in &plan.add {
+                    println!("  + {name}");
+                }
+                return Ok(());
+            }
+            let report = sync_family(&from, &to)?;
+            println!("family sync");
+            println!("  same: {}", report.same);
+            println!("  added: {}", report.added.len());
+            for name in &report.added {
+                println!("  + {name}");
+            }
+            println!("removed: 0");
+            println!("replaced: 0");
             Ok(())
         }
         Command::Policy {

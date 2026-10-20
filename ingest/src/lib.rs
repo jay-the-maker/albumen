@@ -19,6 +19,7 @@ mod export;
 pub mod family;
 mod family_export;
 mod family_source;
+mod family_sync;
 mod icloud;
 pub mod index;
 pub mod ledger;
@@ -47,6 +48,7 @@ pub use export::{
 };
 pub use family_export::{export_family, plan_family_export, FamilyExportPlan, FamilyExportReport};
 pub use family_source::FamilySource;
+pub use family_sync::{plan_family_sync, sync_family, FamilySyncPlan, FamilySyncReport};
 pub use icloud::{import_icloud, plan_icloud, IcloudPlan, IcloudReport};
 pub use local::{
     copy_verify_file, copy_verify_files_pipelined, pipelined_verifiers, prefetch_source,
