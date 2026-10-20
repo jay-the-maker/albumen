@@ -93,31 +93,13 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
                 // Unbuffered destination write (#138). If the volume refuses
                 // the unbuffered open, the same aligned writes go through
                 // the buffered handle.
-                let direct = open_unbuffered(dest);
+                let direct = dest::open_unbuffered(dest);
                 crate::checksum::copy_hashed_aligned(input, output, direct, source, dest)
             } else {
                 copy_hashed(input, output, source, dest)
             }
         },
     )
-}
-
-/// A second handle on a destination this call just created, opened with
-/// `FILE_FLAG_NO_BUFFERING`. Write-only; it never creates or truncates.
-#[cfg(windows)]
-fn open_unbuffered(dest: &Path) -> Option<fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
-    fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_NO_BUFFERING)
-        .open(crate::platform::io_path(dest))
-        .ok()
-}
-
-#[cfg(not(windows))]
-fn open_unbuffered(_dest: &Path) -> Option<fs::File> {
-    None
 }
 
 /// Files at or under this size are read into memory by [`prefetch_source`].
@@ -858,7 +840,7 @@ mod tests {
         let write = |name: &str, set_eof: bool| {
             let dest = dir.path().join(name);
             let out = dest::open_new(&dest).unwrap();
-            let direct = open_unbuffered(&dest);
+            let direct = dest::open_unbuffered(&dest);
             let input = fs::File::open(&src).unwrap();
             let digest = if set_eof {
                 copy_hashed_aligned(input, &out, direct, &src, &dest).unwrap()

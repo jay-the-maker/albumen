@@ -96,6 +96,25 @@ pub fn open_new(path: &Path) -> Result<File, IngestError> {
         .map_err(|err| IngestError::io(path, err))
 }
 
+/// A second, write-only handle on a destination the caller just created
+/// with [`open_new`], opened with `FILE_FLAG_NO_BUFFERING` (#138). It never
+/// creates or truncates. `None` if the volume refuses it, and off Windows.
+#[cfg(windows)]
+pub fn open_unbuffered(path: &Path) -> Option<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_NO_BUFFERING)
+        .open(opened(path))
+        .ok()
+}
+
+#[cfg(not(windows))]
+pub fn open_unbuffered(_path: &Path) -> Option<File> {
+    None
+}
+
 pub fn open_append(path: &Path) -> Result<File, IngestError> {
     let opened = opened(path);
     OpenOptions::new()
