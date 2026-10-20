@@ -1017,6 +1017,29 @@ fn phase_cpu_ms(report: &ThroughputReport) -> Value {
     Value::Object(map)
 }
 
+/// One short line per leg with the CPU gate result and the two likely causes
+/// of a flap: the raw disk rate and the CPU of both SHA-256 passes per round.
+/// Report only; the gate decision is [`cpu_round_gate_passes`].
+pub fn cpu_gate_line(report: &ThroughputReport) -> String {
+    let rounds = report.rounds.max(1) as f64;
+    let hash_ms = ns_to_ms(phase_cpu_ns(&report.phases, "hash")) / rounds;
+    let readback_ms = ns_to_ms(phase_cpu_ns(&report.phases, "readback_hash")) / rounds;
+    format!(
+        "import-cpu-gate leg={} best={:.3} median={:.3} gate={:.1} median_gated={} passed={} raw_mb_s={:.0} sha_pass_ms={:.0} hash_ms={:.0} readback_hash_ms={:.0} sha256_mb_s={:.0}",
+        report.leg,
+        cpu_best(&report.cpu_rounds),
+        report.cpu_seconds_per_gb_median,
+        cpu_gate_for(&report.leg),
+        median_is_gated(&report.leg),
+        cpu_round_gate_passes(report),
+        report.raw_mb_s,
+        hash_ms + readback_ms,
+        hash_ms,
+        readback_ms,
+        report.sha256_mb_s,
+    )
+}
+
 /// Thread CPU per phase for one round in milliseconds, then `untimed`: the
 /// process CPU of the round that no phase counted (thread hand-offs, the
 /// harness).
