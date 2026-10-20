@@ -31,7 +31,7 @@ Prerequisites: an `albumen` build and `exiftool` on `PATH` (`albumen import-iclo
 ## Ground rules
 
 - **Read-only sources.** `SOAK_SOURCE` and `SOAK_NEW` are only read. `albumen scan` and `albumen import-icloud` open them read-only, and the daily source scan has to match day 0.
-- **The ledger folder.** `albumen scan <dir>` also creates `<dir>.ledger/` *beside* the folder it scans; the folder itself is not written. For `SOAK_SOURCE` this lands in its parent directory. Pick a `SOAK_SOURCE` whose parent directory may hold that folder, for example an exported copy of the photos, not the Photos library itself. Remove the folder in the rollback.
+- **The ledger folder.** `albumen scan` writes nothing inside or beside the folder it scans. Its ledger goes under `ALBUMEN_HOME/ledgers/<name>-<key>/`, keyed by the canonical source path; with `ALBUMEN_HOME` unset that is the platform data directory (for example `~/.local/share/albumen` or `~/Library/Application Support/albumen`). `--ledger <dir>` picks another place. Either way a ledger inside the source, or directly in the folder that holds it, is refused. An old `<dir>.ledger/` from an earlier build is only read (and copied into the new place), never changed or removed.
 - **Fresh copies.** Copy A (`$SOAK_HOME/A`), the family libraries and copy B (`$SOAK_B`) are new folders that Albumen creates.
 - **Plan before apply.** Every write runs first as a dry run. Run each stage with `SOAK_APPLY` unset first and read the plan, then rerun it with `SOAK_APPLY=1`.
 - **Checksums.** Verification is by SHA-256 throughout: `copy_verify` on every write, `albumen verify-manifest` on copy B, and the daily scan diff over path, size, mtime and SHA-256.
@@ -40,7 +40,7 @@ Prerequisites: an `albumen` build and `exiftool` on `PATH` (`albumen import-iclo
 
 ```bash
 export SOAK_SOURCE=... SOAK_HOME=... SOAK_B=...
-bash scripts/xo52-soak.sh day0               # dry run: scan + import plan, writes only logs and the ledger
+bash scripts/xo52-soak.sh day0               # dry run: scan + import plan, writes only logs and the ledger under ALBUMEN_HOME
 SOAK_APPLY=1 bash scripts/xo52-soak.sh day0  # writes A, B and the family libraries
 ```
 
@@ -93,8 +93,8 @@ Any failure stops the soak. Keep `SOAK_HOME`, `SOAK_B` and the logs exactly as t
 
 ## Rollback
 
-- **Sources:** nothing to roll back. They are only read, and the daily scan proves it. Delete the `<SOAK_SOURCE>.ledger/` folder (and `<SOAK_NEW>.ledger/`, if any) that `albumen scan` created beside them.
-- **Copies:** A, FA, FB and B are new soak folders. To roll back, delete `"$SOAK_HOME"` and `"$SOAK_B"` by hand, after the logs are copied somewhere safe. The scan ledgers of the copies are inside those folders. No Albumen command deletes anything.
+- **Sources:** nothing to roll back. They are only read, nothing is written beside them, and the daily scan proves it. No step touches anything near a source.
+- **Copies:** A, FA, FB and B are new soak folders. To roll back, delete `"$SOAK_HOME"` and `"$SOAK_B"` by hand, after the logs are copied somewhere safe. All scan ledgers, including those of the sources, are under `ALBUMEN_HOME/ledgers`; delete the soak entries there by hand if you want them gone. No Albumen command deletes anything.
 - **Key:** `$SOAK_HOME/keys/soak.key` is only for the soak, and goes with `SOAK_HOME`.
 - **Phones:** this plan does not pair a phone or change a camera roll.
 

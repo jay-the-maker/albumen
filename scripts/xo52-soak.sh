@@ -7,7 +7,8 @@
 #
 # Every write step runs as a dry run first. With SOAK_APPLY=1 it then runs
 # with --apply. Without it, nothing is written except the logs and scan
-# ledgers. Sources are only read.
+# ledgers, which go under ALBUMEN_HOME (default: the platform data directory),
+# keyed by source. Nothing is written inside or beside a source.
 set -euo pipefail
 
 ALBUMEN="${ALBUMEN:-albumen}"
@@ -125,9 +126,11 @@ day() {
 selftest() {
   local root
   root="$(mktemp -d)"
-  export SOAK_SOURCE="$root/src" SOAK_HOME="$root/soak" SOAK_B="$root/raid/albumen-soak-B" SOAK_APPLY=1
-  mkdir -p "$SOAK_SOURCE/2024" "$root/new"
-  python3 - "$SOAK_SOURCE/2024" "$root/new" <<'PY'
+  # Sources sit in $root/sources, so the soak folders are not in their parent.
+  export ALBUMEN_HOME="$root/home"
+  export SOAK_SOURCE="$root/sources/src" SOAK_HOME="$root/soak" SOAK_B="$root/raid/albumen-soak-B" SOAK_APPLY=1
+  mkdir -p "$SOAK_SOURCE/2024" "$root/sources/new"
+  python3 - "$SOAK_SOURCE/2024" "$root/sources/new" <<'PY'
 import os, sys
 for d, start in ((sys.argv[1], 0), (sys.argv[2], 10)):
     for i in range(start, start + 4):
@@ -140,7 +143,11 @@ PY
   local s1 s2
   s1="$(sha256sum "$SOAK_SOURCE/2024/IMG_0001.JPG" | cut -d' ' -f1)"
   s2="$(sha256sum "$SOAK_SOURCE/2024/IMG_0002.JPG" | cut -d' ' -f1)"
-  SOAK_NEW="$root/new" SOAK_HIDE="$s1" SOAK_TOMBSTONE="$s2" day 1
+  SOAK_NEW="$root/sources/new" SOAK_HIDE="$s1" SOAK_TOMBSTONE="$s2" day 1
+  # Nothing may appear beside the sources.
+  if [ -e "$root/sources/src.ledger" ] || [ -e "$root/sources/new.ledger" ]; then
+    echo "selftest: a ledger was written beside a source" >&2; exit 1
+  fi
   chmod -R u+w "$root"
   rm -rf "$root"
   echo "selftest: PASS"
