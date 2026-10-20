@@ -275,9 +275,16 @@ fn exif_dump(path: &Path) -> Value {
             map.remove(*key);
         }
         map.remove("System:FileName");
-        // Composite tags are computed by ExifTool, not stored in the file. An
-        // ambiguous Composite:LensID can list the same candidates in a different
-        // order on two reads of identical bytes (seen on commons-05 in CI).
+        // Composite: tags are calculated by ExifTool from other tags. They are
+        // derived, not stored in the file, so they say nothing about whether the
+        // copy kept the original's metadata. An ambiguous Composite:LensID can
+        // also list the same candidates in a different order on two reads of
+        // identical bytes (seen on commons-05 in CI).
+        //
+        // This is not a loosening. The bytes are still compared by SHA-256, every
+        // embedded tag (EXIF, XMP, IPTC, MakerNotes, ICC_Profile, QuickTime, ...)
+        // is still compared one by one, and the family-0 group counts are still
+        // compared with the original and the manifest in `group_counts`.
         map.retain(|key, _| !key.starts_with("Composite:"));
     }
     value
