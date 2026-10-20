@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pinned Wikimedia Commons corpus. Nothing in this test is a checked-in photo.
+//! Pinned public corpora. Nothing in this test is a checked-in photo.
 //!
-//! `corpus/commons.manifest.json` pins 12 real-camera files by size, SHA-1 and
-//! SHA-256. The CI `commons-corpus` job downloads them with
-//! `scripts/fetch-commons-corpus.py`, sets `ALBUMEN_COMMONS_CORPUS` to that
-//! directory and `ALBUMEN_COMMONS_CORPUS_REQUIRED=1`. Elsewhere the round-trip
-//! test skips with a message. This test never opens a network connection.
+//! Each manifest under `corpus/` pins real-camera files by size, SHA-1 and
+//! SHA-256:
+//! - `commons.manifest.json`: 12 Wikimedia Commons files (`ALBUMEN_COMMONS_CORPUS`).
+//! - `media.manifest.json`: CC0 HEIC, MOV and MP4 from the Internet Archive
+//!   (`ALBUMEN_MEDIA_CORPUS`).
+//!
+//! A CI job per corpus downloads the files with `scripts/fetch-commons-corpus.py`,
+//! sets the directory variable and `<VARIABLE>_REQUIRED=1`. Elsewhere the
+//! round-trip tests skip with a message. These tests never open a network connection.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -17,9 +21,45 @@ use std::time::{Duration, UNIX_EPOCH};
 use albumen_ingest::{copy_verify, discover, exiftool_command, sha256_hex, BlobStore, LocalStore};
 use serde_json::{Map, Value};
 
-const SKIP_MESSAGE: &str = "skipping Commons corpus: ALBUMEN_COMMONS_CORPUS is unset. \
-    Run scripts/fetch-commons-corpus.py fetch DIR and point the variable at DIR. \
-    The CI commons-corpus job does this and requires it.";
+struct Corpus {
+    /// Prefix of the per-file log line and the `--corpus` name of the fetcher.
+    name: &'static str,
+    manifest: &'static str,
+    attribution: &'static str,
+    dir_var: &'static str,
+    required_var: &'static str,
+    files: usize,
+    total_bytes: u64,
+    licenses: &'static [&'static str],
+}
+
+const COMMONS: Corpus = Corpus {
+    name: "commons",
+    manifest: "commons.manifest.json",
+    attribution: "ATTRIBUTION.md",
+    dir_var: "ALBUMEN_COMMONS_CORPUS",
+    required_var: "ALBUMEN_COMMONS_CORPUS_REQUIRED",
+    files: 12,
+    total_bytes: 37_161_280,
+    licenses: &[
+        "CC0",
+        "Public domain",
+        "CC BY 2.5",
+        "CC BY-SA 3.0",
+        "CC BY-SA 4.0",
+    ],
+};
+
+const MEDIA: Corpus = Corpus {
+    name: "media",
+    manifest: "media.manifest.json",
+    attribution: "MEDIA_ATTRIBUTION.md",
+    dir_var: "ALBUMEN_MEDIA_CORPUS",
+    required_var: "ALBUMEN_MEDIA_CORPUS_REQUIRED",
+    files: 6,
+    total_bytes: 63_117_112,
+    licenses: &["CC0"],
+};
 
 /// Same list as `roundtrip.rs`: tags that describe where a file sits, not the original.
 const VOLATILE_TAGS: &[&str] = &[
@@ -42,36 +82,61 @@ struct Entry {
     license: String,
     author: String,
     page: String,
+    model_tag: String,
     model: Option<String>,
+    /// `None` keeps the original Commons rule: GPS means a `GPS:GPSLatitude` key.
+    gps_tag: Option<Option<String>>,
     gps: bool,
     tags: BTreeMap<String, u64>,
 }
 
 #[test]
 fn commons_manifest_is_well_formed_and_attributed() {
-    let entries = load_manifest();
-    assert_eq!(entries.len(), 12, "commons corpus size changed");
+    check_manifest(&COMMONS);
+}
+
+#[test]
+fn media_manifest_is_well_formed_and_attributed() {
+    check_manifest(&MEDIA);
+}
+
+#[test]
+fn commons_corpus_round_trip() {
+    run_corpus(&COMMONS);
+}
+
+#[test]
+fn media_corpus_round_trip() {
+    run_corpus(&MEDIA);
+}
+
+fn check_manifest(corpus: &Corpus) {
+    let entries = load_manifest(corpus);
+    assert_eq!(
+        entries.len(),
+        corpus.files,
+        "{} corpus size changed",
+        corpus.name
+    );
     let total: u64 = entries.iter().map(|e| e.size).sum();
-    assert_eq!(total, 37_161_280, "commons corpus byte total changed");
-    let attribution =
-        fs::read_to_string(corpus_dir().join("ATTRIBUTION.md")).expect("corpus/ATTRIBUTION.md");
+    assert_eq!(
+        total, corpus.total_bytes,
+        "{} corpus byte total changed",
+        corpus.name
+    );
+    let attribution = fs::read_to_string(corpus_dir().join(corpus.attribution))
+        .unwrap_or_else(|err| panic!("corpus/{}: {err}", corpus.attribution));
     for entry in &entries {
         assert_eq!(entry.sha256.len(), 64, "{}", entry.local_name);
         assert!(
             attribution.contains(&entry.page) && attribution.contains(&entry.author),
-            "ATTRIBUTION.md is missing {} by {}",
+            "{} is missing {} by {}",
+            corpus.attribution,
             entry.page,
             entry.author
         );
         assert!(
-            [
-                "CC0",
-                "Public domain",
-                "CC BY 2.5",
-                "CC BY-SA 3.0",
-                "CC BY-SA 4.0"
-            ]
-            .contains(&entry.license.as_str()),
+            corpus.licenses.contains(&entry.license.as_str()),
             "unexpected license {} for {}",
             entry.license,
             entry.local_name
@@ -79,33 +144,36 @@ fn commons_manifest_is_well_formed_and_attributed() {
     }
 }
 
-#[test]
-fn commons_corpus_round_trip() {
-    let required = env::var("ALBUMEN_COMMONS_CORPUS_REQUIRED").ok().as_deref() == Some("1");
-    let root = match env::var("ALBUMEN_COMMONS_CORPUS") {
+fn run_corpus(corpus: &Corpus) {
+    let required = env::var(corpus.required_var).ok().as_deref() == Some("1");
+    let root = match env::var(corpus.dir_var) {
         Ok(root) if !root.trim().is_empty() => PathBuf::from(root),
-        _ if required => {
-            panic!("ALBUMEN_COMMONS_CORPUS_REQUIRED=1 but ALBUMEN_COMMONS_CORPUS is unset")
-        }
+        _ if required => panic!("{}=1 but {} is unset", corpus.required_var, corpus.dir_var),
         _ => {
-            println!("{SKIP_MESSAGE}");
+            println!(
+                "skipping {} corpus: {} is unset. Run scripts/fetch-commons-corpus.py \
+                 --corpus {} fetch DIR and point the variable at DIR. The CI job for \
+                 this corpus does this and requires it.",
+                corpus.name, corpus.dir_var, corpus.name
+            );
             return;
         }
     };
     assert!(
         root.is_dir(),
-        "ALBUMEN_COMMONS_CORPUS is not a directory: {}",
+        "{} is not a directory: {}",
+        corpus.dir_var,
         root.display()
     );
 
     let mut failures = Vec::new();
-    for (index, entry) in load_manifest().iter().enumerate() {
+    for (index, entry) in load_manifest(corpus).iter().enumerate() {
         match round_trip_one(&root, entry, index) {
-            Ok(line) => println!("{line}"),
+            Ok(line) => println!("{}-roundtrip {line}", corpus.name),
             Err(err) => {
                 println!(
-                    "commons-roundtrip name={} result=FAIL {err}",
-                    entry.local_name
+                    "{}-roundtrip name={} result=FAIL {err}",
+                    corpus.name, entry.local_name
                 );
                 failures.push(format!("{}: {err}", entry.local_name));
             }
@@ -113,7 +181,8 @@ fn commons_corpus_round_trip() {
     }
     assert!(
         failures.is_empty(),
-        "commons corpus round-trip failed:\n{}",
+        "{} corpus round-trip failed:\n{}",
+        corpus.name,
         failures.join("\n")
     );
 }
@@ -213,7 +282,7 @@ fn round_trip_one(root: &Path, entry: &Entry, index: usize) -> Result<String, St
         ));
     }
     let model = restored_tags
-        .get("IFD0:Model")
+        .get(&entry.model_tag)
         .and_then(Value::as_str)
         .map(|s| s.trim().to_string());
     if model != entry.model {
@@ -224,7 +293,14 @@ fn round_trip_one(root: &Path, entry: &Entry, index: usize) -> Result<String, St
     }
     let gps = restored_tags
         .as_object()
-        .is_some_and(|map| map.keys().any(|key| key.starts_with("GPS:GPSLatitude")));
+        .is_some_and(|map| match &entry.gps_tag {
+            None => map.keys().any(|key| key.starts_with("GPS:GPSLatitude")),
+            Some(Some(tag)) => map.contains_key(tag),
+            // No GPS recorded: no embedded latitude or coordinates tag in any group.
+            Some(None) => map
+                .keys()
+                .any(|key| key.ends_with(":GPSLatitude") || key.ends_with(":GPSCoordinates")),
+        });
     if gps != entry.gps {
         return Err(format!("GPS present={gps}, manifest says {}", entry.gps));
     }
@@ -235,7 +311,7 @@ fn round_trip_one(root: &Path, entry: &Entry, index: usize) -> Result<String, St
     }
     let count = |g: &str| restored_groups.get(g).copied().unwrap_or(0);
     Ok(format!(
-        "commons-roundtrip name={} result=ok bytes={} sha256_bit_exact=yes mtime=yes tags_equal={} exif={} xmp={} iptc={} makernotes={} gps={} model={}",
+        "name={} result=ok bytes={} sha256_bit_exact=yes mtime=yes tags_equal={} exif={} xmp={} iptc={} makernotes={} quicktime={} gps={} model={}",
         entry.local_name,
         entry.size,
         restored_tags.as_object().map_or(0, Map::len),
@@ -243,6 +319,7 @@ fn round_trip_one(root: &Path, entry: &Entry, index: usize) -> Result<String, St
         count("XMP"),
         count("IPTC"),
         count("MakerNotes"),
+        count("QuickTime"),
         if gps { "yes" } else { "no" },
         model.as_deref().unwrap_or("-").replace(' ', "_"),
     ))
@@ -326,8 +403,8 @@ fn differing_keys(left: &Value, right: &Value) -> Vec<String> {
         .collect()
 }
 
-fn load_manifest() -> Vec<Entry> {
-    let path = corpus_dir().join("commons.manifest.json");
+fn load_manifest(corpus: &Corpus) -> Vec<Entry> {
+    let path = corpus_dir().join(corpus.manifest);
     let value: Value = serde_json::from_str(&fs::read_to_string(&path).expect("manifest"))
         .expect("parse manifest");
     assert_eq!(value["schema"], 1);
@@ -342,6 +419,13 @@ fn load_manifest() -> Vec<Entry> {
             license: f["license"].as_str().unwrap().to_string(),
             author: f["author"].as_str().unwrap().to_string(),
             page: f["page"].as_str().unwrap().to_string(),
+            model_tag: f["expect"]["model_tag"]
+                .as_str()
+                .unwrap_or("IFD0:Model")
+                .to_string(),
+            gps_tag: f["expect"]
+                .get("gps_tag")
+                .map(|tag| tag.as_str().map(str::to_string)),
             model: f["expect"]["exif_model"]
                 .as_str()
                 .map(|s| s.trim().to_string()),

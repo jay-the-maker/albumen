@@ -441,6 +441,50 @@ jobs:
       - name: Metadata round-trip on every Commons file
         run: cargo test --locked -p albumen-ingest --test commons_corpus -- --nocapture --test-threads=1
 
+  media-corpus:
+    name: Media corpus round-trip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ALBUMEN_MEDIA_CORPUS_REQUIRED: "1"
+      ALBUMEN_S3_UNAVAILABLE: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
+
+      # The runner context is not available in job-level env, so set the path here.
+      - name: Corpus directory
+        run: echo "ALBUMEN_MEDIA_CORPUS=$RUNNER_TEMP/media-corpus" >> "$GITHUB_ENV"
+
+      - name: Attribution file matches the manifest
+        run: python3 scripts/fetch-commons-corpus.py --corpus media attribution --check
+
+      # Keyed only by the manifest hash. No restore-keys: a changed manifest
+      # always starts from an empty directory.
+      - name: Restore the media corpus
+        id: media-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/media-corpus
+          key: media-corpus-v1-${{ hashFiles('corpus/media.manifest.json') }}
+
+      - name: Download the pinned files (cache miss)
+        if: steps.media-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/fetch-commons-corpus.py --corpus media fetch "$ALBUMEN_MEDIA_CORPUS"
+
+      # Runs on a cache hit too. Any size, SHA-1, or SHA-256 mismatch fails the job.
+      - name: Verify size, SHA-1, and SHA-256 against the manifest
+        run: python3 scripts/fetch-commons-corpus.py --corpus media verify "$ALBUMEN_MEDIA_CORPUS"
+
+      - name: Metadata round-trip on every media file
+        run: cargo test --locked -p albumen-ingest --test commons_corpus media_corpus_round_trip -- --nocapture --test-threads=1
+
   zero-network:
     name: zero network (${{ matrix.label }})
     runs-on: ${{ matrix.os }}

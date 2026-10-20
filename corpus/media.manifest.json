@@ -1,0 +1,192 @@
+{
+  "schema": 1,
+  "source": "the Internet Archive",
+  "heading": "Internet Archive",
+  "page_label": "archive.org item",
+  "note": "Pinned CC0 HEIC, MOV and MP4 test corpus. Wikimedia Commons cannot host these formats. Media is downloaded at CI run time by scripts/fetch-commons-corpus.py --corpus media and never committed. The license is the archive.org item's licenseurl, checked for each file's item. expect.tags are ExifTool 13.59 family-0 group counts (-G0 -a -u) taken when the manifest was written.",
+  "files": [
+    {
+      "local_name": "media-01-08ea0a84-063e-4f33-8b95-3c0ed1.heic",
+      "title": "08-ea-0-a-84-063-e-4-f-33-8-b-95-3-c-0-ed-11-fcd-47/08EA0A84-063E-4F33-8B95-3C0ED11FCD47.heic",
+      "page": "https://archive.org/details/08-ea-0-a-84-063-e-4-f-33-8-b-95-3-c-0-ed-11-fcd-47",
+      "url": "https://archive.org/download/08-ea-0-a-84-063-e-4-f-33-8-b-95-3-c-0-ed-11-fcd-47/08EA0A84-063E-4F33-8B95-3C0ED11FCD47.heic",
+      "revision_timestamp": "2021-09-28T15:11:28Z",
+      "size": 1822366,
+      "sha1": "0f59409c7bba87309a9610fcb7b654abd726a5f3",
+      "sha256": "04741e04c1b797cf168a481e373dd340dcf2de115202d047f309d8f02a3c6db6",
+      "publisher_checksums": {
+        "sha1": "0f59409c7bba87309a9610fcb7b654abd726a5f3",
+        "md5": "bc56d0f5560629f3992bf9987ae3bbc4"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "archive.org item metadata licenseurl http://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "Tyler Jones",
+      "attribution": "Tyler Jones, CC0, via the Internet Archive",
+      "kind": "heic",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "iPhone 7",
+        "gps_tag": "GPS:GPSLatitude",
+        "gps": true,
+        "tags": {
+          "EXIF": 58,
+          "ICC_Profile": 26,
+          "MakerNotes": 30,
+          "QuickTime": 28
+        }
+      }
+    },
+    {
+      "local_name": "media-02-img-0863.heic",
+      "title": "img-0863/IMG_0863.HEIC",
+      "page": "https://archive.org/details/img-0863",
+      "url": "https://archive.org/download/img-0863/IMG_0863.HEIC",
+      "revision_timestamp": "2021-07-30T04:42:44Z",
+      "size": 10032831,
+      "sha1": "8346ea9b65a98e82eea14a5e04e0573f94f4491a",
+      "sha256": "de2620b1ad9f65fddfdaf91a179ebcb47fbaa6f6aa44ac786fc41186db86f9f7",
+      "publisher_checksums": {
+        "sha1": "8346ea9b65a98e82eea14a5e04e0573f94f4491a",
+        "md5": "a843b67220b37097b17ede611cb90c6a"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "archive.org item metadata licenseurl http://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "not listed on the archive.org item",
+      "attribution": "Unknown, CC0, via the Internet Archive",
+      "kind": "heic",
+      "expect": {
+        "model_tag": "IFD0:Model",
+        "exif_model": "iPhone 11",
+        "gps_tag": "GPS:GPSLatitude",
+        "gps": true,
+        "tags": {
+          "EXIF": 55,
+          "ICC_Profile": 26,
+          "QuickTime": 28
+        }
+      }
+    },
+    {
+      "local_name": "media-03-img-0383.mov",
+      "title": "pkvideofootage/IMG_0383.MOV",
+      "page": "https://archive.org/details/pkvideofootage",
+      "url": "https://archive.org/download/pkvideofootage/IMG_0383.MOV",
+      "revision_timestamp": "2016-11-15T22:25:51Z",
+      "size": 17080271,
+      "sha1": "004ae8ef149d148f1fb86d390efe71184c8413ea",
+      "sha256": "363706b484c710ea02c843747bf5b0e97dde521457f8ef3a51a74c8c38885d3c",
+      "publisher_checksums": {
+        "sha1": "004ae8ef149d148f1fb86d390efe71184c8413ea",
+        "md5": "4b07a47e120e207d2cb90c837fadd0a0"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "archive.org item metadata licenseurl http://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "powerKitten",
+      "attribution": "powerKitten, CC0, via the Internet Archive",
+      "kind": "mov",
+      "expect": {
+        "model_tag": "UserData:Model",
+        "exif_model": "iPad Air",
+        "gps_tag": "UserData:GPSCoordinates",
+        "gps": true,
+        "tags": {
+          "QuickTime": 85
+        }
+      }
+    },
+    {
+      "local_name": "media-04-img-1040.mov",
+      "title": "ZooChile/IMG_1040.MOV",
+      "page": "https://archive.org/details/ZooChile",
+      "url": "https://archive.org/download/ZooChile/IMG_1040.MOV",
+      "revision_timestamp": "2016-05-30T01:29:09Z",
+      "size": 16232561,
+      "sha1": "0d04fe5759485e5cd6484632f5791066f25f9f4d",
+      "sha256": "0cf405cc44ace0893e11940ccbadfad96f954ca9d75fff24a984bb2d7f05fa5c",
+      "publisher_checksums": {
+        "sha1": "0d04fe5759485e5cd6484632f5791066f25f9f4d",
+        "md5": "e7ed7a7faf7df259f7b4f497bf307f4d"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "archive.org item metadata licenseurl http://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "Andrés Delgado-Ron",
+      "attribution": "Andrés Delgado-Ron, CC0, via the Internet Archive",
+      "kind": "mov",
+      "expect": {
+        "model_tag": "UserData:Model",
+        "exif_model": "iPhone 4S",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "QuickTime": 87
+        }
+      }
+    },
+    {
+      "local_name": "media-05-nms-0001.mov",
+      "title": "independencecup/1/NMS_0001.MOV",
+      "page": "https://archive.org/details/independencecup",
+      "url": "https://archive.org/download/independencecup/1/NMS_0001.MOV",
+      "revision_timestamp": "2015-08-17T15:40:17Z",
+      "size": 8437760,
+      "sha1": "6eec136d31f855558ec45806a1aef635f2c4270b",
+      "sha256": "8a30921e205fe3afdd474a07a6f75461060081ea9b073caa92151a5d99d00ebe",
+      "publisher_checksums": {
+        "sha1": "6eec136d31f855558ec45806a1aef635f2c4270b",
+        "md5": "15b24954fe0e7001dbf296e18f9cd28a"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "archive.org item metadata licenseurl http://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "julian correa",
+      "attribution": "julian correa, CC0, via the Internet Archive",
+      "kind": "mov",
+      "expect": {
+        "model_tag": "Nikon:Model",
+        "exif_model": "NIKON 1 V1",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "MakerNotes": 56,
+          "QuickTime": 55
+        }
+      }
+    },
+    {
+      "local_name": "media-06-04-fz150-schaerfeverlagerung-f.mp4",
+      "title": "PanasonicDmc-fz150Mp4-original-videoSchaerfeverlagerung/04_FZ150-Schaerfeverlagerung_focus-control_2.MP4",
+      "page": "https://archive.org/details/PanasonicDmc-fz150Mp4-original-videoSchaerfeverlagerung",
+      "url": "https://archive.org/download/PanasonicDmc-fz150Mp4-original-videoSchaerfeverlagerung/04_FZ150-Schaerfeverlagerung_focus-control_2.MP4",
+      "revision_timestamp": "2012-02-05T23:03:25Z",
+      "size": 9511323,
+      "sha1": "b210985bc80ad837f6e883b8e5468ec351043799",
+      "sha256": "a6425cdb6b095091e7620f87516f1751a8465e4fabb68985f5fc90b91f3f74bd",
+      "publisher_checksums": {
+        "sha1": "b210985bc80ad837f6e883b8e5468ec351043799",
+        "md5": "9207a8da013fa85feebf170008ae1933"
+      },
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_source": "archive.org item metadata licenseurl http://creativecommons.org/publicdomain/zero/1.0/",
+      "author": "consulting",
+      "attribution": "consulting, CC0, via the Internet Archive",
+      "kind": "mp4",
+      "expect": {
+        "model_tag": "Panasonic:Model",
+        "exif_model": "DMC-FZ150",
+        "gps_tag": null,
+        "gps": false,
+        "tags": {
+          "EXIF": 45,
+          "MakerNotes": 83,
+          "PrintIM": 15,
+          "QuickTime": 60
+        }
+      }
+    }
+  ]
+}
