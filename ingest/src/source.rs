@@ -308,6 +308,10 @@ struct Lookups {
     canonical: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<PathBuf>>>,
     #[cfg(windows)]
     metadata: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<fs::Metadata>>>,
+    /// [`dest_ids`] of an existing directory chain, by its first existing
+    /// path. A file and its parent directory start from the same existing
+    /// path, so the chain is read once per call (#138).
+    chain_ids: std::cell::RefCell<std::collections::HashMap<PathBuf, DestIds>>,
 }
 
 impl Lookups {
@@ -584,6 +588,10 @@ fn dest_ids(
             }
         }
     }
+    if let Some(found) = lookups.chain_ids.borrow().get(&cursor) {
+        return Ok(found.clone());
+    }
+    let start = cursor.clone();
     loop {
         if !cursor.exists() {
             break;
@@ -608,6 +616,10 @@ fn dest_ids(
             break;
         }
     }
+    lookups
+        .chain_ids
+        .borrow_mut()
+        .insert(start, (ids.clone(), only_dirs));
     Ok((ids, only_dirs))
 }
 
