@@ -847,6 +847,7 @@ mod tests {
             } else {
                 copy_hashed_aligned_eof(input, &out, direct, &src, &dest, false).unwrap()
             };
+            out.set_modified(mtime).unwrap();
             out.sync_all().unwrap();
             (dest, digest)
         };
