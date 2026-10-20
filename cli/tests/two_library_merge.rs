@@ -6,8 +6,9 @@
 //! signed files only. The other copy's merged manifest then shows them,
 //! and nothing it already held is removed or changed. Synthetic bytes.
 //!
-//! The CLI has no family sync command yet, so the test carries files with
-//! an additive copy that refuses to replace any existing file.
+//! Files travel with `albumen family sync`, which only adds: the test
+//! snapshots every file on both copies around each sync, and checks that a
+//! conflicting file is refused with nothing written.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -85,27 +86,62 @@ fn snapshot(root: &Path) -> Snapshot {
     out
 }
 
-/// Copy files from `from` that `to` lacks. An existing file must already
-/// hold the same bytes; nothing in `to` is replaced or removed.
-fn merge_additive(from: &Path, to: &Path) -> Vec<String> {
-    let target = snapshot(to);
-    let mut added = Vec::new();
-    for (name, (bytes, modified)) in snapshot(from) {
-        match target.get(&name) {
-            Some((existing, _)) => {
-                assert!(
-                    existing == &bytes,
-                    "{name} differs between the two libraries"
-                );
-            }
-            None => {
-                let path = to.join(&name);
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(&path, &bytes).unwrap();
-                set_mtime(&path, modified);
-                added.push(name);
-            }
-        }
+fn run(args: &[&str]) -> (bool, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .args(args)
+        .output()
+        .expect("run albumen");
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    (output.status.success(), text)
+}
+
+/// `albumen family sync --from from --to to --apply`; returns the added
+/// relative paths. A dry run first must write nothing to either copy.
+fn sync(from: &Path, to: &Path) -> Vec<String> {
+    let (from_before, to_before) = (snapshot(from), snapshot(to));
+    let plan = ok(&["family", "sync", "--from", p(from), "--to", p(to)]);
+    assert!(plan.contains("dry-run"), "{plan}");
+    assert_eq!(snapshot(from), from_before, "dry run wrote the source");
+    assert_eq!(snapshot(to), to_before, "dry run wrote the destination");
+    let text = ok(&[
+        "family",
+        "sync",
+        "--from",
+        p(from),
+        "--to",
+        p(to),
+        "--apply",
+    ]);
+    assert!(
+        text.contains("removed: 0") && text.contains("replaced: 0"),
+        "{text}"
+    );
+    assert_eq!(snapshot(from), from_before, "sync wrote the source");
+    let added: Vec<String> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("  + "))
+        .map(str::to_string)
+        .collect();
+    // Exactly the listed files are new; everything else is untouched.
+    let now = snapshot(to);
+    for (name, entry) in &to_before {
+        assert_eq!(now.get(name), Some(entry), "sync changed or removed {name}");
+    }
+    let mut new: Vec<_> = now
+        .keys()
+        .filter(|k| !to_before.contains_key(*k))
+        .cloned()
+        .collect();
+    new.sort();
+    let mut listed = added.clone();
+    listed.sort();
+    assert_eq!(new, listed, "sync added files it did not report");
+    for name in &added {
+        assert_eq!(
+            now[name], from_before[name],
+            "{name} not copied bit-exact with mtime"
+        );
     }
     added
 }
@@ -218,7 +254,7 @@ fn signed_records_merge_between_two_live_libraries_without_removing_anything() {
 
     // Copy B: a second live library, seeded from A.
     let lib_b = work.path().join("copy-b").join("library");
-    assert!(merge_additive(&lib_a, &lib_b).len() > 4);
+    assert!(sync(&lib_a, &lib_b).len() > 4);
     let b_seeded = snapshot(&lib_b);
 
     // On A: Bea hides one photo, Ada tombstones the other, Ada revokes Bea.
@@ -258,7 +294,7 @@ fn signed_records_merge_between_two_live_libraries_without_removing_anything() {
     let a_settled = snapshot(&lib_a);
 
     // Merge A into B: only new signed files arrive.
-    let added = merge_additive(&lib_a, &lib_b);
+    let added = sync(&lib_a, &lib_b);
     assert!(!added.is_empty());
     assert!(
         added.iter().all(|name| !name.contains("/objects/")),
@@ -299,7 +335,7 @@ fn signed_records_merge_between_two_live_libraries_without_removing_anything() {
         "sha256 ",
     );
     let b_settled = snapshot(&lib_b);
-    let added = merge_additive(&lib_b, &lib_a);
+    let added = sync(&lib_b, &lib_a);
     assert!(
         added.iter().any(|name| name.contains(&sha_new)),
         "{added:?}"
@@ -309,4 +345,63 @@ fn signed_records_merge_between_two_live_libraries_without_removing_anything() {
     let manifest_a = ok(&["family", "manifest", "--library", p(&lib_a)]);
     assert!(manifest_a.contains(&sha_new), "{manifest_a}");
     assert!(manifest_a.contains("\"tombstones\""), "{manifest_a}");
+
+    // Syncing again adds nothing.
+    assert!(sync(&lib_a, &lib_b).is_empty());
+    assert!(sync(&lib_b, &lib_a).is_empty());
+
+    // A copy-local receiver tombstone on A is not carried to B.
+    let local = lib_a.join("note.jpg.albumen-tombstone");
+    fs::write(&local, "{\"hidden\":true}\n").unwrap();
+    assert!(sync(&lib_a, &lib_b).is_empty());
+    assert!(!lib_b.join("note.jpg.albumen-tombstone").exists());
+    fs::remove_file(&local).unwrap();
+
+    // Conflicting bytes: a shared file that differs refuses the whole sync,
+    // with nothing written to either copy.
+    let lib_c = work.path().join("copy-c").join("library");
+    sync(&lib_a, &lib_c);
+    let shared = snapshot(&lib_c)
+        .keys()
+        .find(|name| name.contains("/objects/"))
+        .cloned()
+        .expect("an object on copy C");
+    fs::write(lib_c.join(&shared), b"synthetic-different-bytes").unwrap();
+    photo_extra(&inputs, &lib_a, &key_a);
+    let (a_before, c_before) = (snapshot(&lib_a), snapshot(&lib_c));
+    let (passed, text) = run(&[
+        "family",
+        "sync",
+        "--from",
+        p(&lib_a),
+        "--to",
+        p(&lib_c),
+        "--apply",
+    ]);
+    assert!(!passed, "a conflicting sync must fail: {text}");
+    assert!(text.contains("different bytes"), "{text}");
+    assert!(text.contains("nothing was written"), "{text}");
+    assert_eq!(snapshot(&lib_a), a_before, "refused sync wrote the source");
+    assert_eq!(
+        snapshot(&lib_c),
+        c_before,
+        "refused sync wrote the destination"
+    );
+}
+
+/// Add one more synthetic photo on A so a refused sync has something to add.
+fn photo_extra(inputs: &Path, lib: &Path, key: &Path) {
+    let photo = inputs.join("IMG_9.jpg");
+    stamp(&photo, b"synthetic-live-9");
+    ok(&[
+        "family",
+        "add",
+        "--library",
+        p(lib),
+        "--key",
+        p(key),
+        "--from",
+        p(&photo),
+        "--apply",
+    ]);
 }
