@@ -40,6 +40,26 @@ const ZERO: AtomicU64 = AtomicU64::new(0);
 static WALL_NS: [AtomicU64; PHASES] = [ZERO; PHASES];
 static CPU_NS: [AtomicU64; PHASES] = [ZERO; PHASES];
 
+/// Sub-steps inside preflight, timed separately for #138. Timing only: they
+/// are also inside the preflight phase and do not change what runs.
+pub const PREFLIGHT_STEPS: usize = 5;
+
+/// Sub-step names in [`CopyPhases::preflight_step_cpu_ns`] order.
+pub const PREFLIGHT_STEP_NAMES: [&str; PREFLIGHT_STEPS] =
+    ["resolve", "ancestors", "dest_ids", "source_walk", "create"];
+
+#[derive(Clone, Copy)]
+pub(crate) enum PreflightStep {
+    Resolve = 0,
+    Ancestors,
+    DestIds,
+    SourceWalk,
+    Create,
+}
+
+static STEP_WALL_NS: [AtomicU64; PREFLIGHT_STEPS] = [ZERO; PREFLIGHT_STEPS];
+static STEP_CPU_NS: [AtomicU64; PREFLIGHT_STEPS] = [ZERO; PREFLIGHT_STEPS];
+
 /// Summed phase times. Nanoseconds are the unit so short files still add up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CopyPhases {
@@ -58,6 +78,10 @@ pub struct CopyPhases {
     pub metadata_ns: u64,
     /// Thread CPU time per phase, same order as [`CopyPhases::cpu_named`].
     pub cpu_ns: [u64; PHASES],
+    /// Wall time per preflight sub-step, [`PREFLIGHT_STEP_NAMES`] order.
+    pub preflight_step_wall_ns: [u64; PREFLIGHT_STEPS],
+    /// Thread CPU time per preflight sub-step, [`PREFLIGHT_STEP_NAMES`] order.
+    pub preflight_step_cpu_ns: [u64; PREFLIGHT_STEPS],
 }
 
 /// Phase names in [`CopyPhases::cpu_ns`] order.
@@ -117,7 +141,12 @@ impl CopyPhases {
 
 /// Clear the counters. Call this before the profiled workers start.
 pub fn reset() {
-    for slot in WALL_NS.iter().chain(CPU_NS.iter()) {
+    for slot in WALL_NS
+        .iter()
+        .chain(CPU_NS.iter())
+        .chain(STEP_WALL_NS.iter())
+        .chain(STEP_CPU_NS.iter())
+    {
         slot.store(0, Ordering::Relaxed);
     }
 }
@@ -141,6 +170,8 @@ pub fn snapshot() -> CopyPhases {
         case_check_ns: wall(Phase::CaseCheck),
         metadata_ns: wall(Phase::Metadata),
         cpu_ns,
+        preflight_step_wall_ns: std::array::from_fn(|i| STEP_WALL_NS[i].load(Ordering::Relaxed)),
+        preflight_step_cpu_ns: std::array::from_fn(|i| STEP_CPU_NS[i].load(Ordering::Relaxed)),
     }
 }
 
@@ -226,4 +257,16 @@ fn add(phase: Phase, start: Option<Tic>) {
     let cpu = thread_cpu_ns().saturating_sub(start.cpu_ns);
     WALL_NS[phase as usize].fetch_add(wall, Ordering::Relaxed);
     CPU_NS[phase as usize].fetch_add(cpu, Ordering::Relaxed);
+}
+
+/// Time one preflight sub-step. Recorded only while profiling is on; the
+/// enclosing preflight phase still records the same span.
+pub(crate) fn add_preflight_step(step: PreflightStep, start: Option<Tic>) {
+    let Some(start) = start else {
+        return;
+    };
+    let wall = u64::try_from(start.wall.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let cpu = thread_cpu_ns().saturating_sub(start.cpu_ns);
+    STEP_WALL_NS[step as usize].fetch_add(wall, Ordering::Relaxed);
+    STEP_CPU_NS[step as usize].fetch_add(cpu, Ordering::Relaxed);
 }
