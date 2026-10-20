@@ -364,10 +364,12 @@ fn family_hide_omit_and_revoke_on_copy_a_leave_copy_b_and_a_originals() {
         "{merged}"
     );
 
-    // Sync A onto B again. Family export refuses to overwrite an existing
-    // copy, so B is left exactly as it was: nothing removed, every original
-    // and sidecar bit-exact with its mtime.
-    let (synced, text) = run(&[
+    // Update B from A (#145). The update is additive: files B already holds
+    // with the right digest are skipped, nothing in B is overwritten or
+    // removed, and the hides, omit and revoke arrive as added provenance
+    // state beside the first provenance.json.
+    let b2 = manifests.join("b2.txt");
+    ok(&[
         "family",
         "export",
         "--library",
@@ -375,17 +377,89 @@ fn family_hide_omit_and_revoke_on_copy_a_leave_copy_b_and_a_originals() {
         "--to",
         p(&copy_b),
         "--manifest",
-        p(&manifests.join("b2.txt")),
+        p(&b2),
         "--apply",
     ]);
-    assert!(!synced, "{text}");
-    // Which file trips the refusal first depends on directory order: the
-    // CLI's "refusing to overwrite" check or the OS "file exists" error.
-    let lower = text.to_lowercase();
+    let b_after = snapshot(&copy_b);
+    let added: Vec<_> = b_after
+        .keys()
+        .filter(|name| !b_before.contains_key(*name))
+        .collect();
     assert!(
-        lower.contains("refusing to overwrite") || lower.contains("exist"),
-        "{text}"
+        !added.is_empty()
+            && added
+                .iter()
+                .all(|name| name.contains("/provenance-") && name.ends_with(".json")),
+        "update should add only new provenance state: {added:?}"
     );
+    let state: String = added
+        .iter()
+        .map(|name| String::from_utf8_lossy(&b_after[*name].0).into_owned())
+        .collect();
+    assert!(
+        state.contains("hide"),
+        "hides did not reach copy B: {state}"
+    );
+    assert!(
+        state.contains("revoke"),
+        "revoke did not reach copy B: {state}"
+    );
+    ok(&[
+        "verify-manifest",
+        "--manifest",
+        p(&b2),
+        "--against",
+        p(&copy_b),
+    ]);
+
+    // A second update with nothing new changes nothing.
+    let b3 = manifests.join("b3.txt");
+    ok(&[
+        "family",
+        "export",
+        "--library",
+        p(&copy_a),
+        "--to",
+        p(&copy_b),
+        "--manifest",
+        p(&b3),
+        "--apply",
+    ]);
+    assert_eq!(snapshot(&copy_b), b_after, "an idle update changed copy B");
+
+    // A copy whose original was altered is refused, not repaired over.
+    let tampered = b_before
+        .keys()
+        .find(|name| name.ends_with(".jpg"))
+        .unwrap()
+        .clone();
+    let tampered_path = copy_b.join(&tampered);
+    let mut bytes = fs::read(&tampered_path).unwrap();
+    bytes.push(b'!');
+    fs::write(&tampered_path, &bytes).unwrap();
+    let (updated, text) = run(&[
+        "family",
+        "export",
+        "--library",
+        p(&copy_a),
+        "--to",
+        p(&copy_b),
+        "--manifest",
+        p(&manifests.join("b4.txt")),
+        "--apply",
+    ]);
+    assert!(!updated, "{text}");
+    assert!(text.contains("refusing to overwrite"), "{text}");
+    assert_eq!(fs::read(&tampered_path).unwrap(), bytes);
+    let restore = b_before[&tampered].0.clone();
+    fs::write(&tampered_path, &restore).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&tampered_path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(b_before[&tampered].1))
+        .unwrap();
+
     // A fresh copy made after the hides, omit and revoke still carries every
     // original and sidecar: a hide is not a delete.
     let copy_c = work.path().join("copy-c");
