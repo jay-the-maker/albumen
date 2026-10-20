@@ -70,13 +70,15 @@ Deletes never propagate. Library content is append-only. A removal is a tombston
 
 The receiver refuses WebDAV `DELETE` and `MOVE`, SFTP remove and rename, and FTP `DELE`, `RMD`, and rename. A hide writes `{filename}.albumen-tombstone` beside the original. A second hide replaces that sidecar by rename. The original stays. When the receipt sidecar cannot be written after `copy_verify`, the same tombstone is written and the original stays. Both importers open the source read-only and `copy_verify` into the destination. The MCP server has no remove tool. `BlobStore::delete`, and an export rollback, remove only a destination this call just wrote, before that call has finished. The source is unchanged.
 
+`albumen receive hide --library <dir> --name <stored name> [--member <id>]` and `receive unhide` print the plan and write nothing unless `--apply` or `--execute` is passed. The receiver's `POST /albumen/hide` and `POST /albumen/unhide` take `{"name": "...", "apply": false}` with the receiver password, and also default to a dry run. A hide writes or renames `{name}.albumen-tombstone`. An unhide rewrites that file with `"hidden":false` and never removes it. The original is never unlinked or rewritten. The name must be a regular file directly in the library root, which is `members/<id>/` in a member namespace; anything else, a symlink included, is refused before any write (#196). The MCP server still has no hide tool.
+
 Receivers and importers are tested. The receiver round-trip sends `DELETE` and `DELE`, and the stored file stays. The receiver store tests a hide and a failed receipt. `cli/tests/deletes_never_propagate.rs` fails the build when the receiver, either importer, the CLI, or the MCP server unlinks a stored original.
 
 Two kinds of removal, and where each lives:
 
 | Surface | What "remove" does | Where it is recorded | Does it reach another copy? |
 | --- | --- | --- | --- |
-| Receiver library (`albumen-receive`, `Library::hide`) | Hide | `{stored name}.albumen-tombstone` beside the original, on this copy only | No. `albumen export` skips tombstones (#152), so copy B keeps its originals and passes its own manifest |
+| Receiver library (`albumen-receive`, `Library::hide`/`unhide`; `albumen receive hide\|unhide`, `POST /albumen/hide\|unhide`) | Hide, or unhide as a `"hidden":false` record. Dry-run unless `--apply` or `"apply": true` | `{stored name}.albumen-tombstone` beside the original, on this copy only | No. `albumen export` skips tombstones (#152), so copy B keeps its originals and passes its own manifest |
 | Family library, one viewer | Per-viewer hide (`albumen family hide`) | Signed `hide` record in the member's device log, merged into `hides` | Yes, as signed state: `family export` updates add it as `provenance-<sha256>.json` (#154), and live libraries merge it as a new log file |
 | Family library, owner | Tombstone (`albumen family tombstone`, #155) | Signed `tombstone` record, merged into `tombstones` | Yes, as signed state, the same way as a hide |
 | Family library, founder | Revoke (`albumen family revoke`) | Signed `revoke` record | Yes, as signed state. The revoked member's originals stay |
