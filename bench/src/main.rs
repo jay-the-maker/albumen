@@ -207,7 +207,18 @@ fn run() -> Result<(), String> {
                 writeln!(out, "{}", albumen_bench::cpu_scorecard(&report))
                     .map_err(|err| format!("write scorecard: {err}"))?;
             }
-            let problems = throughput_problems(&report);
+            let (dir_flushed, dir_write_through, dir_failed) =
+                albumen_ingest::dest::dir_sync_counts();
+            eprintln!(
+                "import-dir-sync leg={} dir_flush_ok={dir_flushed} dir_write_through_ok={dir_write_through} dir_sync_failed={dir_failed}",
+                report.leg
+            );
+            let mut problems = throughput_problems(&report);
+            if dir_failed > 0 {
+                problems.push(format!(
+                    "{dir_failed} directory sync(s) failed: directory entries are not known to be durable"
+                ));
+            }
             if !problems.is_empty() {
                 return Err(problems.join("\n"));
             }
