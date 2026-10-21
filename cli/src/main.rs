@@ -21,7 +21,8 @@ use albumen_ingest::{
     write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
     SourceRoot, WalkControl,
 };
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 mod family;
 mod receive;
@@ -179,6 +180,14 @@ enum Command {
         /// are compared with a local directory.
         #[arg(long)]
         against: String,
+    },
+    /// Print a shell completion script to stdout.
+    ///
+    /// Writes nothing except the script. Redirect it into your shell's
+    /// completion directory. The README shows each shell.
+    Completions {
+        /// Shell to generate the script for.
+        shell: Shell,
     },
 }
 
@@ -370,6 +379,11 @@ fn run() -> Result<(), IngestError> {
             println!(
                 "{{\"summary\":true,\"count_in\":{count},\"count_out\":{count},\"mismatched\":0}}"
             );
+            Ok(())
+        }
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "albumen", &mut std::io::stdout());
             Ok(())
         }
     }

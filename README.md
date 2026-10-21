@@ -139,6 +139,26 @@ albumen verify-manifest --manifest ./library-manifest.txt --against s3://my-buck
 
 The manifest lists SHA-256, byte length, and the relative path. `verify-manifest` hashes the destination bytes and fails if a file is missing, extra, or different. S3 uses the same `ALBUMEN_S3_*` variables as ingest.
 
+### Shell completions
+
+`albumen completions <bash|zsh|fish|powershell|elvish>` prints a completion script to stdout and writes nothing else. Install it once per shell:
+
+```bash
+# bash
+albumen completions bash > ~/.local/share/bash-completion/completions/albumen
+
+# zsh (pick a directory on your $fpath)
+albumen completions zsh > "${fpath[1]}/_albumen"
+
+# fish
+albumen completions fish > ~/.config/fish/completions/albumen.fish
+```
+
+```powershell
+# PowerShell: add this line to your $PROFILE
+albumen completions powershell | Out-String | Invoke-Expression
+```
+
 ## Google Takeout
 
 `albumen import-takeout` reads a Google Takeout download of `.zip` and `.tgz` parts, or an extracted folder, read-only. Each file is `copy_verify`'d. Takeout JSON is kept byte-for-byte next to its original. Capture time and GPS are restored into a new `.albumen.json` sidecar and are not written into the original. The reconciliation report names every unmatched file. Without `--apply` or `--execute` the command prints a plan and writes nothing. With `--apply` it exits non-zero unless the count in equals the count out and every SHA-256 matches.
