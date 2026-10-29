@@ -289,6 +289,60 @@ pub fn verify_tree(
     Ok(())
 }
 
+/// One difference between a manifest and an exported tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeDrift {
+    pub kind: &'static str,
+    pub path: String,
+    pub detail: String,
+}
+
+/// Like [`verify_tree`], but reports every difference instead of stopping
+/// at the first. Read-only.
+pub fn tree_drift(
+    entries: &[ManifestEntry],
+    dest: &dyn ExportDest,
+    ignore: &[String],
+) -> Result<Vec<TreeDrift>, IngestError> {
+    let mut expected = BTreeSet::new();
+    let mut drift = Vec::new();
+    for entry in entries {
+        check_relative(&entry.relative_path)?;
+        if !expected.insert(entry.relative_path.clone()) {
+            return Err(IngestError::DuplicateFilename(entry.relative_path.clone()));
+        }
+        match dest.read_hash(&entry.relative_path)? {
+            None => drift.push(TreeDrift {
+                kind: "missing",
+                path: entry.relative_path.clone(),
+                detail: format!("expected sha256 {}", entry.sha256),
+            }),
+            Some((sha, len)) if sha != entry.sha256 || len != entry.byte_len => {
+                drift.push(TreeDrift {
+                    kind: "changed",
+                    path: entry.relative_path.clone(),
+                    detail: format!(
+                        "expected sha256 {} ({} bytes), found {} ({} bytes)",
+                        entry.sha256, entry.byte_len, sha, len
+                    ),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    for relative in dest.list()? {
+        if ignore.iter().any(|name| name == &relative) || expected.contains(&relative) {
+            continue;
+        }
+        drift.push(TreeDrift {
+            kind: "extra",
+            path: relative,
+            detail: "not in the manifest".to_string(),
+        });
+    }
+    Ok(drift)
+}
+
 pub fn format_manifest(entries: &[ManifestEntry]) -> String {
     let mut ordered = entries.to_vec();
     ordered.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
