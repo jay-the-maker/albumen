@@ -78,7 +78,18 @@ fn run() -> Result<(), String> {
         }
         Mode::Write => {
             let observed = measure(search_items, copy_files, copy_bytes)?;
-            let text = pretty(&observed)?;
+            let mut text = pretty(&observed)?;
+            // The scan/export entry is written by scripts/scan-export-scale.py; keep it.
+            if let Some(kept) = fs::read_to_string(&invocation.baseline)
+                .ok()
+                .and_then(|old| serde_json::from_str::<serde_json::Value>(&old).ok())
+                .and_then(|old| old.get("scan_export").cloned())
+            {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|err| err.to_string())?;
+                value["scan_export"] = kept;
+                text = serde_json::to_string_pretty(&value).map_err(|err| err.to_string())?;
+            }
             fs::write(&invocation.baseline, format!("{text}\n"))
                 .map_err(|err| format!("write {}: {err}", invocation.baseline.display()))?;
             print_report(&observed)?;
