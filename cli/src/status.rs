@@ -172,8 +172,8 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
     let root = Path::new(dest);
     let unreadable = |why: String| {
         let next = format!(
-            "next: check that {dest} is connected and readable, then run albumen status {} again",
-            shell_quote(dest)
+            "next: check that {quoted} is connected and readable, then run albumen status {quoted} again",
+            quoted = shell_quote(dest)
         );
         Report {
             state: State::Unreadable,
@@ -521,5 +521,24 @@ mod tests {
             4
         );
         assert_eq!(render(&[r(State::Ok)]).1, 0);
+    }
+    #[test]
+    fn unreadable_next_line_quotes_a_dest_with_a_space_in_both_halves() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("missing dest");
+        let dest = dest.to_str().unwrap();
+        let report = check(dest, 604_800, SystemTime::now());
+        let quoted = shell_quote(dest);
+        assert_eq!(quoted, format!("'{dest}'"));
+        assert_eq!(
+            report.next.as_deref(),
+            Some(
+                format!(
+                    "next: check that {quoted} is connected and readable, then run albumen status {quoted} again"
+                )
+                .as_str()
+            )
+        );
+        println!("{}", report.next.unwrap());
     }
 }
