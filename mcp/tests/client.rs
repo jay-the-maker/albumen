@@ -453,7 +453,13 @@ fn metadata_search_reads_files_and_sidecars_without_writing() {
     );
 
     let paths = search_paths(&mut client, 4, json!({"camera": "Synthetic DNG"}));
-    assert_eq!(paths, vec!["raw-jpeg/IMG_0003.dng".to_string()]);
+    assert_eq!(
+        paths,
+        vec![
+            "raw-jpeg/IMG_0003.dng".to_string(),
+            "sidecar-names/IMG_0014.dng".to_string()
+        ]
+    );
 
     let (is_error, body) = tool_body(&client.request(
         5,
