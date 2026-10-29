@@ -550,6 +550,80 @@ async fn a_later_mtime_is_appended_and_does_not_replace_the_first() {
     assert_conflict(root.path(), "IMG_SFTP.JPG", "sftp", LATER_MTIME + 60, 1);
 }
 
+/// Issue #46: per front end, a fixture keeps its bytes, name, and camera
+/// mtime, and a later upload with different bytes under the same name lands
+/// beside it while the first copy and its `source_mtime` stay as they were.
+#[tokio::test]
+async fn each_front_end_keeps_fixture_and_stores_different_bytes_beside_it() {
+    let fixture = fixtures().join("aae/IMG_0008.jpg");
+    let bytes = std::fs::read(&fixture).unwrap();
+    let hash = sha256_hex(&fixture).unwrap();
+    let other: &[u8] = b"different bytes, same camera name";
+    let root = tempfile::tempdir().unwrap();
+    let listening = listen(
+        Settings {
+            library: root.path().to_path_buf(),
+            user: "camera".into(),
+            password: "roll".into(),
+            member: None,
+        },
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some("127.0.0.1:0".parse().unwrap()),
+    )
+    .await
+    .unwrap();
+    let check = |root: &std::path::Path| {
+        assert_eq!(sha256_hex(&root.join("IMG_0008.jpg")).unwrap(), hash);
+        assert_mtime(root, "IMG_0008.jpg", CAMERA_MTIME);
+    };
+    let check_beside = |root: &std::path::Path| {
+        assert_eq!(std::fs::read(root.join("IMG_0008__2.jpg")).unwrap(), other);
+        assert_eq!(std::fs::read(root.join("IMG_0008.jpg")).unwrap(), bytes);
+        assert_mtime(root, "IMG_0008.jpg", CAMERA_MTIME);
+    };
+
+    let webdav = listening.webdav.unwrap();
+    let path = "/DCIM/100CANON/IMG_0008.jpg";
+    http_put_with_mtime(webdav, path, &bytes, CAMERA_MTIME, "201", &hash).await;
+    check(root.path());
+    let other_hash = hash_bytes(other);
+    http_put_with_mtime(webdav, path, other, LATER_MTIME, "201", &other_hash).await;
+    check_beside(root.path());
+
+    clear_library(root.path());
+    let ftp = listening.ftp.unwrap();
+    ftp_put_with_time(ftp, "MFMT", path, &bytes).await;
+    check(root.path());
+    let reply = ftp_store_again(ftp, path, other).await;
+    assert!(reply.starts_with("226"), "{reply}");
+    check_beside(root.path());
+
+    clear_library(root.path());
+    let session = sftp_session(listening.sftp.unwrap()).await;
+    for (body, mtime) in [(&bytes[..], CAMERA_MTIME), (other, LATER_MTIME)] {
+        let mut file = session
+            .open_with_flags_and_attributes(
+                path,
+                russh_sftp::protocol::OpenFlags::WRITE,
+                russh_sftp::client::fs::Metadata {
+                    mtime: Some(u32::try_from(mtime).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        file.write_all(body).await.unwrap();
+        file.close().await.unwrap();
+        if mtime == CAMERA_MTIME {
+            check(root.path());
+        }
+    }
+    check_beside(root.path());
+    assert!(!root.path().join("DCIM").exists());
+    assert_eq!(sha256_hex(&fixture).unwrap(), hash);
+}
+
 fn assert_mtime(root: &std::path::Path, stored_name: &str, seconds: u64) {
     let modified = std::fs::metadata(root.join(stored_name))
         .unwrap()
