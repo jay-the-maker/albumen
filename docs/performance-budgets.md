@@ -233,6 +233,28 @@ ALBUMEN_BENCH_ITEMS=380000 cargo run --release --locked -p albumen-bench -- --me
 
 Do not set `ALBUMEN_BENCH_ITEMS` in CI. The workflow uses the default 128.
 
+## Scan and export scale matrix
+
+[`.github/workflows/scan-export-scale.yml`](../.github/workflows/scan-export-scale.yml) runs `scripts/scan-export-scale.py` against a release build on `ubuntu-24.04`. Each leg generates its own synthetic text files (a few hundred bytes each, nested 500 to a folder), times `albumen scan` and `albumen export --apply`, and records the peak RSS of each command from `wait4`. Each leg uploads `scale-<files>.json` as an artifact and writes it to the job summary.
+
+| Leg | When it runs | Budget | Gate |
+| --- | --- | --- | --- |
+| 100,000 files | Every pull request that touches `ingest/`, `cli/`, the script, the workflow, or the baseline; weekly cron | `scan_s_per_1k` and `export_s_per_1k` no more than 20 percent over `bench/baseline.json` | Warning only while the baseline has `"placeholder": true` |
+| 380,000 files | Weekly cron, `workflow_dispatch` | Same per-1,000-file budget; peak RSS reported | Same |
+| 1,000,000 files | Weekly cron only (CI only, never on a dev box) | Same per-1,000-file budget; peak RSS reported | Same |
+| Cold start, search p50/p95, peak memory at 380,000 items | `library scale` workflow | Cold start ≤ 1.5 s, search p95 ≤ 200 ms | Report only; see [Search index at 380,000 items](#search-index-at-380000-items) |
+
+The cold start, search p95 and peak memory timings from `library-scale-380k-v2` (e0efbbd, 2026-10-19) are the "Before the index" table under [Search index at 380,000 items](#search-index-at-380000-items). That branch is superseded by this matrix and kept; it is not merged.
+
+A local smoke run uses about 1,000 files and a debug build is fine:
+
+```bash
+cargo build --locked -p albumen
+python3 scripts/scan-export-scale.py --albumen target/debug/albumen --files 1000 --workdir /tmp/albumen-scale-smoke --check
+```
+
+The placeholder in `bench/baseline.json` stays a warning. It is never a red gate. The first real numbers come from CI.
+
 ## Takeout import, 100,000 items
 
 This is the switching-time measurement for `albumen import-takeout`. It is not the performance-regression job. That job does not pass `--takeout` and does not set `ALBUMEN_TAKEOUT_ITEMS`.

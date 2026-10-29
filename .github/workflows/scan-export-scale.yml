@@ -1,11 +1,18 @@
 name: scan export scale
 
-# Generates 100,000 synthetic text files on the runner, then times
-# `albumen scan` and `albumen export --apply` with scripts/scan-export-scale.py.
-# The job fails when either is more than 20 percent slower per 1,000 files
-# than the scan_export entry in bench/baseline.json. While that entry has
-# "placeholder": true the job warns and does not enforce. Nothing generated is
-# committed and no photo or media file is read.
+# Generates synthetic text files on the runner, then times `albumen scan` and
+# `albumen export --apply` with scripts/scan-export-scale.py. Each leg records
+# seconds per 1,000 files and the peak RSS of each command to a JSON
+# artifact. The job fails when scan or export is more than 20 percent slower
+# per 1,000 files than the scan_export entry in bench/baseline.json. While that
+# entry has "placeholder": true the job warns and does not enforce; the
+# placeholder is never a red gate. Nothing generated is committed and no photo
+# or media file is read.
+#
+# Legs: a pull request runs 100,000 files. The weekly cron runs 100,000,
+# 380,000 and 1,000,000. The 1,000,000-file leg runs in CI only, never on a
+# dev box; a local smoke run uses about 1,000 files. workflow_dispatch takes a
+# comma-separated list of file counts.
 
 on:
   schedule:
@@ -20,6 +27,10 @@ on:
       - "Cargo.lock"
   workflow_dispatch:
     inputs:
+      files:
+        description: "Comma-separated file counts, for example 100000,380000"
+        type: string
+        default: "100000"
       write_baseline:
         description: "Print a new scan_export entry instead of checking"
         type: boolean
@@ -29,9 +40,29 @@ permissions:
   contents: read
 
 jobs:
-  scan-export-scale:
+  legs:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    outputs:
+      files: ${{ steps.legs.outputs.files }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: legs
+        env:
+          EVENT: ${{ github.event_name }}
+          FILES: ${{ inputs.files }}
+        run: |
+          python3 scripts/scan-export-scale.py --self-test
+          echo "files=$(python3 scripts/scan-export-scale.py --legs "$EVENT" --legs-input "$FILES")" >> "$GITHUB_OUTPUT"
+
+  scan-export-scale:
+    needs: legs
+    name: scan export scale (${{ matrix.files }} files)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        files: ${{ fromJSON(needs.legs.outputs.files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -39,17 +70,24 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.2
 
-      - name: Build albumen
+      - name: Build albumen (release)
         run: cargo build --release --locked -p albumen
 
       - name: Put exiftool on PATH
-        run: echo "$(scripts/install-exiftool.sh)" >> "$GITHUB_PATH"
+        run: echo "$(bash scripts/install-exiftool.sh)" >> "$GITHUB_PATH"
 
-      - name: Scan and export 100,000 synthetic files
+      - name: Scan and export ${{ matrix.files }} synthetic files
         run: |
           mode=--check
           if [ "${{ inputs.write_baseline }}" = "true" ]; then mode=--write; fi
           python3 scripts/scan-export-scale.py --albumen target/release/albumen \
-            --files 100000 --workdir "$RUNNER_TEMP/scan-export-scale" $mode \
-            | tee "$RUNNER_TEMP/scan-export.json"
-          { echo '```json'; cat "$RUNNER_TEMP/scan-export.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            --files ${{ matrix.files }} --workdir "$RUNNER_TEMP/scan-export-scale" $mode \
+            --json-out "$RUNNER_TEMP/scale-${{ matrix.files }}.json" \
+            | tee "$RUNNER_TEMP/scan-export.txt"
+          { echo '```json'; cat "$RUNNER_TEMP/scale-${{ matrix.files }}.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scale-${{ matrix.files }}
+          path: ${{ runner.temp }}/scale-${{ matrix.files }}.json
+          if-no-files-found: error
