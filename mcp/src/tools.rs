@@ -748,7 +748,7 @@ fn search_def() -> Value {
 fn thumbnail_def() -> Value {
     json!({
         "name": "thumbnail",
-        "description": "Return a small JPEG preview of one library JPEG, base64 in data_base64. The original is read, not changed. Previews are cached outside the library.",
+        "description": "Return a small JPEG preview of one library JPEG as an MCP image content block (type image, mimeType image/jpeg), followed by a text block with path, size and cache state. The original is read, not changed. Previews are cached outside the library.",
         "inputSchema": {
             "type": "object",
             "properties": {
