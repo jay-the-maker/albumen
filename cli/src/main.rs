@@ -18,8 +18,8 @@ use std::process::ExitCode;
 use albumen_ingest::{
     dest, export_tree_counted, import_icloud, import_takeout_with, parse_manifest, plan_icloud,
     plan_takeout, platform_dirs, scan_tree, verify_scan_manifest, verify_tree, walk_sorted,
-    write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
-    SourceRoot, WalkControl,
+    write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, RcloneStore, S3Config,
+    S3Store, SourceRoot, WalkControl,
 };
 mod proof;
 
@@ -42,14 +42,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Copy the library and sidecars to a directory or s3://bucket/prefix.
+    /// Copy the library and sidecars to a directory, s3://, sftp://, webdav+http(s)://, or b2://.
     ///
     /// Without `--apply` or `--execute`, print the plan and write nothing.
     Export {
         /// Library root. Files under it are not modified.
         #[arg(long)]
         from: PathBuf,
-        /// Destination directory, or s3://bucket/prefix.
+        /// Destination directory, s3://bucket/prefix, or an rclone remote:
+        /// sftp://user@host:port/dir, webdav+https://user@host/path, or
+        /// b2://bucket/prefix. The rclone password or key comes from
+        /// ALBUMEN_RCLONE_PASSWORD (SFTP, WebDAV) or ALBUMEN_B2_ACCOUNT and
+        /// ALBUMEN_B2_KEY, never the command line. ALBUMEN_RCLONE names the binary.
         #[arg(long)]
         to: String,
         /// SHA-256 manifest to write. Defaults to <to>/ALBUMEN-MANIFEST.txt for a directory.
@@ -179,7 +183,7 @@ enum Command {
     VerifyManifest {
         #[arg(long)]
         manifest: PathBuf,
-        /// Directory or s3://bucket/prefix that was exported. Scan manifests
+        /// Directory, s3://, or rclone remote that was exported. Scan manifests
         /// are compared with a local directory.
         #[arg(long)]
         against: String,
@@ -447,7 +451,7 @@ fn run() -> Result<(), IngestError> {
             proof: None,
         } => {
             if manifest_is_jsonl(&manifest)? {
-                if against.starts_with("s3://") {
+                if is_remote(&against) {
                     return Err(IngestError::Usage {
                         message: format!(
                             "{}: a scan manifest is verified against a local directory",
@@ -499,7 +503,7 @@ fn verify_with_proof(manifest: &Path, against: &str, proof_path: &Path) -> Resul
     let mut drift = Vec::new();
     let mut files = Vec::new();
     if manifest_is_jsonl(manifest)? {
-        if against.starts_with("s3://") {
+        if is_remote(against) {
             return Err(IngestError::Usage {
                 message: format!(
                     "{}: a scan manifest is verified against a local directory",
@@ -573,7 +577,7 @@ fn verify_with_proof(manifest: &Path, against: &str, proof_path: &Path) -> Resul
 
 fn refuse_export_targets(from: &Path, to: &str, manifest: &Path) -> Result<(), IngestError> {
     let source = SourceRoot::open(from)?;
-    if !to.starts_with("s3://") {
+    if !is_remote(to) {
         let dest = Path::new(to);
         source.refuse_destination(dest)?;
         albumen_ingest::family::refuse_shared_write_root(dest)?;
@@ -594,11 +598,13 @@ fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), Inges
     println!("  manifest: {}", manifest.display());
     if to.starts_with("s3://") {
         println!("  network: on --apply, connect to ALBUMEN_S3_ENDPOINT and write objects");
+    } else if is_remote(to) {
+        println!("  network: on --apply, run rclone against {to} and write objects");
     } else {
         println!("  network: none");
     }
     let source = SourceRoot::open(from)?;
-    let local = (!to.starts_with("s3://")).then(|| Path::new(to));
+    let local = (!is_remote(to)).then(|| Path::new(to));
     let mut files = 0u64;
     let mut bytes = 0u64;
     let (mut new, mut present) = (0u64, 0u64);
@@ -702,10 +708,79 @@ fn open_target(spec: &str) -> Result<Box<dyn ExportDest>, IngestError> {
         config.prefix = prefix;
         let store = S3Store::connect(config)?;
         Ok(Box::new(store))
+    } else if let Some(store) = open_rclone(spec)? {
+        Ok(Box::new(store))
     } else {
         dest::create_dir_all(Path::new(spec))?;
         Ok(Box::new(DirectoryTree::new(spec)))
     }
+}
+
+const RCLONE_SCHEMES: [&str; 4] = ["sftp://", "webdav+http://", "webdav+https://", "b2://"];
+
+/// A destination that is not a local directory.
+fn is_remote(spec: &str) -> bool {
+    spec.starts_with("s3://") || RCLONE_SCHEMES.iter().any(|scheme| spec.starts_with(scheme))
+}
+
+fn rclone_error(spec: &str, message: &str) -> IngestError {
+    IngestError::Store {
+        operation: "rclone",
+        filename: spec.to_string(),
+        message: message.to_string(),
+    }
+}
+
+fn env_secret(spec: &str, name: &str) -> Result<String, IngestError> {
+    std::env::var(name).map_err(|_| rclone_error(spec, &format!("set {name}")))
+}
+
+/// `sftp://user@host:port/dir`, `webdav+https://user@host/path`, `b2://bucket/prefix`.
+fn open_rclone(spec: &str) -> Result<Option<RcloneStore>, IngestError> {
+    let bin = std::env::var_os("ALBUMEN_RCLONE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("rclone"));
+    if let Some(rest) = spec.strip_prefix("b2://") {
+        let (bucket, prefix) = split_s3(rest)?;
+        let account = env_secret(spec, "ALBUMEN_B2_ACCOUNT")?;
+        let key = env_secret(spec, "ALBUMEN_B2_KEY")?;
+        return Ok(Some(RcloneStore::b2(
+            bin, &account, &key, &bucket, &prefix,
+        )?));
+    }
+    if let Some(rest) = spec.strip_prefix("sftp://") {
+        let (authority, dir) = rest.split_once('/').unwrap_or((rest, ""));
+        let (user, host_port) = authority
+            .split_once('@')
+            .ok_or_else(|| rclone_error(spec, "expected sftp://user@host:port/dir"))?;
+        let (host, port) = match host_port.rsplit_once(':') {
+            Some((host, port)) => (
+                host,
+                port.parse::<u16>()
+                    .map_err(|_| rclone_error(spec, "port must be a number"))?,
+            ),
+            None => (host_port, 22),
+        };
+        if user.is_empty() || host.is_empty() {
+            return Err(rclone_error(spec, "expected sftp://user@host:port/dir"));
+        }
+        let password = env_secret(spec, "ALBUMEN_RCLONE_PASSWORD")?;
+        let store = RcloneStore::sftp(bin, host, port, user, &password)?;
+        return Ok(Some(store.under(dir)?));
+    }
+    if let Some(rest) = spec.strip_prefix("webdav+") {
+        let (scheme, after) = rest
+            .split_once("://")
+            .ok_or_else(|| rclone_error(spec, "expected webdav+https://user@host/path"))?;
+        let (authority, path) = after.split_once('/').unwrap_or((after, ""));
+        let (user, host) = authority
+            .split_once('@')
+            .ok_or_else(|| rclone_error(spec, "expected webdav+https://user@host/path"))?;
+        let url = format!("{scheme}://{host}/{path}");
+        let password = env_secret(spec, "ALBUMEN_RCLONE_PASSWORD")?;
+        return Ok(Some(RcloneStore::webdav(bin, &url, user, &password)?));
+    }
+    Ok(None)
 }
 
 fn split_s3(rest: &str) -> Result<(String, String), IngestError> {
@@ -728,16 +803,16 @@ fn split_s3(rest: &str) -> Result<(String, String), IngestError> {
 }
 
 fn default_manifest(to: &str) -> Result<PathBuf, IngestError> {
-    if to.starts_with("s3://") {
+    if is_remote(to) {
         return Err(IngestError::Usage {
-            message: format!("{to}: pass --manifest when exporting to S3"),
+            message: format!("{to}: pass --manifest when exporting to S3 or an rclone remote"),
         });
     }
     Ok(Path::new(to).join("ALBUMEN-MANIFEST.txt"))
 }
 
 fn refuse_clobber(manifest: &Path, to: &str, entries: &[ManifestEntry]) -> Result<(), IngestError> {
-    if to.starts_with("s3://") {
+    if is_remote(to) {
         return Ok(());
     }
     let root = Path::new(to);
@@ -759,7 +834,7 @@ fn refuse_clobber(manifest: &Path, to: &str, entries: &[ManifestEntry]) -> Resul
 }
 
 fn manifest_ignore(manifest: &Path, against: &str) -> Result<Vec<String>, IngestError> {
-    if against.starts_with("s3://") {
+    if is_remote(against) {
         return Ok(Vec::new());
     }
     let root = Path::new(against);

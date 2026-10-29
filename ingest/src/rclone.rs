@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use crate::checksum::sha256_hex;
 use crate::discover::{check_filename, file_name_str};
 use crate::error::IngestError;
-use crate::export::scratch_name_chars;
+use crate::export::{check_relative, scratch_name_chars, source_fingerprint, ExportDest, Placed};
 use crate::local::finalize_verified;
 use crate::mtime::{from_unix_nanos_string, mtime_of, set_mtime, to_unix_nanos_string};
 use crate::store::{BlobStore, VerifiedObject};
@@ -186,8 +186,24 @@ impl RcloneStore {
         format!("{}{name}", self.root)
     }
 
-    fn verify_name(filename: &str) -> String {
-        format!(".{filename}{VERIFY_SUFFIX}")
+    /// `a/b.jpg` -> `a/.b.jpg.albumen-verify`, beside the object it describes.
+    fn verify_name(relative: &str) -> String {
+        match relative.rsplit_once('/') {
+            Some((dir, name)) => format!("{dir}/.{name}{VERIFY_SUFFIX}"),
+            None => format!(".{relative}{VERIFY_SUFFIX}"),
+        }
+    }
+
+    /// Point the store at a subdirectory of its remote, e.g. an export prefix.
+    pub fn under(mut self, prefix: &str) -> Result<Self, IngestError> {
+        let prefix = prefix.trim_matches('/');
+        if prefix.is_empty() {
+            return Ok(self);
+        }
+        check_relative(prefix)?;
+        self.root = format!("{}{prefix}/", self.root);
+        self.label = format!("{}/{prefix}", self.label.trim_end_matches('/'));
+        Ok(self)
     }
 
     fn exists(&self, name: &str) -> Result<bool, IngestError> {
@@ -223,6 +239,17 @@ impl RcloneStore {
                 destination: format!("{}{filename}", self.label),
             });
         }
+        self.upload_verified(source, filename)
+    }
+
+    /// Upload, write the verify record, read both back, and compare SHA-256.
+    /// Anything this call wrote is removed on failure. The caller has
+    /// already checked that nothing is at `filename`.
+    fn upload_verified(
+        &self,
+        source: &Path,
+        filename: &str,
+    ) -> Result<VerifiedObject, IngestError> {
         let source_str = path_arg(source)?;
         let digest = sha256_hex(source)?;
         let mtime = mtime_of(source)?;
@@ -460,6 +487,104 @@ impl BlobStore for RcloneStore {
     }
 }
 
+/// Export through rclone. Same rules as a local directory: identical bytes are
+/// left in place, a different file at the path is `AlreadyExists`, and
+/// `remove_placed` only removes what this export uploaded.
+impl ExportDest for RcloneStore {
+    fn place(&self, source: &Path, relative: &str) -> Result<Placed, IngestError> {
+        check_relative(relative)?;
+        let last = relative.rsplit('/').next().unwrap_or(relative);
+        let actual = file_name_str(source)?;
+        if actual != last {
+            return Err(IngestError::FilenameMismatch {
+                source_name: actual,
+                requested: relative.to_string(),
+            });
+        }
+        let (source_hash, source_len) = source_fingerprint(source)?;
+        if let Some((hash, len)) = self.read_hash(relative)? {
+            if hash == source_hash && len == source_len {
+                return Ok(Placed {
+                    object: VerifiedObject {
+                        filename: relative.to_string(),
+                        sha256: hash,
+                        byte_len: len,
+                        mtime: mtime_of(source)?,
+                        sha256_verify_ms: 0,
+                    },
+                    copied: false,
+                });
+            }
+            return Err(IngestError::AlreadyExists {
+                filename: relative.to_string(),
+                destination: format!("{}/{relative}", self.label.trim_end_matches('/')),
+            });
+        }
+        let object = self.upload_verified(source, relative)?;
+        Ok(Placed {
+            object,
+            copied: true,
+        })
+    }
+
+    fn read_hash(&self, relative: &str) -> Result<Option<(String, u64)>, IngestError> {
+        check_relative(relative)?;
+        let downloaded = temp_path(relative);
+        let _guard = TempPath {
+            path: downloaded.clone(),
+            armed: true,
+        };
+        let output = self.run(&[
+            "copyto".into(),
+            self.remote(relative),
+            path_arg(&downloaded)?.into(),
+        ])?;
+        if !output.status.success() {
+            if is_missing(&String::from_utf8_lossy(&output.stderr)) {
+                return Ok(None);
+            }
+            return Err(self.fail("copyto", relative, &output));
+        }
+        if !downloaded.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(source_fingerprint(&downloaded)?))
+    }
+
+    fn list(&self) -> Result<Vec<String>, IngestError> {
+        let output = self.run(&[
+            "lsf".into(),
+            self.root.clone(),
+            "--files-only".into(),
+            "-R".into(),
+        ])?;
+        if !output.status.success() {
+            if is_missing(&String::from_utf8_lossy(&output.stderr)) {
+                return Ok(Vec::new());
+            }
+            return Err(self.fail("lsf", &self.label, &output));
+        }
+        let mut out: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty() && !is_verify_record(line))
+            .map(str::to_string)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    fn remove_placed(&self, relative: &str) -> Result<(), IngestError> {
+        check_relative(relative)?;
+        self.delete_name(relative)
+    }
+}
+
+fn is_verify_record(relative: &str) -> bool {
+    let name = relative.rsplit('/').next().unwrap_or(relative);
+    name.starts_with('.') && name.ends_with(VERIFY_SUFFIX)
+}
+
 fn obscure(bin: &Path, password: &str) -> Result<String, IngestError> {
     let output = Command::new(bin)
         .arg("--config")
@@ -610,6 +735,24 @@ mod tests {
         assert_eq!(nanos, "1400000000123456789");
         assert_eq!(digest.len(), 64);
         assert!(parse_verify("only-one-line\n").is_err());
+    }
+
+    #[test]
+    fn verify_record_sits_beside_a_nested_object_and_is_not_listed() {
+        assert_eq!(
+            RcloneStore::verify_name("a/b.jpg"),
+            "a/.b.jpg.albumen-verify"
+        );
+        assert_eq!(RcloneStore::verify_name("b.jpg"), ".b.jpg.albumen-verify");
+        assert!(is_verify_record("a/.b.jpg.albumen-verify"));
+        assert!(!is_verify_record("a/b.jpg"));
+        assert!(!is_verify_record(".hidden.jpg"));
+    }
+
+    #[test]
+    fn under_refuses_parent_components() {
+        let store = RcloneStore::b2("/bin/rclone", "a", "k", "bucket", "").unwrap();
+        assert!(store.under("../x").is_err());
     }
 
     #[test]
