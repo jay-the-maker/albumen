@@ -139,6 +139,16 @@ fn run_import(root: &Path) -> (PathBuf, PathBuf) {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let last = stdout.lines().last().unwrap();
+    assert_eq!(
+        last,
+        format!(
+            "next: albumen takeout-fidelity --report {} --library {} --out <file>",
+            report.display(),
+            library.display()
+        )
+    );
     (library, report)
 }
 
@@ -282,4 +292,17 @@ fn takeout_fidelity_reports_all_five_cases_and_never_fills_a_value() {
         .output()
         .unwrap();
     assert!(!again.status.success());
+}
+
+#[test]
+fn import_takeout_help_mentions_takeout_fidelity() {
+    let output = albumen()
+        .args(["import-takeout", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        help.contains("albumen takeout-fidelity --report <report>"),
+        "{help}"
+    );
 }

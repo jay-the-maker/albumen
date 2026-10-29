@@ -92,6 +92,10 @@ enum Command {
     /// original. Without `--apply` or `--execute`, print the plan and write
     /// nothing. The command exits non-zero when the reconciliation report
     /// does not match.
+    ///
+    /// Next: run `albumen takeout-fidelity --report <report> --library <to>
+    /// --out <file>` to compare each original's JSON and EXIF capture time and
+    /// GPS. The last line of `--apply` output prints that command.
     ImportTakeout {
         /// Directory of split .zip and .tgz parts, one archive, or an extracted folder.
         #[arg(long)]
@@ -318,6 +322,11 @@ fn run() -> Result<(), IngestError> {
                 to.display()
             );
             println!("report {}", report.display());
+            println!(
+                "next: albumen takeout-fidelity --report {} --library {} --out <file>",
+                report.display(),
+                to.display()
+            );
             Ok(())
         }
         Command::ImportIcloud {
