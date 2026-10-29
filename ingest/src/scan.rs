@@ -10,8 +10,12 @@
 //! manifest line records `drift` with the before and after values. The source
 //! file is left as it is. The manifest is a destination file and is written by
 //! the destination module.
+//!
+//! With [`ScanOptions::previous`], a file whose size and mtime match its line
+//! in an earlier manifest keeps that line's hash and metadata and is not read
+//! again. Changed and new files are hashed. `rehash_all` hashes everything.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -33,11 +37,28 @@ use crate::mtime::to_unix_nanos_string;
 use crate::source::SourceRoot;
 
 /// Files and bytes committed by one `scan_tree` call.
+///
+/// `hashed` files were read and hashed in this call. `reused` files kept the
+/// hash from [`ScanOptions::previous`] because their size and mtime matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanStats {
     pub files: u64,
     pub bytes: u64,
+    pub hashed: u64,
+    pub reused: u64,
 }
+
+/// How `scan_tree_with` decides what to hash.
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    /// An earlier scan manifest of the same library. Read only.
+    pub previous: Option<PathBuf>,
+    /// Hash every file even when `previous` has a matching line.
+    pub rehash_all: bool,
+}
+
+/// Prior lines by path, kept only when they are safe to reuse.
+type Prior = HashMap<String, ScanLine>;
 
 /// One difference found by `verify_scan_manifest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +131,8 @@ struct Hashed {
     sidecars: Vec<String>,
     pairs: Vec<String>,
     drift: Option<EntryDrift>,
+    /// Metadata carried from the previous manifest; exiftool is skipped.
+    reused: Option<KeyMetadata>,
 }
 
 /// Walk `source` and append a JSONL manifest at `manifest`.
@@ -119,6 +142,18 @@ struct Hashed {
 /// path. An incomplete final line is truncated back to the last newline.
 /// Re-running the same command finishes the walk.
 pub fn scan_tree(source: &SourceRoot, manifest: &Path) -> Result<ScanStats, IngestError> {
+    scan_tree_with(source, manifest, &ScanOptions::default())
+}
+
+/// [`scan_tree`] with an optional previous manifest to skip unchanged files.
+///
+/// `previous` must not be `manifest`. A previous line is reused only when the
+/// path, byte length, and mtime all match and that line recorded no drift.
+pub fn scan_tree_with(
+    source: &SourceRoot,
+    manifest: &Path,
+    options: &ScanOptions,
+) -> Result<ScanStats, IngestError> {
     if !source.canonical().is_dir() {
         return Err(IngestError::store(
             "scan",
@@ -134,6 +169,14 @@ pub fn scan_tree(source: &SourceRoot, manifest: &Path) -> Result<ScanStats, Inge
     }
     require_exiftool()?;
     crate::ledger::record_analysis(Some(source.canonical()), "exiftool", "on-device")?;
+    let prior = Arc::new(match options.previous.as_deref() {
+        Some(previous) if !options.rehash_all => load_prior(previous, manifest)?,
+        Some(previous) => {
+            refuse_same_manifest(previous, manifest)?;
+            Prior::new()
+        }
+        None => Prior::new(),
+    });
     let (after, already) = prepare_resume(manifest)?;
     let workers = scan_workers();
     let (job_tx, job_rx) = sync_channel::<Job>(workers);
@@ -147,7 +190,8 @@ pub fn scan_tree(source: &SourceRoot, manifest: &Path) -> Result<ScanStats, Inge
             let tx = done_tx.clone();
             let cancel = Arc::clone(&cancel);
             let source = source.clone();
-            scope.spawn(move || worker_loop(&source, rx, tx, &cancel));
+            let prior = Arc::clone(&prior);
+            scope.spawn(move || worker_loop(&source, &prior, rx, tx, &cancel));
         }
         drop(job_rx);
         drop(done_tx);
@@ -245,8 +289,67 @@ pub fn verify_scan_manifest(
     }
 }
 
+fn refuse_same_manifest(previous: &Path, manifest: &Path) -> Result<(), IngestError> {
+    let same = match (fs::canonicalize(previous), fs::canonicalize(manifest)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => previous == manifest,
+    };
+    if same {
+        return Err(IngestError::Usage {
+            message: "--previous must be a different file from --manifest".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Read an earlier manifest into a path index of reusable lines.
+fn load_prior(previous: &Path, manifest: &Path) -> Result<Prior, IngestError> {
+    refuse_same_manifest(previous, manifest)?;
+    let file = File::open(previous).map_err(|err| IngestError::io(previous, err))?;
+    let mut prior = Prior::new();
+    for (number, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|err| IngestError::io(previous, err))?;
+        match parse_prior_line(&line) {
+            Ok(Some(entry)) => {
+                prior.insert(entry.path.clone(), entry);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Err(IngestError::ManifestParse {
+                    line_number: number + 1,
+                    line: line.chars().take(200).collect(),
+                })
+            }
+        }
+    }
+    Ok(prior)
+}
+
+/// One previous manifest line, or `None` when it must not be reused.
+///
+/// A blank trailing line is skipped. A line that recorded drift is skipped:
+/// its hash may not describe the bytes that carry its size and mtime.
+fn parse_prior_line(line: &str) -> Result<Option<ScanLine>, serde_json::Error> {
+    if line.trim().is_empty() {
+        return Ok(None);
+    }
+    let entry: ScanLine = serde_json::from_str(line)?;
+    if entry.drift.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(entry))
+}
+
+/// The previous line for `relative` when the file still has its size and mtime.
+fn reusable_hash<'a>(prior: &'a Prior, relative: &str, now: &ObservedStat) -> Option<&'a ScanLine> {
+    prior
+        .get(relative)
+        .filter(|line| line.bytes == now.bytes && line.mtime_ns == now.mtime_ns)
+}
+
 fn worker_loop(
     source: &SourceRoot,
+    prior: &Prior,
     jobs: Arc<Mutex<Receiver<Job>>>,
     done: std::sync::mpsc::SyncSender<Result<Hashed, IngestError>>,
     cancel: &AtomicBool,
@@ -262,7 +365,7 @@ fn worker_loop(
         let Ok(job) = job else {
             break;
         };
-        let result = hash_one(source, &job);
+        let result = hash_or_reuse(source, prior, &job);
         if result.is_err() {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -270,6 +373,30 @@ fn worker_loop(
             break;
         }
     }
+}
+
+fn hash_or_reuse(root: &SourceRoot, prior: &Prior, job: &Job) -> Result<Hashed, IngestError> {
+    if prior.is_empty() {
+        return hash_one(root, job);
+    }
+    let path = root.canonical().join(relative_path(&job.relative));
+    let now = observe_path(&path)?;
+    let Some(line) = reusable_hash(prior, &job.relative, &now) else {
+        return hash_one(root, job);
+    };
+    let (sidecar_names, pair_names) = companion_names(&path)?;
+    let parent = parent_relative(&job.relative);
+    Ok(Hashed {
+        index: job.index,
+        relative: job.relative.clone(),
+        bytes: now.bytes,
+        mtime_ns: now.mtime_ns,
+        sha256: line.sha256.clone(),
+        sidecars: names_to_relative(&parent, &sidecar_names),
+        pairs: names_to_relative(&parent, &pair_names),
+        drift: None,
+        reused: Some(line.metadata.clone()),
+    })
 }
 
 fn hash_one(root: &SourceRoot, job: &Job) -> Result<Hashed, IngestError> {
@@ -290,6 +417,7 @@ fn hash_one(root: &SourceRoot, job: &Job) -> Result<Hashed, IngestError> {
         sidecars: names_to_relative(&parent, &sidecar_names),
         pairs: names_to_relative(&parent, &pair_names),
         drift: drift_if_changed(&before, &after),
+        reused: None,
     })
 }
 
@@ -306,6 +434,7 @@ fn write_ordered(
     let mut batch = Vec::new();
     let mut files = 0u64;
     let mut bytes = 0u64;
+    let mut reused = 0u64;
     let mut failure: Option<IngestError> = None;
     let mut last_progress = Instant::now();
     let batch_size = exiftool_batch();
@@ -326,6 +455,7 @@ fn write_ordered(
         while let Some(ready) = pending.remove(&next) {
             next += 1;
             bytes += ready.bytes;
+            reused += u64::from(ready.reused.is_some());
             batch.push(ready);
             if batch.len() >= batch_size {
                 files += flush_batch(source, &mut file, manifest, &mut batch)?;
@@ -346,7 +476,12 @@ fn write_ordered(
     note_progress(already + files, bytes, &mut last_progress, true);
     match failure {
         Some(err) => Err(err),
-        None => Ok(ScanStats { files, bytes }),
+        None => Ok(ScanStats {
+            files,
+            bytes,
+            hashed: files - reused,
+            reused,
+        }),
     }
 }
 
@@ -356,26 +491,39 @@ fn flush_batch(
     manifest: &Path,
     batch: &mut Vec<Hashed>,
 ) -> Result<u64, IngestError> {
-    let paths: Vec<String> = batch.iter().map(|item| item.relative.clone()).collect();
-    let metadata = read_metadata(source, &paths)?;
-    for item in batch.iter_mut() {
+    let paths: Vec<String> = batch
+        .iter()
+        .filter(|item| item.reused.is_none())
+        .map(|item| item.relative.clone())
+        .collect();
+    let fresh = if paths.is_empty() {
+        Vec::new()
+    } else {
+        read_metadata(source, &paths)?
+    };
+    for item in batch.iter_mut().filter(|item| item.reused.is_none()) {
         let path = source.canonical().join(relative_path(&item.relative));
         let after = observe_path(&path)?;
         extend_drift(item, after);
     }
-    if metadata.len() != batch.len() {
+    if fresh.len() != paths.len() {
         return Err(IngestError::store(
             "exiftool",
             source.canonical().display().to_string(),
             format!(
                 "exiftool returned {} records for {} files",
-                metadata.len(),
-                batch.len()
+                fresh.len(),
+                paths.len()
             ),
         ));
     }
+    let mut fresh = fresh.into_iter();
     let mut written = 0u64;
-    for (item, meta) in batch.drain(..).zip(metadata) {
+    for mut item in batch.drain(..) {
+        let meta = match item.reused.take() {
+            Some(meta) => meta,
+            None => fresh.next().unwrap_or_default(),
+        };
         let line = ScanLine {
             path: item.relative,
             bytes: item.bytes,
@@ -1355,5 +1503,91 @@ mod tests {
                 .any(|drift| drift.kind == "sha256" && drift.path == "a.txt"),
             "{seen:?}"
         );
+    }
+
+    fn prior_line(path: &str, bytes: u64, mtime_ns: &str, drift: bool) -> String {
+        let drift = if drift {
+            r#","drift":{"before":{"bytes":1,"mtime_ns":"1"},"after":{"bytes":2,"mtime_ns":"2"}}"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"path":"{path}","bytes":{bytes},"mtime_ns":"{mtime_ns}","sha256":"ab","sidecars":[],"pairs":[],"metadata":{{"camera":"X"}}{drift}}}"#
+        )
+    }
+
+    #[test]
+    fn prior_lines_with_drift_or_blank_are_not_reused() {
+        assert!(parse_prior_line("").unwrap().is_none());
+        assert!(parse_prior_line(&prior_line("a.jpg", 3, "9", true))
+            .unwrap()
+            .is_none());
+        let line = parse_prior_line(&prior_line("a.jpg", 3, "9", false))
+            .unwrap()
+            .unwrap();
+        assert_eq!(line.path, "a.jpg");
+        assert_eq!(line.metadata.camera.as_deref(), Some("X"));
+        assert!(parse_prior_line("{not json").is_err());
+    }
+
+    #[test]
+    fn reuse_needs_the_same_path_size_and_mtime() {
+        let mut prior = Prior::new();
+        let line = parse_prior_line(&prior_line("a.jpg", 3, "9", false))
+            .unwrap()
+            .unwrap();
+        prior.insert(line.path.clone(), line);
+        let stat = |bytes, mtime: &str| ObservedStat {
+            bytes,
+            mtime_ns: mtime.to_string(),
+        };
+        assert!(reusable_hash(&prior, "a.jpg", &stat(3, "9")).is_some());
+        assert!(reusable_hash(&prior, "a.jpg", &stat(4, "9")).is_none());
+        assert!(reusable_hash(&prior, "a.jpg", &stat(3, "10")).is_none());
+        assert!(reusable_hash(&prior, "b.jpg", &stat(3, "9")).is_none());
+    }
+
+    #[test]
+    fn previous_may_not_be_the_manifest_being_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("src");
+        fixture(&source);
+        let manifest = tmp.path().join("scan.jsonl");
+        scan_tree(&as_root(&source), &manifest).unwrap();
+        let options = ScanOptions {
+            previous: Some(manifest.clone()),
+            rehash_all: false,
+        };
+        let err = scan_tree_with(&as_root(&source), &manifest, &options).unwrap_err();
+        assert!(matches!(err, IngestError::Usage { .. }), "{err}");
+    }
+
+    #[test]
+    fn incremental_scan_hashes_only_changed_and_new_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("src");
+        fixture(&source);
+        let first = tmp.path().join("first.jsonl");
+        let full = scan_tree(&as_root(&source), &first).unwrap();
+        assert_eq!(full.hashed, full.files);
+        assert_eq!(full.reused, 0);
+        let options = ScanOptions {
+            previous: Some(first.clone()),
+            rehash_all: false,
+        };
+        let again =
+            scan_tree_with(&as_root(&source), &tmp.path().join("again.jsonl"), &options).unwrap();
+        assert_eq!((again.hashed, again.reused), (0, full.files));
+        assert_eq!(
+            fs::read(&first).unwrap(),
+            fs::read(tmp.path().join("again.jsonl")).unwrap()
+        );
+        let forced = ScanOptions {
+            previous: Some(first),
+            rehash_all: true,
+        };
+        let all =
+            scan_tree_with(&as_root(&source), &tmp.path().join("all.jsonl"), &forced).unwrap();
+        assert_eq!((all.hashed, all.reused), (full.files, 0));
     }
 }
