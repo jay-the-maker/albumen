@@ -46,6 +46,17 @@ def generate(library, files):
             f.write(f"albumen synthetic scale file {i}\n" + ("x" * (i % 256)) + "\n")
 
 
+def touch_one_percent(library, files):
+    """Append a byte to every 100th generated file; return how many."""
+    touched = 0
+    for i in range(0, files, 100):
+        d = os.path.join(library, f"{i // (PER_DIR * 100):03d}", f"{(i // PER_DIR) % 100:02d}")
+        with open(os.path.join(d, f"synthetic-{i:07d}.txt"), "a", encoding="ascii") as f:
+            f.write("t")
+        touched += 1
+    return touched
+
+
 def run_measured(cmd, env):
     """Run cmd; return (seconds, peak RSS in KiB) from wait4 on this child."""
     start = time.monotonic()
@@ -238,6 +249,7 @@ def main():
 
     library = os.path.join(a.workdir, "source", "library")
     manifest = os.path.join(a.workdir, "scan.jsonl")
+    rescan_manifest = os.path.join(a.workdir, "rescan.jsonl")
     ledger = os.path.join(a.workdir, "ledger")
     dest = os.path.join(a.workdir, "export")
     os.makedirs(library)
@@ -254,6 +266,11 @@ def main():
         exported = sum(len(fs) for _, _, fs in os.walk(dest))
         if exported < a.files:
             raise SystemExit(f"export wrote {exported} files for {a.files} files")
+        touched = touch_one_percent(library, a.files)
+        rescan, rescan_rss = timed([a.albumen, "scan", library, "--manifest", rescan_manifest,
+                                    "--ledger", ledger, "--previous", manifest])
+        if count_lines(rescan_manifest) != lines:
+            raise SystemExit(f"incremental rescan wrote {count_lines(rescan_manifest)} lines, full scan {lines}")
         per_k = 1000.0 / a.files
         run = {
             "files": a.files,
@@ -262,7 +279,10 @@ def main():
         }
         result = {"generate_s": round(gen, 2), "scan_s": round(scan, 2),
                   "export_s": round(export, 2), "scan_peak_rss_kib": scan_rss,
-                  "export_peak_rss_kib": export_rss, **run}
+                  "export_peak_rss_kib": export_rss,
+                  "rescan_touched": touched, "rescan_1pct_s": round(rescan, 2),
+                  "rescan_1pct_s_per_1k": round(rescan * per_k, 4),
+                  "rescan_peak_rss_kib": rescan_rss, **run}
         print(json.dumps(result, indent=2))
         if a.json_out:
             with open(a.json_out, "w", encoding="utf-8") as f:
@@ -297,7 +317,7 @@ def main():
         if a.keep:
             print(f"kept {a.workdir}", file=sys.stderr)
         else:
-            for path in (os.path.join(a.workdir, "source"), manifest, ledger, dest, ENV["ALBUMEN_HOME"]):
+            for path in (os.path.join(a.workdir, "source"), manifest, rescan_manifest, ledger, dest, ENV["ALBUMEN_HOME"]):
                 if os.path.isdir(path):
                     shutil.rmtree(path)
                 elif os.path.exists(path):

@@ -374,3 +374,17 @@ CI runs on 2026-10-19, CPU seconds per GB per 5 GB round:
 - On macos-14 the import ran 45% faster. Work per GB fell 57%, yet `cpu_percent` stayed at 34%.
 
 **Disk-class compare in CI (report only).** Each `import throughput` leg uploads its JSON as `throughput-json-<leg>`. The next run fetches the artifact from the last successful main push run, sets `ALBUMEN_THROUGHPUT_COMPARE_JSON`, and the bench prints `import-cpu-compare`. It prints `compared=true` with the median delta only when `disk_model` and the runner image both match, and `compared=false reason=disk_class_differs_or_unknown` otherwise. The separate-volume step does not compare. No gate reads the line.
+
+### Incremental re-scan
+
+`albumen scan DIR --manifest NEW --previous OLD` keeps the hash and metadata of
+every file whose size and mtime match its line in `OLD` and hashes only changed
+and new files; `--rehash-all` hashes everything. The output ends with
+`hashed N files, reused M unchanged`. The scale job touches 1% of the files
+after the export and records `rescan_1pct_s` and `rescan_1pct_s_per_1k` next to
+the full-scan numbers. `cli/tests/scan_incremental.rs` checks the counter and
+that the incremental manifest is byte-for-byte a full scan's
+(`ALBUMEN_INCREMENTAL_FILES`, default 2000; set 100000 for the brief's size).
+
+A local 1,000-file debug run on 2026-10-29: full scan 2.69 s, re-scan after
+touching 10 files 1.22 s. Most of what is left is the walk and exiftool start.

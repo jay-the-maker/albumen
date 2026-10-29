@@ -227,6 +227,12 @@ albumen verify-manifest --manifest ./library-manifest.txt --against s3://my-buck
 
 The manifest lists SHA-256, byte length, and the relative path. `verify-manifest` hashes the destination bytes and fails if a file is missing, extra, or different. S3 uses the same `ALBUMEN_S3_*` variables as ingest.
 
+To re-scan a large library quickly, pass the last manifest: files whose size and modification time have not changed keep their hash and are not read again (`--rehash-all` reads everything).
+
+```
+albumen scan ~/Pictures --manifest /tmp/scan-new.jsonl --previous /tmp/scan-old.jsonl
+```
+
 To ask whether a backup is current and intact, without changing anything:
 
 ```
