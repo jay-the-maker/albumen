@@ -193,7 +193,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "  changed: roll/IMG_0001.jpg",
             "  missing: roll/IMG_0004.jpg",
             &format!(
-                "next: albumen export --from <your photos folder> --to {} --apply",
+                "next: move the changed copy aside, for example: mv {0}/roll/IMG_0001.jpg {0}/roll/IMG_0001.jpg.changed",
                 p(&damaged)
             ),
         ]
@@ -264,6 +264,71 @@ fn several_destinations_report_each_and_exit_with_the_worst() {
         "{text}"
     );
     assert_next_rules(code, &text);
+}
+
+/// Single-quoted for a shell, as status prints destinations in next: lines.
+fn q(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+#[test]
+fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = backup(tmp.path(), "Photo Backup's", 4);
+    let d = p(&dest).to_string();
+
+    // Only missing items: rerunning the export puts them back.
+    fs::remove_file(dest.join("roll/IMG_0002.jpg")).unwrap();
+    let (code, text) = status(&[&d]);
+    assert_eq!(code, 1, "{text}");
+    assert_eq!(
+        text.lines().last().unwrap(),
+        format!(
+            "next: albumen export --from <your photos folder> --to {} --apply",
+            q(&d)
+        )
+    );
+    assert_next_rules(code, &text);
+
+    // A changed copy: a rerun would refuse it, so the next step is to move
+    // it aside, and no albumen command is suggested.
+    for name in ["IMG_0000.jpg", "IMG_0003.jpg"] {
+        let flip = dest.join("roll").join(name);
+        let mut bytes = fs::read(&flip).unwrap();
+        bytes[0] ^= 1;
+        fs::write(&flip, bytes).unwrap();
+    }
+    let before = snapshot(&dest);
+    let (code, text) = status(&[&d]);
+    assert_eq!(code, 1, "{text}");
+    let first = format!("{d}/roll/IMG_0000.jpg");
+    assert_eq!(
+        text.lines().last().unwrap(),
+        format!(
+            "next: move the changed copy aside (and the other 1 changed files listed above), for example: mv {} {}",
+            q(&first),
+            q(&format!("{first}.changed"))
+        )
+    );
+    assert!(!text.lines().last().unwrap().contains("albumen"), "{text}");
+    assert_plain_words(&text);
+    assert_next_rules(code, &text);
+    assert_eq!(before, snapshot(&dest), "status changed the destination");
+
+    // Never backed up and unreadable also quote it.
+    let never = tmp.path().join("new disk");
+    fs::create_dir_all(&never).unwrap();
+    let (_, text) = status(&[p(&never)]);
+    assert!(
+        text.contains(&format!("--to {} --apply", q(p(&never)))),
+        "{text}"
+    );
+    let gone = tmp.path().join("gone disk");
+    let (_, text) = status(&[p(&gone)]);
+    assert!(
+        text.contains(&format!("albumen status {} again", q(p(&gone)))),
+        "{text}"
+    );
 }
 
 #[test]

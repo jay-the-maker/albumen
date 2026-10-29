@@ -73,15 +73,44 @@ pub struct Report {
     pub next: Option<String>,
 }
 
+use crate::proof::shell_quote;
+
 fn export_next(dest: &str) -> String {
-    format!("next: albumen export --from <your photos folder> --to {dest} --apply")
+    format!(
+        "next: albumen export --from <your photos folder> --to {} --apply",
+        shell_quote(dest)
+    )
+}
+
+/// For damage that includes changed files: a rerun would refuse the changed
+/// copy as a conflict, so the next step is to move it aside (nothing is
+/// deleted). Names the first changed file; the rest are listed above.
+fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
+    let path = Path::new(dest).join(first_changed).display().to_string();
+    let aside = format!("{path}.changed");
+    let more = if changed > 1 {
+        format!(
+            " (and the other {} changed files listed above)",
+            changed - 1
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "next: move the changed copy aside{more}, for example: mv {} {}",
+        shell_quote(&path),
+        shell_quote(&aside)
+    )
 }
 
 /// Check one destination. `now` and `max_age_secs` come from the caller.
 pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
     let root = Path::new(dest);
     let unreadable = |why: String| {
-        let next = format!("next: check that {dest} is connected and readable, then run albumen status {dest} again");
+        let next = format!(
+            "next: check that {dest} is connected and readable, then run albumen status {} again",
+            shell_quote(dest)
+        );
         Report {
             state: State::Unreadable,
             text: format!("unreadable: cannot read this destination ({why})\n{dest}\n{next}\n"),
@@ -161,7 +190,10 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
                 group_thousands((listed.len() - LIST_LIMIT) as u64)
             );
         }
-        let next = export_next(dest);
+        let next = match changed.first() {
+            Some(first) => move_aside_next(dest, first, changed.len()),
+            None => export_next(dest),
+        };
         let _ = writeln!(out, "{next}");
         return Report {
             state: State::Damaged,
