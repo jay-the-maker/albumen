@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::checksum::{sha256_file, sha256_hex, to_hex};
 use crate::discover::{check_filename, discover, file_name_str};
 use crate::error::IngestError;
-use crate::local::copy_verify_file;
+use crate::local::copy_verify_file_staged;
 use crate::mtime::mtime_of;
 use crate::store::VerifiedObject;
 
@@ -74,6 +74,13 @@ impl ExportDest for DirectoryTree {
     fn place(&self, source: &Path, relative: &str) -> Result<Placed, IngestError> {
         let dest = self.full(relative)?;
         require_same_filename(source, relative)?;
+        // A copy killed between taking its final name and dropping its
+        // partial name leaves both; the partial is cleared either way.
+        if let (Some(parent), Some(name)) =
+            (dest.parent(), dest.file_name().and_then(|n| n.to_str()))
+        {
+            crate::local::clear_stale_partial(parent, name)?;
+        }
         if dest.is_file() {
             let (hash, len) = hash_file(&dest)?;
             let (source_hash, source_len) = hash_through_source(source)?;
@@ -101,7 +108,7 @@ impl ExportDest for DirectoryTree {
             });
         }
         let parent = dest.parent().unwrap_or(&self.root);
-        let object = copy_verify_file(source, parent)?;
+        let object = copy_verify_file_staged(source, parent)?;
         Ok(Placed {
             object: VerifiedObject {
                 filename: relative.to_string(),
@@ -406,6 +413,7 @@ pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), Inge
         ".albumen-manifest-{}-{nanos}.tmp",
         std::process::id()
     ));
+    clear_stale_manifest_temps(parent, &tmp)?;
     let text = format_manifest(entries);
     let write_result = (|| {
         let mut file = crate::dest::create_file(&tmp)?;
@@ -420,6 +428,29 @@ pub fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> Result<(), Inge
         crate::dest::remove_file_best_effort(&tmp);
     }
     write_result
+}
+
+/// Remove `.albumen-manifest-*.tmp` files a killed earlier export left in
+/// `dir`. They were never renamed to a manifest, so nothing reads them.
+pub fn clear_stale_manifest_temps(dir: &Path, keep: &Path) -> Result<usize, IngestError> {
+    let Ok(listing) = fs::read_dir(dir) else {
+        return Ok(0);
+    };
+    let mut cleared = 0;
+    for item in listing.flatten() {
+        let name = item.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let path = item.path();
+        if name.starts_with(".albumen-manifest-")
+            && name.ends_with(".tmp")
+            && path != keep
+            && item.file_type().map(|kind| kind.is_file()).unwrap_or(false)
+        {
+            crate::dest::remove_file(&path)?;
+            cleared += 1;
+        }
+    }
+    Ok(cleared)
 }
 
 fn hash_through_source(path: &Path) -> Result<(String, u64), IngestError> {
