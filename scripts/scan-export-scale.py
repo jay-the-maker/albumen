@@ -11,7 +11,10 @@ under --workdir (ALBUMEN_HOME too), which must not exist yet.
 and fails when scan or export is more than 20 percent slower per 1,000
 files. While that entry has "placeholder": true, it prints
 "BASELINE PLACEHOLDER: regression check not enforced" (as a ::warning::
-annotation on GitHub Actions) and does not compare. --write prints the entry to put in the baseline. --keep leaves the
+annotation on GitHub Actions) and does not compare. --write prints the entry to put in the baseline.
+--baseline-out writes a whole baseline file with this run as scan_export, the
+placeholder removed and the runner and commit SHA recorded; pull-request CI
+uploads it as the "baseline" artifact. --keep leaves the
 generated tree in place; otherwise only the paths this run created are
 removed.
 """
@@ -120,7 +123,33 @@ def self_test():
     base = {"scan_s_per_1k": 1.0, "export_s_per_1k": 1.0}
     assert baseline_problems(base, {"scan_s_per_1k": 1.2, "export_s_per_1k": 1.0}) == []
     assert len(baseline_problems(base, {"scan_s_per_1k": 1.3, "export_s_per_1k": 1.0})) == 1
+    run = {"files": 100_000, "scan_s_per_1k": 0.5, "export_s_per_1k": 0.7}
+    entry = baseline_entry(run, "ubuntu-24.04", "abc123")
+    assert "placeholder" not in entry and entry["runner"] == "ubuntu-24.04" and entry["commit"] == "abc123"
+    assert baseline_problems(entry, run) == []
+    expect_exit(lambda: baseline_entry(run, "", "abc123"), "runner name")
     print("self-test ok")
+
+
+def baseline_entry(run, runner, commit):
+    """The scan_export entry CI records: never a placeholder, runner and commit named."""
+    if not runner or not commit:
+        raise SystemExit("--baseline-out needs a runner name and a commit SHA")
+    entry = {k: run[k] for k in ("files", "scan_s_per_1k", "export_s_per_1k")}
+    entry["runner"] = runner
+    entry["commit"] = commit
+    entry["recorded"] = f"release build, {run['files']} files, scan-export-scale.yml on {runner} at {commit}"
+    return entry
+
+
+def write_baseline_file(path, current, entry):
+    """Copy of the current baseline file with scan_export replaced by entry."""
+    data = dict(current)
+    data["scan_export"] = entry
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    return data
 
 
 def baseline_problems(base, run):
@@ -152,6 +181,10 @@ def main():
     p.add_argument("--keep", action="store_true")
     p.add_argument("--json-out", help="also write the run JSON here (the CI artifact)")
     p.add_argument("--self-test", action="store_true")
+    p.add_argument("--baseline-out", help="write a copy of --baseline with this run as scan_export "
+                   "(placeholder removed, runner and commit recorded); needs --runner and --commit")
+    p.add_argument("--runner", default=os.environ.get("ALBUMEN_RUNNER", ""))
+    p.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""))
     p.add_argument("--legs", metavar="EVENT", help="print the JSON list of file counts for a workflow event")
     p.add_argument("--legs-input", default="")
     if "--self-test" in sys.argv[1:]:
@@ -205,6 +238,11 @@ def main():
                 f.write("\n")
         if a.write:
             print(json.dumps({"scan_export": run}, indent=2))
+        if a.baseline_out:
+            with open(a.baseline, encoding="utf-8") as f:
+                current = json.load(f)
+            write_baseline_file(a.baseline_out, current, baseline_entry(run, a.runner, a.commit))
+            print(f"wrote {a.baseline_out}", file=sys.stderr)
         if a.check:
             with open(a.baseline, encoding="utf-8") as f:
                 base = json.load(f).get("scan_export")

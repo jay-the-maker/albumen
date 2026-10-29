@@ -83,6 +83,8 @@ jobs:
           python3 scripts/scan-export-scale.py --albumen target/release/albumen \
             --files ${{ matrix.files }} --workdir "$RUNNER_TEMP/scan-export-scale" $mode \
             --json-out "$RUNNER_TEMP/scale-${{ matrix.files }}.json" \
+            --baseline-out "$RUNNER_TEMP/baseline.json" \
+            --runner ubuntu-24.04 --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
             | tee "$RUNNER_TEMP/scan-export.txt"
           { echo '```json'; cat "$RUNNER_TEMP/scale-${{ matrix.files }}.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -90,4 +92,14 @@ jobs:
         with:
           name: scale-${{ matrix.files }}
           path: ${{ runner.temp }}/scale-${{ matrix.files }}.json
+          if-no-files-found: error
+
+      # The recorded baseline: bench/baseline.json with this run's scan_export,
+      # "placeholder" removed, runner and commit SHA set. Uploaded only; no
+      # bot commit. Jay copies it into bench/baseline.json when he chooses.
+      - if: github.event_name == 'pull_request' && matrix.files == 100000
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: ${{ runner.temp }}/baseline.json
           if-no-files-found: error

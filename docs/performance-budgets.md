@@ -255,6 +255,16 @@ python3 scripts/scan-export-scale.py --albumen target/debug/albumen --files 1000
 
 The placeholder in `bench/baseline.json` stays a warning. It is never a red gate. The first real numbers come from CI.
 
+### Recording the real baseline
+
+Every pull request that touches scan or export runs the 100,000-file leg and
+uploads a `baseline` artifact: a copy of `bench/baseline.json` whose
+`scan_export` entry is that run, with `"placeholder"` removed and `runner` and
+`commit` recorded. No workflow_dispatch is needed, so this works before the
+workflow reaches the default branch. Nothing commits it automatically; copy
+the artifact over `bench/baseline.json` in a normal commit to start enforcing
+the 20 percent check. Until then the placeholder only warns.
+
 ## Takeout import, 100,000 items
 
 This is the switching-time measurement for `albumen import-takeout`. It is not the performance-regression job. That job does not pass `--takeout` and does not set `ALBUMEN_TAKEOUT_ITEMS`.
