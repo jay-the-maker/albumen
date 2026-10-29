@@ -26,12 +26,23 @@ Measured through the real stdio MCP server (`albumen-mcp --library`):
   are copies of the CC0 fixture JPEG fixtures/jpeg-gps/IMG_0001.jpg (640x480)
   placed at fixed item positions; every other item is the 4-byte stub.
 - peak memory: peak RSS (Linux, macOS) or peak working set (Windows) of the
-  albumen-mcp process.
+  albumen-mcp process; the larger of the query-only and warm-search servers.
+- warm metadata search: a fresh `albumen-mcp` (no cache item limit, large
+  ExifTool batches) runs a keyword filter that matches nothing, so every item
+  is visited. Two priming passes read ExifTool and settle the stat keys, then
+  --warm-runs timed passes give p50/p95 and the number of files each re-hashed
+  (`ALBUMEN_SEARCH_STATS=1`). `search_warm_p50_vs_hash` is that p50 divided by
+  the time this script takes to SHA-256 every library file in Python.
+- change probe: --mutate files are rewritten in place (same size, new bytes)
+  and the next warm pass must re-hash exactly those files. The old bytes are
+  put back afterwards.
 
 Targets: cold start <= 1.5 s, time to first answer <= 1.5 s, search p95
 <= 200 ms. This is report-only:
 the exit code is non-zero only when the harness itself fails, not when a
-number misses a target.
+number misses a target. Two exceptions gate: --max-warm-ratio R fails when
+`search_warm_p50_vs_hash` is above R, and the change probe fails when the
+re-hashed count is not exactly --mutate.
 """
 
 import argparse
@@ -114,10 +125,11 @@ def fixed_queries(items, count, seed):
 
 
 class Server:
-    def __init__(self, binary, library, index_dir, thumbnail_dir):
+    def __init__(self, binary, library, index_dir, thumbnail_dir, env=None):
         self.started = time.perf_counter()
         self.proc = subprocess.Popen(
             [binary, "--library", library, "--index-dir", index_dir, "--thumbnail-dir", thumbnail_dir],
+            env=None if env is None else {**os.environ, **env},
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=sys.stderr,
@@ -128,29 +140,19 @@ class Server:
     def send(self, method, params):
         self.next_id += 1
         body = json.dumps({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}).encode()
-        self.proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        # albumen-mcp speaks newline-delimited JSON-RPC on stdio (mcp/src/io.rs).
+        self.proc.stdin.write(body + b"\n")
         self.proc.stdin.flush()
         return self.read(self.next_id)
 
     def read(self, want):
         out = self.proc.stdout
         while True:
-            length = None
-            while True:
-                line = out.readline()
-                if not line:
-                    raise SystemExit("albumen-mcp closed stdout")
-                if line in (b"\r\n", b"\n"):
-                    break
-                name, _, value = line.decode().partition(":")
-                if name.strip().lower() == "content-length":
-                    length = int(value.strip())
-            body = b""
-            while len(body) < length:
-                chunk = out.read(length - len(body))
-                if not chunk:
-                    raise SystemExit("albumen-mcp closed stdout mid-body")
-                body += chunk
+            body = out.readline()
+            if not body:
+                raise SystemExit("albumen-mcp closed stdout")
+            if not body.strip():
+                continue
             message = json.loads(body)
             if message.get("id") == want:
                 if "error" in message:
@@ -170,8 +172,10 @@ class Server:
         result = self.send("tools/call", {"name": "thumbnail", "arguments": {"path": path}})
         if result.get("isError"):
             raise SystemExit(f"thumbnail {path} failed: {result['content'][0]['text']}")
-        value = json.loads(result["content"][0]["text"])
-        data = base64.b64decode(value["data_base64"])
+        # An MCP image block carries the bytes; a text block carries the rest.
+        image = next(block for block in result["content"] if block.get("type") == "image")
+        value = json.loads(next(block for block in result["content"] if block.get("type") == "text")["text"])
+        data = base64.b64decode(image["data"])
         if not (data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9")) or len(data) != value["bytes"]:
             raise SystemExit(f"thumbnail {path} is not a JPEG")
         if max(value["width"], value["height"]) > 256:
@@ -242,6 +246,9 @@ def main():
     parser.add_argument("--json", help="write the report here")
     parser.add_argument("--index-dir", help="where albumen-mcp saves its index (default: a sibling of --library)")
     parser.add_argument("--thumbnail-dir", help="where albumen-mcp caches thumbnails (default: a sibling of --library); must start empty")
+    parser.add_argument("--warm-runs", type=int, default=20, help="timed warm metadata-search passes")
+    parser.add_argument("--mutate", type=int, default=100, help="files changed for the re-hash probe (0 skips it)")
+    parser.add_argument("--max-warm-ratio", type=float, help="fail when search_warm_p50_vs_hash is above this")
     parser.add_argument("--sample-jpeg", default=DEFAULT_SAMPLE_JPEG, help="real JPEG copied to the thumbnail sample positions")
     args = parser.parse_args()
     if args.queries < 200 and args.items >= 380000:
@@ -344,19 +351,77 @@ def main():
         cold.append((time.perf_counter() - began) * 1000.0)
         if value.get("cached"):
             raise SystemExit(f"cold thumbnail {path} came from the cache")
-    warm = []
+    cached = []
     for path in samples:
         began = time.perf_counter()
         _, value = thumbs.thumbnail(path)
-        warm.append((time.perf_counter() - began) * 1000.0)
+        cached.append((time.perf_counter() - began) * 1000.0)
         if not value.get("cached"):
             raise SystemExit(f"repeat thumbnail {path} was not cached")
     thumbs.close()
     cold.sort()
-    warm.sort()
-    print(f"library-scale {args.leg}: first thumbnail {first_thumbnail_ms:.1f} ms after request, {spawn_to_thumbnail_ms:.1f} ms after spawn; cold p95 {nearest_rank(cold, 95) if cold else 0:.1f} ms, cached p95 {nearest_rank(warm, 95):.1f} ms", file=sys.stderr, flush=True)
+    cached.sort()
+    print(f"library-scale {args.leg}: first thumbnail {first_thumbnail_ms:.1f} ms after request, {spawn_to_thumbnail_ms:.1f} ms after spawn; cold p95 {nearest_rank(cold, 95) if cold else 0:.1f} ms, cached p95 {nearest_rank(cached, 95):.1f} ms", file=sys.stderr, flush=True)
     if count_files(library) != args.items:
         raise SystemExit("thumbnails changed the library file count")
+
+    # Reference: SHA-256 every library file once, in this script.
+    began = time.perf_counter()
+    for parent, _, files in os.walk(library):
+        for name in files:
+            with open(os.path.join(parent, name), "rb") as handle:
+                hashlib.sha256(handle.read()).digest()
+    hash_all_ms = (time.perf_counter() - began) * 1000.0
+
+    # Warm metadata search over every item (a keyword that matches nothing).
+    warm_env = {"ALBUMEN_SEARCH_STATS": "1", "ALBUMEN_METADATA_CACHE_ITEMS": "0", "ALBUMEN_EXIFTOOL_BATCH": "4096"}
+    warm_server = Server(args.binary, library, index_dir, search_thumbnail_dir, warm_env)
+    warm_server.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "library-scale", "version": "1"}})
+    warm_server.send("tools/list", {})
+    warm_query = {"keyword": "no-such-keyword-library-scale", "limit": 100}
+    prime_ms = []
+    for _ in range(2):
+        began = time.perf_counter()
+        page = warm_server.search(warm_query)
+        prime_ms.append((time.perf_counter() - began) * 1000.0)
+        if page.get("files"):
+            raise SystemExit("the warm-search miss returned files")
+        time.sleep(2.1)  # past the racy window, so the next pass can trust stat
+    print(f"library-scale {args.leg}: warm search priming {[round(v) for v in prime_ms]} ms", file=sys.stderr, flush=True)
+    warm = []
+    warm_hashed = []
+    for _ in range(max(args.warm_runs, 1)):
+        began = time.perf_counter()
+        page = warm_server.search(warm_query)
+        warm.append((time.perf_counter() - began) * 1000.0)
+        warm_hashed.append(page.get("stats", {}).get("hashed"))
+    warm.sort()
+    mutated_hashed = None
+    if args.mutate:
+        changed = [item_path(index, args.items) for index in range(0, args.items, max(args.items // args.mutate, 1))][: args.mutate]
+        originals = {}
+        for relative in changed:
+            full = os.path.join(library, relative)
+            with open(full, "rb") as handle:
+                originals[relative] = handle.read()
+            data = bytearray(originals[relative])
+            data[-1] ^= 0x01
+            with open(full, "r+b") as handle:
+                handle.write(bytes(data))
+        page = warm_server.search(warm_query)
+        mutated_hashed = page.get("stats", {}).get("hashed")
+        for relative, data in originals.items():
+            with open(os.path.join(library, relative), "wb") as handle:
+                handle.write(data)
+        print(f"library-scale {args.leg}: changed {len(changed)} files, warm search re-hashed {mutated_hashed}", file=sys.stderr, flush=True)
+    warm_peak = warm_server.peak_bytes()
+    warm_after = warm_server.close()
+    if warm_peak is None:
+        warm_peak = warm_after
+    warm_p50 = nearest_rank(warm, 50)
+    ratio = warm_p50 / hash_all_ms if hash_all_ms > 0 else None
+    print(f"library-scale {args.leg}: warm search p50 {warm_p50:.1f} ms p95 {nearest_rank(warm, 95):.1f} ms, hash-all {hash_all_ms:.1f} ms, ratio {ratio:.3f}", file=sys.stderr, flush=True)
+    peak_all = max(v for v in (peak, warm_peak) if v) if (peak or warm_peak) else None
     report = {
         "leg": args.leg,
         "items": args.items,
@@ -372,7 +437,20 @@ def main():
         "search_p50_ms": round(nearest_rank(latencies, 50), 1),
         "search_p95_ms": round(nearest_rank(latencies, 95), 1),
         "search_max_ms": round(latencies[-1], 1),
-        "peak_memory_mib": round(peak / 1048576.0, 1) if peak else None,
+        "peak_memory_mib": round(peak_all / 1048576.0, 1) if peak_all else None,
+        "query_search_peak_memory_mib": round(peak / 1048576.0, 1) if peak else None,
+        "warm_search_peak_memory_mib": round(warm_peak / 1048576.0, 1) if warm_peak else None,
+        "hash_all_reference_ms": round(hash_all_ms, 1),
+        "search_warm_priming_ms": [round(v, 1) for v in prime_ms],
+        "search_warm_runs": len(warm),
+        "search_warm_p50_ms": round(warm_p50, 1),
+        "search_warm_p95_ms": round(nearest_rank(warm, 95), 1),
+        "search_warm_max_ms": round(warm[-1], 1),
+        "search_warm_hashed_per_run": warm_hashed,
+        "search_warm_p50_vs_hash": round(ratio, 4) if ratio is not None else None,
+        "search_warm_max_ratio": args.max_warm_ratio,
+        "mutated_files": args.mutate,
+        "mutated_files_rehashed": mutated_hashed,
         "hits_returned": hits,
         "thumbnail_samples": len(samples),
         "first_thumbnail_ms": round(first_thumbnail_ms, 1),
@@ -381,8 +459,8 @@ def main():
         "first_thumbnail_size": f"{first_value['width']}x{first_value['height']}",
         "thumbnail_cold_p50_ms": round(nearest_rank(cold, 50), 1) if cold else None,
         "thumbnail_cold_p95_ms": round(nearest_rank(cold, 95), 1) if cold else None,
-        "thumbnail_cached_p50_ms": round(nearest_rank(warm, 50), 1),
-        "thumbnail_cached_p95_ms": round(nearest_rank(warm, 95), 1),
+        "thumbnail_cached_p50_ms": round(nearest_rank(cached, 50), 1),
+        "thumbnail_cached_p95_ms": round(nearest_rank(cached, 95), 1),
         "first_thumbnail_target_ms": FIRST_THUMBNAIL_TARGET_MS,
         "first_thumbnail_met": first_thumbnail_ms <= FIRST_THUMBNAIL_TARGET_MS,
         "spawn_to_first_thumbnail_met": spawn_to_thumbnail_ms <= FIRST_THUMBNAIL_TARGET_MS,
@@ -399,6 +477,11 @@ def main():
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             handle.write(text + "\n")
+    failures = []
+    if args.mutate and mutated_hashed != args.mutate:
+        failures.append(f"change probe re-hashed {mutated_hashed} files, expected exactly {args.mutate}")
+    if args.max_warm_ratio is not None and (ratio is None or ratio > args.max_warm_ratio):
+        failures.append(f"search_warm_p50_vs_hash {ratio} is above {args.max_warm_ratio}")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         def mark(met):
@@ -418,7 +501,14 @@ def main():
             handle.write(f"| Thumbnail p95, {len(samples) - 1} more cold | {report['thumbnail_cold_p95_ms']} ms | | |\n")
             handle.write(f"| Thumbnail p95, cached | {report['thumbnail_cached_p95_ms']} ms | | |\n")
             handle.write(f"| Generate library (not timed against a target) | {report['generate_seconds']} s | | |\n\n")
-            handle.write("Report only. A miss is a measurement, not a failed build.\n\n")
+            handle.write(f"| Warm metadata search p50 / p95 ({len(warm)} runs, every item) | {report['search_warm_p50_ms']} / {report['search_warm_p95_ms']} ms | | |\n")
+            handle.write(f"| search_warm_p50_vs_hash (hash-all {report['hash_all_reference_ms']} ms) | {report['search_warm_p50_vs_hash']} | ≤ {args.max_warm_ratio} | {'gate' if args.max_warm_ratio is not None else 'report'} |\n")
+            handle.write(f"| Change probe: {args.mutate} changed, re-hashed | {mutated_hashed} | = {args.mutate} | gate |\n\n")
+            handle.write("Report only, except the warm ratio and the change probe.\n\n")
+    for failure in failures:
+        print(f"library-scale {args.leg}: FAIL {failure}", file=sys.stderr)
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
