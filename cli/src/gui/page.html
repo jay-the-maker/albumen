@@ -27,7 +27,7 @@ select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:
 .bar{height:6px;background:#eceef2;border-radius:3px;overflow:hidden;margin:4px 0 6px}.bar i{display:block;height:100%;background:var(--accent);width:0}
 .count{font-size:13px;color:var(--mute)}
 .card{background:#fff;border:1px solid var(--line);border-left:5px solid var(--none);border-radius:10px;padding:12px 16px;margin-bottom:12px}
-.card .w{font-weight:700;text-transform:none}.card pre{margin:4px 0 0;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}
+.summary{margin:0 0 12px;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}.card .w{font-weight:700;text-transform:none}.card pre{margin:4px 0 0;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}
 .s-fresh{border-left-color:var(--ok)}.s-fresh .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
 .s-damaged{border-left-color:var(--bad)}.s-damaged .w{color:var(--bad)}.s-none .w{color:var(--none)}
 .badge{display:inline-flex;align-items:center;gap:8px;background:#e9f6ee;color:var(--ok);border:1px solid #bfe0cb;border-radius:22px;padding:6px 16px;font-weight:700;font-size:17px}
@@ -62,7 +62,9 @@ select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:
 <h1>Backup health</h1>
 <p class="sub">One honest state per backup folder.</p>
 <p class="runs" id="runs-health">runs: albumen status DEST…</p>
+<pre class="summary" id="health-summary" hidden></pre>
 <div id="cards"></div>
+<pre class="summary" id="health-next" hidden></pre>
 <p class="close" id="close" hidden>Your originals, bit for bit, provably intact.</p>
 </section>
 <section id="proof" hidden>
@@ -99,6 +101,8 @@ async function init(){
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);
  for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=d;$(sel).append(o);}}
  $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';
+ $('health-summary').textContent=st.summary||'';$('health-summary').hidden=!st.summary;
+ $('health-next').textContent=st.summary_next||'';$('health-next').hidden=!st.summary_next;
  $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ');
  runsB();runsV();}
 function runsB(){$('runs-backup').textContent='runs: albumen backup --from '+q($('lib').textContent)+' --to '+q($('dest-b').value);}

@@ -343,11 +343,16 @@ pub fn state_word(state: crate::status::State) -> &'static str {
 }
 
 pub fn status_json(config: &Config, now: SystemTime) -> serde_json::Value {
+    let reports: Vec<crate::status::Report> = config
+        .backups
+        .iter()
+        .map(|d| crate::status::check(d, config.max_age_secs, now))
+        .collect();
     let dests: Vec<serde_json::Value> = config
         .backups
         .iter()
-        .map(|dest| {
-            let report = crate::status::check(dest, config.max_age_secs, now);
+        .zip(&reports)
+        .map(|(dest, report)| {
             serde_json::json!({
                 "dest": dest,
                 "state": state_word(report.state),
@@ -356,19 +361,20 @@ pub fn status_json(config: &Config, now: SystemTime) -> serde_json::Value {
             })
         })
         .collect();
-    let reports: Vec<crate::status::Report> = config
-        .backups
-        .iter()
-        .map(|d| crate::status::check(d, config.max_age_secs, now))
-        .collect();
     let exit = if reports.is_empty() {
         0
     } else {
         crate::status::render(&reports).1
     };
+    let (summary, summary_next) = match crate::status::summary(&reports) {
+        Some((line, next)) => (Some(line), next),
+        None => (None, None),
+    };
     serde_json::json!({
         "max_age_secs": config.max_age_secs,
         "destinations": dests,
+        "summary": summary,
+        "summary_next": summary_next,
         "exit": exit,
         "library": config.library.display().to_string(),
     })

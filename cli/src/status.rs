@@ -303,6 +303,30 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
     }
 }
 
+/// The summary line and the worst destination's next: line, shown after
+/// two or more destinations. `render` and the GUI both use this.
+pub fn summary(reports: &[Report]) -> Option<(String, Option<String>)> {
+    if reports.len() < 2 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for state in [
+        State::Ok,
+        State::Stale,
+        State::Damaged,
+        State::NotBackedUp,
+        State::Unreadable,
+    ] {
+        let n = reports.iter().filter(|r| r.state == state).count();
+        if n > 0 {
+            parts.push(format!("{n} {}", state.word()));
+        }
+    }
+    let line = format!("{} destinations: {}", reports.len(), parts.join(", "));
+    let worst = reports.iter().max_by_key(|r| (r.state.rank(), r.state));
+    Some((line, worst.and_then(|r| r.next.clone())))
+}
+
 /// Every block, the summary after two or more, and the worst exit code.
 pub fn render(reports: &[Report]) -> (String, i32) {
     let mut out = String::new();
@@ -314,28 +338,10 @@ pub fn render(reports: &[Report]) -> (String, i32) {
     }
     let worst = reports.iter().max_by_key(|r| (r.state.rank(), r.state));
     let code = worst.map(|r| r.state.exit_code()).unwrap_or(0);
-    if reports.len() >= 2 {
-        let mut parts = Vec::new();
-        for state in [
-            State::Ok,
-            State::Stale,
-            State::Damaged,
-            State::NotBackedUp,
-            State::Unreadable,
-        ] {
-            let n = reports.iter().filter(|r| r.state == state).count();
-            if n > 0 {
-                parts.push(format!("{n} {}", state.word()));
-            }
-        }
-        let _ = writeln!(
-            out,
-            "\n{} destinations: {}",
-            reports.len(),
-            parts.join(", ")
-        );
+    if let Some((line, next)) = summary(reports) {
+        let _ = writeln!(out, "\n{line}");
         // A nonzero exit always ends on a next: line.
-        if let Some(next) = worst.and_then(|r| r.next.as_ref()) {
+        if let Some(next) = next {
             let _ = writeln!(out, "{next}");
         }
     }

@@ -105,3 +105,30 @@ fn refuses_foreign_host_missing_header_and_traversal() {
     );
     assert_eq!(code, 400, "unknown job kinds are refused");
 }
+
+#[test]
+fn health_summary_and_next_match_the_cli_word_for_word() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, status) = get(&addr, "/api/status");
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let dests: Vec<&str> = status["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["dest"].as_str().unwrap())
+        .collect();
+    let out = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .arg("status")
+        .args(&dests)
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let summary = status["summary"].as_str().unwrap();
+    let next = status["summary_next"].as_str().unwrap();
+    assert!(summary.starts_with("4 destinations: "), "{summary}");
+    assert_eq!(lines[lines.len() - 2], summary);
+    assert_eq!(lines[lines.len() - 1], next);
+    assert_eq!(status["exit"].as_i64(), out.status.code().map(i64::from));
+}
