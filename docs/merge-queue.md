@@ -67,13 +67,31 @@ Every remote head below has an empty `git diff` against the locally gated tree, 
 | 19 | issue-28-card-import-train | dfdc669 | issue-22-rclone-smb-train | ingest/src/lib.rs and main.rs imports; added the `import-card` help example. | green except MinIO (39s) | [issue-22-rclone-smb-train...issue-28-card-import-train](https://github.com/jay-the-maker/albumen/compare/issue-22-rclone-smb-train...issue-28-card-import-train) | 5: `cli/src/main.rs`, `cli/tests/card.rs`, `ingest/src/card.rs`, `ingest/src/lib.rs`, … |
 | 20 | takeout-fidelity-train | 43a30a4 | issue-28-card-import-train | main.rs keeps ImportCard and TakeoutFidelity; Cargo.lock keeps `sha2 0.10.9`; added the `takeout-fidelity` help example. | green except MinIO (39s) | [issue-28-card-import-train...takeout-fidelity-train](https://github.com/jay-the-maker/albumen/compare/issue-28-card-import-train...takeout-fidelity-train) | 7: `cli/Cargo.toml`, `cli/src/main.rs`, `cli/tests/takeout_fidelity.rs`, `docs/takeout-fidelity.md`, … |
 | 21 | icloud-fidelity-train | 9ff189c | takeout-fidelity-train | none (clean pick) | green except MinIO (49s) | [takeout-fidelity-train...icloud-fidelity-train](https://github.com/jay-the-maker/albumen/compare/takeout-fidelity-train...icloud-fidelity-train) | 3: `docs/icloud-report.md`, `ingest/src/icloud.rs`, `ingest/tests/synthetic_live_photo.rs` |
+| 22 | dry-run-all-conflicts-train | b0f8be1 | merge-queue-train | none (new behaviour, one commit) | green except MinIO (53s) | [merge-queue-train...dry-run-all-conflicts-train](https://github.com/jay-the-maker/albumen/compare/merge-queue-train...dry-run-all-conflicts-train) | 3: `cli/src/main.rs`, `cli/tests/export_rerun.rs`, `docs/merge-queue.md` |
 
 Notes:
 
+- merge-queue-train (9512d88) only adds this doc on top of step 21. Step 22 sits on it.
+- Conflicts (Product Lead decision, step 22): for a local target, both the dry run and `--apply` list every conflict as `  conflict: <path>`, print `N conflicts, nothing written` and exit 3. `--apply` checks first and writes nothing: no files and no manifest. Tested by `every_conflict_is_listed_and_nothing_is_written_in_dry_run_and_apply` (2 conflicts and 1 identical file).
+- Re-gate 2026-10-29 PDT: all 23 remote heads (steps 1–22 and merge-queue-train) re-gated from scratch in one working copy with a fresh target dir. Every step is green except the MinIO test; no result changed. Test seconds: 116 (cold build), 24, 25, 24, 42, 26, 29, 27, 26, 25, 27, 26, 39, 38, 40, 40, 48, 48, 48, 51, 52, 43 (merge-queue-train), 43. Passing tests rise from 145 at step 1 to 190 at step 22.
+- CI-only gate `scripts/check-dest-writes.py` (ci.yml) fails from step 19 to step 22, and on the original issue-28-card-import, because `ingest/src/card.rs` calls `std::fs::remove_dir` directly. Steps 1–18 and main pass it. no-network-audit-fidelity-proof (below) fixes it by routing the call through `dest::remove_empty_dir_best_effort`.
 - issue-40 versus export-rerun: the dry run now prints `  present: X`, `  conflict: X` or `  X` for each file, and it skips tombstones. For local targets it then prints `  already present: P`, `  conflicts: C` and `would export N new, P already present and verified`. On the first conflict it exits 3 (`IngestError::AlreadyExists`), which matches exit-codes. S3 targets keep the "would export up to" message. `same_bytes` was removed because nothing used it. `dry_run_names_a_conflict_that_apply_refuses` now asserts a non-zero exit. README Try it shows `already present: 0` and `conflicts: 0`.
 - issue-42-sidecar-names is not in the train. It is blocked on Jay's 4 fixture images.
 - Two stray remote branches are left over from a push race. They are unused and Jay can delete them: `readme-quickstart-timed-train` (894090a) and `issue-40-dry-run-conflicts-train` (593544a). The `-train2` names replace them.
 - Remote heads differ from local SHAs because they were pushed through the GitHub API. The trees are identical.
+
+## Stacked on the train (items 3–5)
+
+Each branch is one step on the one before it. All green except the MinIO test.
+
+| # | Branch | Head | Parent | Gate (test secs) | Compare | Files |
+|---|---|---|---|---|---|---|
+| 23 | switch-from-google-e2e | 120c6a5 | dry-run-all-conflicts-train | green except MinIO (52s; the e2e test runs in about 1s) | [dry-run-all-conflicts-train...switch-from-google-e2e](https://github.com/jay-the-maker/albumen/compare/dry-run-all-conflicts-train...switch-from-google-e2e) | 1: `cli/tests/switch_from_google.rs` |
+| 24 | no-network-audit-fidelity-proof | 62318ee | switch-from-google-e2e | green except MinIO (51s) | [switch-from-google-e2e...no-network-audit-fidelity-proof](https://github.com/jay-the-maker/albumen/compare/switch-from-google-e2e...no-network-audit-fidelity-proof) | 6: `.github/workflows/ci.yml`, `docs/test-ladder.md`, `ingest/src/card.rs`, `ingest/src/dest.rs`, … |
+| 25 | changelog-release-notes | 7cd06ed | no-network-audit-fidelity-proof | green except MinIO (55s) | [no-network-audit-fidelity-proof...changelog-release-notes](https://github.com/jay-the-maker/albumen/compare/no-network-audit-fidelity-proof...changelog-release-notes) | 2: `CHANGELOG.md`, `docs/release-notes-draft.md` |
+
+- Step 24's strace audit has not run end to end yet, because the build box has no strace. Its first real run will be in CI. The parser self-test passes, and a fake strace shim was used to check the pipeline. The scripts are mode 100644 on the remote, so CI calls them with `bash`.
+- Step 25 adds no tag and no release.
 
 ## Superseded branches
 
