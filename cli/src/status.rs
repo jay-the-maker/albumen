@@ -250,7 +250,10 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
             group_thousands(total - bad)
         );
         let _ = writeln!(out, "{dest}");
-        let _ = writeln!(out, "your originals were not touched");
+        let _ = writeln!(
+            out,
+            "status only read the backup; your photos folder was not opened"
+        );
         let listed: Vec<(&str, &String)> = changed
             .iter()
             .map(|p| ("changed", p))

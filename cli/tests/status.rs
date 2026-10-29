@@ -189,7 +189,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "damaged: 2 of 6 items no longer match what was backed up",
             "1 changed, 1 missing, 4 fine",
             p(&damaged),
-            "your originals were not touched",
+            "status only read the backup; your photos folder was not opened",
             "  changed: roll/IMG_0001.jpg",
             "  missing: roll/IMG_0004.jpg",
             &format!(
