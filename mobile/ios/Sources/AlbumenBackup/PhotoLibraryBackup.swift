@@ -51,6 +51,14 @@ public enum OriginalExportSession {
             for item in items {
                 let dest = scratch.appendingPathComponent(UUID().uuidString, isDirectory: false)
                 try await OriginalResources.write(item.resource, to: dest)
+                if item.resource.type == .photo || item.resource.type == .fullSizePhoto,
+                   let refusal = LocationCheck.refusal(
+                       assetHasLocation: asset.location != nil,
+                       originalHasGPS: ImageGPS.present(dest)
+                   ) {
+                    try? FileManager.default.removeItem(at: dest)
+                    throw refusal
+                }
                 var stamped = dest
                 var values = URLResourceValues()
                 values.contentModificationDate = when

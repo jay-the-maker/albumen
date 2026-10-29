@@ -56,6 +56,17 @@ final class UploadCheckTests: XCTestCase {
         XCTAssertEqual(loaded.user, "camera")
     }
 
+    func testGpsStrippedOriginalIsRefusedLikeADerivative() {
+        XCTAssertEqual(
+            LocationCheck.refusal(assetHasLocation: true, originalHasGPS: false),
+            .derivativeOnly(LocationCheck.strippedDetail)
+        )
+        XCTAssertNil(LocationCheck.refusal(assetHasLocation: true, originalHasGPS: true))
+        XCTAssertNil(LocationCheck.refusal(assetHasLocation: false, originalHasGPS: false))
+        let message = UploadFailure.derivativeOnly(LocationCheck.strippedDetail).surfaced(identifier: "IMG_0001")
+        XCTAssertTrue(message.contains("still needs the full original"), message)
+    }
+
     func testRemoteAssetDoesNotFallBackToADerivative() {
         XCTAssertEqual(
             OriginalPolicy.choose(role: .still, present: [.photo], isRemote: true),
