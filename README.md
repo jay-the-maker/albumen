@@ -101,6 +101,66 @@ docker run --rm -i --mount type=bind,src="$PWD/library",dst=/library,readonly al
 
 That mount is read-only. A writable directory for opt-in export or upload is a separate mount at `/destination`, not the library of originals. Tag `v0.1.1` publishes `ghcr.io/jay-the-maker/albumen-mcp:0.1.1` and the [server.json](server.json) entry `io.github.jay-the-maker/albumen` to the MCP Registry. [glama.json](glama.json) names the maintainer for Glama. This repository does not submit Glama, Smithery, PulseMCP, or mcp.so by itself.
 
+## Try it
+
+This walkthrough uses only the synthetic files in `fixtures/` and writes only under `/tmp`. It takes about a minute after the build. It needs the build and ExifTool from [Install from source](#install-from-source). Run it from the repository root.
+
+1. Scan the fixtures. Scan only reads the source and writes a JSON Lines manifest elsewhere.
+
+   ```bash
+   ./target/release/albumen scan fixtures --manifest /tmp/albumen-scan.jsonl
+   ```
+
+   ```text
+   albumen scan: 20 files, 101153 bytes hashed
+   scanned 20 files (101153 bytes) into /tmp/albumen-scan.jsonl
+   ```
+
+2. Check the manifest against the fixtures.
+
+   ```bash
+   ./target/release/albumen verify-manifest --manifest /tmp/albumen-scan.jsonl --against fixtures
+   ```
+
+   ```text
+   verified scan manifest against fixtures
+   ```
+
+3. Preview an export. Without `--apply` it prints the plan, writes nothing, and opens no network connection. `/tmp/albumen-export` still does not exist afterwards.
+
+   ```bash
+   ./target/release/albumen export --from fixtures --to /tmp/albumen-export
+   ```
+
+   ```text
+   dry-run: no files written and no network connections opened. Pass --apply or --execute to copy.
+   export
+     from: fixtures
+     to: /tmp/albumen-export
+     manifest: /tmp/albumen-export/ALBUMEN-MANIFEST.txt
+     network: none
+     README.md
+     ...
+     files: 20
+     bytes: 101153
+   ```
+
+4. Run the export, then verify the copy against the manifest it wrote.
+
+   ```bash
+   ./target/release/albumen export --from fixtures --to /tmp/albumen-export --apply
+   ./target/release/albumen verify-manifest --manifest /tmp/albumen-export/ALBUMEN-MANIFEST.txt --against /tmp/albumen-export
+   ```
+
+   ```text
+   exported 20 files to /tmp/albumen-export
+   manifest /tmp/albumen-export/ALBUMEN-MANIFEST.txt
+   verified 20 files in /tmp/albumen-export
+   {"summary":true,"count_in":20,"count_out":20,"mismatched":0}
+   ```
+
+5. Check that the source did not change: `(cd fixtures && sha256sum -c --quiet SHA256SUMS)` prints nothing and exits 0. To clean up, remove `/tmp/albumen-scan.jsonl` and `/tmp/albumen-export`.
+
 ## Ingest core
 
 `ingest/` is the `albumen-ingest` crate. The operation that matters is `copy_verify`:
