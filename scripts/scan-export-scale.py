@@ -9,7 +9,9 @@ under --workdir (ALBUMEN_HOME too), which must not exist yet.
 
 --check compares the run with the "scan_export" entry in bench/baseline.json
 and fails when scan or export is more than 20 percent slower per 1,000
-files. --write prints the entry to put in the baseline. --keep leaves the
+files. While that entry has "placeholder": true, it prints
+"BASELINE PLACEHOLDER: regression check not enforced" (as a ::warning::
+annotation on GitHub Actions) and does not compare. --write prints the entry to put in the baseline. --keep leaves the
 generated tree in place; otherwise only the paths this run created are
 removed.
 """
@@ -100,6 +102,14 @@ def main():
                 base = json.load(f).get("scan_export")
             if base is None:
                 raise SystemExit(f"{a.baseline} has no scan_export entry")
+            if base.get("placeholder"):
+                line = "BASELINE PLACEHOLDER: regression check not enforced"
+                print(line)
+                if os.environ.get("GITHUB_ACTIONS") == "true":
+                    print(f"::warning::{line}")
+                else:
+                    print(line, file=sys.stderr)
+                return
             problems = []
             for key in ("scan_s_per_1k", "export_s_per_1k"):
                 limit = base[key] * (1 + TOLERANCE)

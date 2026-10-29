@@ -3,7 +3,8 @@ name: scan export scale
 # Generates 100,000 synthetic text files on the runner, then times
 # `albumen scan` and `albumen export --apply` with scripts/scan-export-scale.py.
 # The job fails when either is more than 20 percent slower per 1,000 files
-# than the scan_export entry in bench/baseline.json. Nothing generated is
+# than the scan_export entry in bench/baseline.json. While that entry has
+# "placeholder": true the job warns and does not enforce. Nothing generated is
 # committed and no photo or media file is read.
 
 on:
