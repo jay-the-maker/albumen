@@ -20,14 +20,19 @@ fn start(work: &std::path::Path) -> (Gui, String) {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let out = BufReader::new(child.stdout.take().unwrap());
+    // Keep draining stdout for the child's whole life. The GUI prints more
+    // lines after its URL; dropping the pipe early made those println!s hit
+    // EPIPE and panic the server's main thread, so later requests saw a
+    // connection reset (the old intermittent read_to_string panic).
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut addr = None;
-    for line in out.lines().map_while(Result::ok) {
+    for line in lines.by_ref().map_while(Result::ok) {
         if let Some(url) = line.strip_prefix("albumen gui: http://") {
             addr = Some(url.trim_end_matches('/').to_string());
             break;
         }
     }
+    std::thread::spawn(move || for _ in lines.map_while(Result::ok) {});
     (Gui(child), addr.expect("gui prints its URL"))
 }
 
