@@ -170,6 +170,27 @@ pub fn export_tree(
     source: &crate::source::SourceRoot,
     dest: &dyn ExportDest,
 ) -> Result<Vec<ManifestEntry>, IngestError> {
+    export_tree_counted(source, dest).map(|report| report.entries)
+}
+
+/// What one export run did, counted per file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportReport {
+    /// Every library file, sorted by relative path.
+    pub entries: Vec<ManifestEntry>,
+    /// Files this run copied and read back.
+    pub copied: usize,
+    /// Files already at the destination whose SHA-256 and length this run
+    /// checked against the source. Not copied again.
+    pub already_present: usize,
+}
+
+/// [`export_tree`], also counting new copies and verified existing files.
+/// `copied + already_present == entries.len()`.
+pub fn export_tree_counted(
+    source: &crate::source::SourceRoot,
+    dest: &dyn ExportDest,
+) -> Result<ExportReport, IngestError> {
     let root = source.canonical();
     if !root.is_dir() {
         return Err(IngestError::NotAFile(root.to_path_buf()));
@@ -186,6 +207,8 @@ pub fn export_tree(
     })?;
     let assets = plan_assets(root, &files)?;
     let mut entries = Vec::new();
+    let mut copied = 0usize;
+    let mut already_present = 0usize;
     for asset in assets {
         let mut copied_now = Vec::new();
         for file in asset.files() {
@@ -193,7 +216,10 @@ pub fn export_tree(
             match dest.place(&file.path, &relative) {
                 Ok(placed) => {
                     if placed.copied {
+                        copied += 1;
                         copied_now.push(relative.clone());
+                    } else {
+                        already_present += 1;
                     }
                     entries.push(ManifestEntry {
                         relative_path: relative,
@@ -217,7 +243,11 @@ pub fn export_tree(
         }
     }
     entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    Ok(entries)
+    Ok(ExportReport {
+        entries,
+        copied,
+        already_present,
+    })
 }
 
 /// Hash every listed file and require the destination to contain exactly that set.
@@ -664,6 +694,45 @@ mod tests {
         assert_eq!(fs::read(&jpg).unwrap(), before_jpg);
         let verify_err = verify_tree(&parsed, &dest, &[]).unwrap_err();
         assert!(matches!(verify_err, IngestError::ManifestMismatch { .. }));
+    }
+
+    #[test]
+    fn export_counts_new_and_already_present_exactly() {
+        let tmp = Tmp::new();
+        let library = tmp.path().join("library");
+        fs::create_dir_all(library.join("roll")).unwrap();
+        for i in 0..15 {
+            write_file(
+                &library.join("roll"),
+                &format!("IMG_{i:04}.jpg"),
+                format!("bytes {i}").as_bytes(),
+                mtime(),
+            );
+        }
+        let dest_root = tmp.path().join("export");
+        let dest = DirectoryTree::new(&dest_root);
+
+        let first = export_tree_counted(&as_root(&library), &dest).unwrap();
+        assert_eq!(
+            (first.copied, first.already_present, first.entries.len()),
+            (15, 0, 15)
+        );
+
+        let again = export_tree_counted(&as_root(&library), &dest).unwrap();
+        assert_eq!((again.copied, again.already_present), (0, 15));
+        assert_eq!(again.entries, first.entries);
+
+        fs::remove_file(dest_root.join("roll/IMG_0007.jpg")).unwrap();
+        write_file(&library.join("roll"), "IMG_0100.jpg", b"new one", mtime());
+        let partial = export_tree_counted(&as_root(&library), &dest).unwrap();
+        assert_eq!(
+            (
+                partial.copied,
+                partial.already_present,
+                partial.entries.len()
+            ),
+            (2, 14, 16)
+        );
     }
 
     #[test]

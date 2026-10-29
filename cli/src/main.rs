@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use albumen_ingest::{
-    dest, export_tree, import_icloud, import_takeout_with, parse_manifest, plan_icloud,
+    dest, export_tree_counted, import_icloud, import_takeout_with, parse_manifest, plan_icloud,
     plan_takeout, platform_dirs, scan_tree, verify_scan_manifest, verify_tree, walk_sorted,
     write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
     SourceRoot, WalkControl,
@@ -222,10 +222,15 @@ fn run() -> Result<(), IngestError> {
             albumen_ingest::ledger::anchor(&from, "export");
             let dest = open_target(&to)?;
             let source = SourceRoot::open(&from)?;
-            let entries = export_tree(&source, dest.as_ref())?;
+            let report = export_tree_counted(&source, dest.as_ref())?;
+            let entries = report.entries;
             refuse_clobber(&manifest_path, &to, &entries)?;
             write_manifest(&manifest_path, &entries)?;
-            println!("exported {} files to {to}", entries.len());
+            println!(
+                "exported {} new, {} already present and verified",
+                report.copied, report.already_present
+            );
+            println!("to {to}");
             println!("manifest {}", manifest_path.display());
             Ok(())
         }
@@ -399,6 +404,22 @@ fn refuse_export_targets(from: &Path, to: &str, manifest: &Path) -> Result<(), I
     source.refuse_destination(manifest)
 }
 
+/// Same SHA-256 and length. Any read error counts as different.
+fn same_bytes(left: &Path, right: &Path) -> bool {
+    let len = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).ok();
+    match (len(left), len(right)) {
+        (Some(a), Some(b)) if a == b => {}
+        _ => return false,
+    }
+    match (
+        albumen_ingest::sha256_hex(left),
+        albumen_ingest::sha256_hex(right),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), IngestError> {
     if !from.is_dir() {
         return Err(IngestError::NotAFile(from.to_path_buf()));
@@ -418,6 +439,8 @@ fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), Inges
     let source = SourceRoot::open(from)?;
     let mut files = 0u64;
     let mut bytes = 0u64;
+    let local_target = !to.starts_with("s3://");
+    let (mut new, mut present, mut conflicting) = (0u64, 0u64, 0u64);
     walk_sorted(from, None, &mut |relative| {
         let full = from.join(relative);
         let len = source
@@ -427,10 +450,33 @@ fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), Inges
         println!("  {relative}");
         files += 1;
         bytes += len;
+        if !local_target || albumen_ingest::is_copy_local_tombstone(relative) {
+            return WalkControl::Continue;
+        }
+        let existing = Path::new(to).join(relative);
+        if !existing.exists() {
+            new += 1;
+        } else if existing.is_file() && same_bytes(&existing, &full) {
+            present += 1;
+        } else {
+            conflicting += 1;
+        }
         WalkControl::Continue
     })?;
     println!("  files: {files}");
     println!("  bytes: {bytes}");
+    if local_target {
+        println!("would export {new} new, {present} already present and verified");
+        if conflicting > 0 {
+            println!(
+                "  conflicts: {conflicting} destination files differ from the library; --apply will refuse them"
+            );
+        }
+    } else {
+        println!(
+            "would export up to {files} files to {to}; the already-present count needs --apply, because a dry-run opens no network"
+        );
+    }
     Ok(())
 }
 

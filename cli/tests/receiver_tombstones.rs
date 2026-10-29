@@ -109,7 +109,11 @@ fn receiver_tombstones_on_copy_a_stay_on_copy_a() {
         p(&m2),
         "--apply",
     ]);
-    assert!(text.contains("exported 2 files"), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line == "exported 0 new, 2 already present and verified"),
+        "{text}"
+    );
 
     // B: no tombstone, originals bit-exact, original manifest still passes.
     assert_eq!(files(&copy_b), ["IMG_0001.jpg", "IMG_0002.jpg"]);
