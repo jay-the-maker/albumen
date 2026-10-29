@@ -227,11 +227,10 @@ fn run() -> Result<(), IngestError> {
             refuse_clobber(&manifest_path, &to, &entries)?;
             write_manifest(&manifest_path, &entries)?;
             println!(
-                "exported {} new, {} already present and verified ({} files) to {to}",
-                report.copied,
-                report.already_present,
-                entries.len()
+                "exported {} new, {} already present and verified",
+                report.copied, report.already_present
             );
+            println!("to {to}");
             println!("manifest {}", manifest_path.display());
             Ok(())
         }
@@ -467,9 +466,7 @@ fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), Inges
     println!("  files: {files}");
     println!("  bytes: {bytes}");
     if local_target {
-        println!(
-            "would export {new} new, {present} already present and verified ({files} files) to {to}"
-        );
+        println!("would export {new} new, {present} already present and verified");
         if conflicting > 0 {
             println!(
                 "  conflicts: {conflicting} destination files differ from the library; --apply will refuse them"

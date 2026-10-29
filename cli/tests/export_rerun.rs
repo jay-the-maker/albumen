@@ -63,26 +63,32 @@ fn rerun_reports_zero_new_and_every_file_already_present() {
 
     let plan = export(&library, &target, &manifests.join("m0.txt"), false);
     assert!(
-        plan.contains("would export 15 new, 0 already present and verified (15 files)"),
+        plan.lines()
+            .any(|line| line == "would export 15 new, 0 already present and verified"),
         "{plan}"
     );
     assert!(!target.exists(), "dry-run wrote the target");
 
     let first = export(&library, &target, &manifests.join("m1.txt"), true);
     assert!(
-        first.contains("exported 15 new, 0 already present and verified (15 files)"),
+        first
+            .lines()
+            .any(|line| line == "exported 15 new, 0 already present and verified"),
         "{first}"
     );
 
     let plan = export(&library, &target, &manifests.join("m2.txt"), false);
     assert!(
-        plan.contains("would export 0 new, 15 already present and verified (15 files)"),
+        plan.lines()
+            .any(|line| line == "would export 0 new, 15 already present and verified"),
         "{plan}"
     );
 
     let again = export(&library, &target, &manifests.join("m3.txt"), true);
     assert!(
-        again.contains("exported 0 new, 15 already present and verified (15 files)"),
+        again
+            .lines()
+            .any(|line| line == "exported 0 new, 15 already present and verified"),
         "{again}"
     );
     assert!(!again.contains("exported 15"), "{again}");
@@ -92,12 +98,15 @@ fn rerun_reports_zero_new_and_every_file_already_present() {
     fs::write(roll.join("IMG_0100.jpg"), b"synthetic new").unwrap();
     let plan = export(&library, &target, &manifests.join("m4.txt"), false);
     assert!(
-        plan.contains("would export 2 new, 14 already present and verified (16 files)"),
+        plan.lines()
+            .any(|line| line == "would export 2 new, 14 already present and verified"),
         "{plan}"
     );
     let partial = export(&library, &target, &manifests.join("m5.txt"), true);
     assert!(
-        partial.contains("exported 2 new, 14 already present and verified (16 files)"),
+        partial
+            .lines()
+            .any(|line| line == "exported 2 new, 14 already present and verified"),
         "{partial}"
     );
 }
@@ -116,7 +125,8 @@ fn dry_run_names_a_conflict_that_apply_refuses() {
 
     let plan = export(&library, &target, &manifests.join("a.txt"), false);
     assert!(
-        plan.contains("would export 0 new, 0 already present and verified (1 files)"),
+        plan.lines()
+            .any(|line| line == "would export 0 new, 0 already present and verified"),
         "{plan}"
     );
     assert!(plan.contains("conflicts: 1"), "{plan}");

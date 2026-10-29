@@ -110,7 +110,8 @@ fn receiver_tombstones_on_copy_a_stay_on_copy_a() {
         "--apply",
     ]);
     assert!(
-        text.contains("exported 0 new, 2 already present and verified (2 files)"),
+        text.lines()
+            .any(|line| line == "exported 0 new, 2 already present and verified"),
         "{text}"
     );
 
