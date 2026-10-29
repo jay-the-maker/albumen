@@ -994,4 +994,69 @@ mod tests {
             assert_eq!(drift_paths(&root, &entries, &ignore), vec![extra]);
         }
     }
+    /// Test-only in-memory destination. Stands in for remote destinations
+    /// (S3, rclone), which cannot run on the build box.
+    struct MemDest(Vec<(String, Vec<u8>)>);
+
+    impl ExportDest for MemDest {
+        fn place(&self, _source: &Path, _relative: &str) -> Result<Placed, IngestError> {
+            unreachable!("read-only test destination")
+        }
+        fn read_hash(&self, relative: &str) -> Result<Option<(String, u64)>, IngestError> {
+            Ok(self
+                .0
+                .iter()
+                .find(|(path, _)| path == relative)
+                .map(|(_, bytes)| {
+                    (
+                        to_hex(&crate::checksum::sha256_slice(bytes)),
+                        bytes.len() as u64,
+                    )
+                }))
+        }
+        fn list(&self) -> Result<Vec<String>, IngestError> {
+            Ok(self.0.iter().map(|(path, _)| path.clone()).collect())
+        }
+        fn remove_placed(&self, _relative: &str) -> Result<(), IngestError> {
+            unreachable!("read-only test destination")
+        }
+    }
+
+    #[test]
+    fn ignore_rules_hold_on_an_in_memory_remote_stand_in() {
+        let keep = b"synthetic keep".to_vec();
+        let entries = vec![ManifestEntry {
+            relative_path: "keep.jpg".to_string(),
+            sha256: to_hex(&crate::checksum::sha256_slice(&keep)),
+            byte_len: keep.len() as u64,
+        }];
+        let cases: [(&str, &str, bool); 6] = [
+            ("ALBUMEN-PROOFS/", "ALBUMEN-PROOFS/x", true),
+            ("ALBUMEN-PROOFS/", "ALBUMEN-PROOFS-old/x", false),
+            ("ALBUMEN-PROOFS/", "ALBUMEN-PROOFSx", false),
+            ("name", "name", true),
+            ("name", "name2", false),
+            ("name", "dir/name", false),
+        ];
+        for (ignore, extra, ignored) in cases {
+            let dest = MemDest(vec![
+                ("keep.jpg".to_string(), keep.clone()),
+                (extra.to_string(), b"synthetic extra".to_vec()),
+            ]);
+            let ignore = vec![ignore.to_string()];
+            let verified = verify_tree(&entries, &dest, &ignore);
+            let drift = tree_drift(&entries, &dest, &ignore).unwrap();
+            if ignored {
+                assert!(verified.is_ok(), "{extra}");
+                assert!(drift.is_empty(), "{extra}");
+            } else {
+                assert!(
+                    matches!(&verified, Err(IngestError::ManifestExtra(path)) if path == extra),
+                    "{extra}"
+                );
+                assert_eq!(drift.len(), 1, "{extra}");
+                assert_eq!((drift[0].kind, drift[0].path.as_str()), ("extra", extra));
+            }
+        }
+    }
 }
