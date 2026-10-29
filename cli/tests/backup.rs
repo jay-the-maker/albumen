@@ -161,6 +161,61 @@ fn a_killed_backup_is_finished_by_the_next_run() {
 }
 
 #[test]
+fn backup_refuses_a_changed_file_at_the_destination_and_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let lib = library(tmp.path(), 6);
+    let dest = tmp.path().join("dest");
+    let args = ["backup", "--from", p(&lib), "--to", p(&dest)];
+    assert_eq!(albumen(&home, &args).0, 0);
+
+    // The copy at DEST changes (bit rot, an editor saving over it).
+    let changed = dest.join("roll/IMG_0003.jpg");
+    let mut bytes = fs::read(&changed).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&changed, &bytes).unwrap();
+    fs::write(
+        lib.join("roll").join("NEW_0001.jpg"),
+        "new after the change",
+    )
+    .unwrap();
+    let lib_before = snapshot(&lib);
+    let dest_before = snapshot(&dest);
+
+    let (code, text) = albumen(&home, &args);
+    assert_eq!(code, 3, "{text}");
+    assert!(text.contains("roll/IMG_0003.jpg"), "{text}");
+    assert!(text.contains("nothing written"), "{text}");
+    assert_eq!(
+        snapshot(&dest),
+        dest_before,
+        "backup wrote to DEST after refusing"
+    );
+    assert_eq!(
+        fs::read(&changed).unwrap(),
+        bytes,
+        "the changed copy was overwritten"
+    );
+    assert!(!dest.join("roll/NEW_0001.jpg").exists());
+    assert_eq!(
+        proofs(&dest).len(),
+        1,
+        "a refused run must not write a proof"
+    );
+    assert_eq!(snapshot(&lib), lib_before, "the library was written to");
+
+    // status says to move the changed copy aside, not to rerun the backup.
+    let out = cmd(&home).args(["status", p(&dest)]).output().unwrap();
+    let status = String::from_utf8_lossy(&out.stdout);
+    let last = status.lines().last().unwrap();
+    assert!(
+        last.starts_with("next: move the changed copy aside"),
+        "{status}"
+    );
+    assert!(!last.contains("albumen backup"), "{status}");
+}
+
+#[test]
 fn backup_refuses_a_remote_destination_with_a_usage_error() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");

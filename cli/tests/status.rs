@@ -320,7 +320,7 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
     fs::create_dir_all(&never).unwrap();
     let (_, text) = status(&[p(&never)]);
     assert!(
-        text.contains(&format!("--to {} --apply", q(p(&never)))),
+        text.ends_with(&format!("--to {}\n", q(p(&never)))),
         "{text}"
     );
     let gone = tmp.path().join("gone disk");
