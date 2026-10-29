@@ -44,10 +44,8 @@ pub struct Target {
 }
 
 fn refuse(target: &Target, message: impl Into<String>) -> IngestError {
-    IngestError::Store {
-        operation: "receive",
-        filename: target.library.display().to_string(),
-        message: message.into(),
+    IngestError::Refused {
+        message: format!("{}: {}", target.library.display(), message.into()),
     }
 }
 

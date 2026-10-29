@@ -175,6 +175,18 @@ The remaining steps take a few seconds. Run them from the repository root.
 
 5. Check that the source did not change: `(cd fixtures && sha256sum -c --quiet SHA256SUMS)` prints nothing and exits 0. To clean up, remove `/tmp/albumen-scan.jsonl` and `/tmp/albumen-export`.
 
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | ok |
+| 1 | verification mismatch or drift (checksum, manifest, reconciliation) |
+| 2 | usage: the arguments cannot be used as given |
+| 3 | refused unsafe layout, such as a destination inside the source, an existing file, or a symlink |
+| 4 | I/O or storage failure |
+
+Every error ends with a `next:` line on stderr that says what to do. `albumen <command> --help` ends with one example.
+
 ## Ingest core
 
 `ingest/` is the `albumen-ingest` crate. The operation that matters is `copy_verify`:
