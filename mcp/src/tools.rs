@@ -194,6 +194,7 @@ impl Library {
         let mut pending: Vec<(String, u64)> = Vec::new();
         let batch = metadata::exiftool_batch();
         let mut cache = self.metadata.lock().unwrap_or_else(|err| err.into_inner());
+        let hashed_before = cache.hashed();
         let mut failed: Option<String> = None;
         let mut index_slot = self.index.lock().unwrap_or_else(|err| err.into_inner());
         let index = self.current_index(&mut index_slot)?;
@@ -254,7 +255,12 @@ impl Library {
                 )?;
             }
         }
-        Ok(page_value(&page))
+        let mut value = page_value(&page);
+        if std::env::var("ALBUMEN_SEARCH_STATS").is_ok_and(|v| v == "1") {
+            // Diagnostics for library-scale.py: files re-hashed by this call.
+            value["stats"] = json!({"hashed": cache.hashed() - hashed_before});
+        }
+        Ok(value)
     }
 
     fn browse(&self, arguments: &Value) -> Result<Value, String> {
@@ -461,22 +467,50 @@ fn flush_metadata(
     page: &mut Page,
 ) -> Result<(), String> {
     let mut load_paths: Vec<String> = pending.iter().map(|(path, _)| path.clone()).collect();
+    let mut extra: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut found = Vec::with_capacity(pending.len());
+    let mut last_parent: Option<String> = None;
     for (path, _) in pending.iter() {
-        for sidecar in metadata::existing_sidecars(root, path) {
-            if !load_paths.iter().any(|item| item == &sidecar) {
-                load_paths.push(sidecar);
-            }
+        let parent = path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        if last_parent.as_deref() != Some(parent) {
+            cache.refresh_dir(root, parent);
+            last_parent = Some(parent.to_string());
         }
+        let sidecars = cache.listed_sidecars(root, path);
+        for sidecar in &sidecars {
+            extra.insert(sidecar.clone());
+        }
+        found.push(sidecars);
     }
-    let read = cache.load(root, &load_paths)?;
-    for (path, bytes) in pending.drain(..) {
-        let Some(own) = read.get(&path) else {
+    if !extra.is_empty() {
+        let primary: std::collections::HashSet<&str> =
+            pending.iter().map(|(path, _)| path.as_str()).collect();
+        let mut extra: Vec<String> = extra
+            .into_iter()
+            .filter(|path| !primary.contains(path.as_str()))
+            .collect();
+        extra.sort();
+        load_paths.extend(extra);
+    }
+    let unkept = cache.refresh(root, &load_paths)?;
+    let cache = &*cache;
+    for ((path, bytes), sidecars) in pending.drain(..).zip(found) {
+        let Some(own) = cache.record(&unkept, &path) else {
             continue;
         };
-        let merged = metadata::with_sidecars(&path, own, &read);
-        if !filters.matches(&merged) {
+        let matched = if sidecars.is_empty() {
+            filters.matches(own).then(|| own.clone())
+        } else {
+            let merged =
+                metadata::with_found_sidecars(own, &sidecars, |path| cache.record(&unkept, path));
+            filters.matches(&merged).then_some(merged)
+        };
+        let Some(merged) = matched else {
             continue;
-        }
+        };
         if page.consider(
             limit,
             Hit {

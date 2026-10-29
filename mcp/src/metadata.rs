@@ -146,59 +146,316 @@ impl Filters {
     }
 }
 
-/// SHA-256 keyed memory of ExifTool reads. Dropping it drops the only copy.
-#[derive(Debug, Default)]
+/// The five stat fields the warm search trusts instead of a re-hash.
+///
+/// Search only. Export, verify-manifest, backup and status never read this:
+/// they SHA-256 every file every time (see `file_hash_count` tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatKey {
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub mtime_ns: i128,
+    pub ctime_ns: i128,
+}
+
+impl StatKey {
+    pub fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            StatKey {
+                device: meta.dev(),
+                inode: meta.ino(),
+                size: meta.len(),
+                mtime_ns: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+                ctime_ns: i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // No portable device/inode or ctime here: use mtime for both times
+            // and the creation time as a stand-in identity.
+            let ns = |t: std::io::Result<std::time::SystemTime>| -> i128 {
+                t.ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as i128)
+                    .unwrap_or(-1)
+            };
+            StatKey {
+                device: 0,
+                inode: ns(meta.created()) as u64,
+                size: meta.len(),
+                mtime_ns: ns(meta.modified()),
+                ctime_ns: ns(meta.modified()),
+            }
+        }
+    }
+
+    /// A hash taken within `RACY_NANOS` of the file's last change cannot rule
+    /// out a same-second write after it, so it is not trusted next time.
+    fn settled_at(&self, hashed_ns: i128, racy_ns: i128) -> bool {
+        self.mtime_ns >= 0 && hashed_ns - self.mtime_ns.max(self.ctime_ns) >= racy_ns
+    }
+}
+
+fn now_ns() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0)
+}
+
+/// One directory's `.xmp`/`.aae` names, by lowercase name. Re-listed when
+/// the directory's mtime moves or the listing was taken inside the racy window.
+#[derive(Debug)]
+struct DirSidecars {
+    mtime_ns: i128,
+    settled: bool,
+    names: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct Entry {
+    sha: String,
+    stat: StatKey,
+    /// True when the hash was taken at least `RACY_NANOS` after the change.
+    settled: bool,
+    record: Record,
+}
+
+/// Memory of ExifTool reads, keyed by SHA-256 and the file's stat.
+///
+/// Warm search: when all five [`StatKey`] fields are unchanged since a
+/// settled hash, the file is not read again. Any change, or a hash taken too
+/// close to the last write, means a fresh SHA-256. Dropping it drops the only copy.
+#[derive(Debug)]
 pub struct Cache {
-    entries: HashMap<String, (String, u64, Record)>,
+    entries: HashMap<String, Entry>,
+    dirs: HashMap<String, DirSidecars>,
+    racy_ns: i128,
+    hashed: u64,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Cache {
+            entries: HashMap::new(),
+            dirs: HashMap::new(),
+            racy_ns: i128::from(albumen_ingest::index::RACY_NANOS),
+            hashed: 0,
+        }
+    }
 }
 
 impl Cache {
+    /// Files this cache has SHA-256'd since it was made.
+    pub fn hashed(&self) -> u64 {
+        self.hashed
+    }
+
+    /// [`existing_sidecars`], but each directory is listed once and reused
+    /// while its mtime is unchanged, instead of one listing per file.
+    pub fn sidecars(&mut self, root: &Path, relative: &str) -> Vec<String> {
+        if is_sidecar(relative) {
+            return Vec::new();
+        }
+        let (parent, _) = split_relative(relative);
+        self.refresh_dir(root, parent);
+        self.listed_sidecars(root, relative)
+    }
+
+    /// Re-list `parent` when its mtime moved or its listing was taken inside
+    /// the racy window. Call once per directory per batch, then
+    /// [`Cache::listed_sidecars`] for each file in it.
+    pub fn refresh_dir(&mut self, root: &Path, parent: &str) {
+        let dir = if parent.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(PathBuf::from_iter(parent.split('/')))
+        };
+        let Ok(meta) = std::fs::metadata(&dir) else {
+            self.dirs.remove(parent);
+            return;
+        };
+        let mtime_ns = StatKey::of(&meta).mtime_ns;
+        let fresh = match self.dirs.get(parent) {
+            Some(cached) => !(cached.settled && cached.mtime_ns == mtime_ns),
+            None => true,
+        };
+        if fresh {
+            let listed_ns = now_ns();
+            let mut names: HashMap<String, Vec<String>> = HashMap::new();
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let Ok(actual) = entry.file_name().into_string() else {
+                        continue;
+                    };
+                    let lower = actual.to_ascii_lowercase();
+                    if lower.ends_with(".xmp") || lower.ends_with(".aae") {
+                        names.entry(lower).or_default().push(actual);
+                    }
+                }
+            }
+            for list in names.values_mut() {
+                list.sort();
+            }
+            self.dirs.insert(
+                parent.to_string(),
+                DirSidecars {
+                    mtime_ns,
+                    settled: mtime_ns >= 0 && listed_ns - mtime_ns >= self.racy_ns,
+                    names,
+                },
+            );
+        }
+    }
+
+    /// Sidecars of `relative` from the listing [`Cache::refresh_dir`] took.
+    pub fn listed_sidecars(&self, root: &Path, relative: &str) -> Vec<String> {
+        if is_sidecar(relative) {
+            return Vec::new();
+        }
+        let (parent, name) = split_relative(relative);
+        let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+        let Some(listing) = self.dirs.get(parent) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for candidate in [
+            format!("{stem}.xmp"),
+            format!("{name}.xmp"),
+            format!("{stem}.aae"),
+            format!("{name}.aae"),
+        ] {
+            let Some(actuals) = listing.names.get(&candidate.to_ascii_lowercase()) else {
+                continue;
+            };
+            // Exact case first, then other spellings, as existing_sidecars does.
+            let ordered = actuals
+                .iter()
+                .filter(|actual| **actual == candidate)
+                .chain(actuals.iter().filter(|actual| **actual != candidate));
+            for actual in ordered {
+                let relative_sidecar = join_relative(parent, actual);
+                if found.contains(&relative_sidecar) {
+                    continue;
+                }
+                if root
+                    .join(PathBuf::from_iter(relative_sidecar.split('/')))
+                    .is_file()
+                {
+                    found.push(relative_sidecar);
+                }
+            }
+        }
+        found
+    }
+
+    #[cfg(test)]
+    fn with_racy_ns(racy_ns: i128) -> Self {
+        Cache {
+            racy_ns,
+            ..Cache::default()
+        }
+    }
+
     pub fn load(
         &mut self,
         root: &Path,
         relative_paths: &[String],
     ) -> Result<HashMap<String, Record>, String> {
-        let mut digests = HashMap::with_capacity(relative_paths.len());
+        let mut digests = self.refresh(root, relative_paths)?;
+        for relative in relative_paths {
+            if !digests.contains_key(relative) {
+                if let Some(entry) = self.entries.get(relative) {
+                    digests.insert(relative.clone(), entry.record.clone());
+                }
+            }
+        }
+        Ok(digests)
+    }
+
+    /// Bring every path's entry up to date, as [`Cache::load`] does, without
+    /// copying records. Records the cache did not keep (over the item limit)
+    /// are returned; read the rest with [`Cache::record`].
+    pub fn refresh(
+        &mut self,
+        root: &Path,
+        relative_paths: &[String],
+    ) -> Result<HashMap<String, Record>, String> {
+        let mut digests = HashMap::new();
         let mut missing = Vec::new();
         for relative in relative_paths {
             let full = root.join(PathBuf::from_iter(relative.split('/')));
-            let len = std::fs::metadata(&full)
-                .map_err(|err| format!("{relative}: {err}"))?
-                .len();
-            let sha = sha256_hex(&full).map_err(|err| err.to_string())?;
-            if let Some((cached_sha, cached_len, record)) = self.entries.get(relative) {
-                if cached_sha == &sha && *cached_len == len {
-                    digests.insert(relative.clone(), record.clone());
+            let stat =
+                StatKey::of(&std::fs::metadata(&full).map_err(|err| format!("{relative}: {err}"))?);
+            if let Some(entry) = self.entries.get(relative) {
+                if entry.settled && entry.stat == stat {
                     continue;
                 }
             }
-            missing.push((relative.clone(), sha, len));
+            let hashed_ns = now_ns();
+            self.hashed += 1;
+            let sha = sha256_hex(&full).map_err(|err| err.to_string())?;
+            let settled = stat.settled_at(hashed_ns, self.racy_ns);
+            if let Some(entry) = self.entries.get_mut(relative) {
+                if entry.sha == sha && entry.stat.size == stat.size {
+                    entry.stat = stat;
+                    entry.settled = settled;
+                    continue;
+                }
+            }
+            missing.push((relative.clone(), sha, stat, settled));
         }
         if !missing.is_empty() {
             let fresh = read_exiftool(
                 root,
                 &missing
                     .iter()
-                    .map(|(path, _, _)| path.clone())
+                    .map(|(path, _, _, _)| path.clone())
                     .collect::<Vec<_>>(),
             )?;
-            for (relative, sha, len) in missing {
+            for (relative, sha, stat, settled) in missing {
                 let record = fresh.get(&relative).cloned().unwrap_or_else(Record::empty);
-                self.remember(relative.clone(), sha, len, record.clone());
-                digests.insert(relative, record);
+                if !self.remember(
+                    relative.clone(),
+                    Entry {
+                        sha,
+                        stat,
+                        settled,
+                        record: record.clone(),
+                    },
+                ) {
+                    digests.insert(relative, record);
+                }
             }
         }
         Ok(digests)
     }
 
-    fn remember(&mut self, relative: String, sha: String, len: u64, record: Record) {
+    /// The record for `relative`: from `unkept` (what [`Cache::refresh`]
+    /// returned) or from the cache.
+    pub fn record<'a>(
+        &'a self,
+        unkept: &'a HashMap<String, Record>,
+        relative: &str,
+    ) -> Option<&'a Record> {
+        unkept
+            .get(relative)
+            .or_else(|| self.entries.get(relative).map(|entry| &entry.record))
+    }
+
+    /// Keep `entry`. False when the item limit left it out.
+    fn remember(&mut self, relative: String, entry: Entry) -> bool {
         let replacing = self.entries.contains_key(&relative);
         if let Some(limit) = cache_item_limit() {
             if !replacing && self.entries.len() >= limit {
-                return;
+                return false;
             }
         }
-        self.entries.insert(relative, (sha, len, record));
+        self.entries.insert(relative, entry);
+        true
     }
 }
 
@@ -302,6 +559,42 @@ fn join_relative(parent: &str, name: &str) -> String {
     }
 }
 
+/// [`with_sidecars`] for sidecar paths already found (by [`Cache::sidecars`]),
+/// without searching `all` for case variants.
+pub fn with_found_sidecars<'a>(
+    own: &Record,
+    sidecars: &[String],
+    lookup: impl Fn(&str) -> Option<&'a Record>,
+) -> Record {
+    let mut merged = own.clone();
+    for path in sidecars {
+        if let Some(sidecar) = lookup(path) {
+            merge_sidecar(&mut merged, sidecar);
+        }
+    }
+    merged
+}
+
+fn merge_sidecar(merged: &mut Record, sidecar: &Record) {
+    if merged.captured.is_none() {
+        merged.captured = sidecar.captured;
+    }
+    if merged.camera.is_none() {
+        merged.camera.clone_from(&sidecar.camera);
+    }
+    if merged.lens.is_none() {
+        merged.lens.clone_from(&sidecar.lens);
+    }
+    if merged.latitude.is_none() {
+        merged.latitude = sidecar.latitude;
+    }
+    if merged.longitude.is_none() {
+        merged.longitude = sidecar.longitude;
+    }
+    push_unique(&mut merged.keywords, &sidecar.keywords);
+    push_unique(&mut merged.captions, &sidecar.captions);
+}
+
 pub fn with_sidecars(relative: &str, own: &Record, all: &HashMap<String, Record>) -> Record {
     if is_sidecar(relative) {
         return own.clone();
@@ -315,26 +608,9 @@ pub fn with_sidecars(relative: &str, own: &Record, all: &HashMap<String, Record>
         format!("{stem}.aae"),
         format!("{name}.aae"),
     ] {
-        let Some(sidecar) = find_sibling(all, parent, &candidate) else {
-            continue;
-        };
-        if merged.captured.is_none() {
-            merged.captured = sidecar.captured;
+        if let Some(sidecar) = find_sibling(all, parent, &candidate) {
+            merge_sidecar(&mut merged, sidecar);
         }
-        if merged.camera.is_none() {
-            merged.camera.clone_from(&sidecar.camera);
-        }
-        if merged.lens.is_none() {
-            merged.lens.clone_from(&sidecar.lens);
-        }
-        if merged.latitude.is_none() {
-            merged.latitude = sidecar.latitude;
-        }
-        if merged.longitude.is_none() {
-            merged.longitude = sidecar.longitude;
-        }
-        push_unique(&mut merged.keywords, &sidecar.keywords);
-        push_unique(&mut merged.captions, &sidecar.captions);
     }
     merged
 }
@@ -846,6 +1122,54 @@ mod tests {
         assert_eq!(second["note.xmp"].lens.as_deref(), Some("Lens B"));
         let names = list_files(root.path());
         assert_eq!(names, vec!["note.xmp".to_string()]);
+    }
+
+    #[test]
+    fn warm_search_skips_only_unchanged_settled_files() {
+        let root = tempfile::tempdir().unwrap();
+        let mut relative = Vec::new();
+        for n in 0..5 {
+            let name = format!("n{n}.xmp");
+            std::fs::write(
+                root.path().join(&name),
+                xmp(&format!("cap {n}"), "kw", "Lens A"),
+            )
+            .unwrap();
+            relative.push(name);
+        }
+        let mut cache = Cache::with_racy_ns(0);
+        cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 5);
+        cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 5, "unchanged stat must not re-hash");
+
+        // Same size, one byte flipped, mtime put back: ctime still moves.
+        let path = root.path().join("n2.xmp");
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at = bytes.windows(5).position(|w| w == b"cap 2").unwrap() + 4;
+        bytes[at] = b'9';
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let again = cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 6, "exactly the changed file is re-hashed");
+        assert!(again["n2.xmp"].captions.iter().any(|c| c.contains("cap 9")));
+    }
+
+    #[test]
+    fn a_hash_taken_inside_the_racy_window_is_not_trusted() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.xmp"), xmp("c", "k", "L")).unwrap();
+        let relative = vec!["a.xmp".to_string()];
+        let mut cache = Cache::default();
+        cache.load(root.path(), &relative).unwrap();
+        cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 2, "a just-written file is hashed again");
     }
 
     fn list_files(root: &Path) -> Vec<String> {
