@@ -166,7 +166,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
     assert_eq!(
         l[3],
         format!(
-            "next: albumen export --from <your photos folder> --to {} --apply",
+            "next: albumen backup --from <your photos folder> --to {}",
             p(&stale)
         )
     );
@@ -193,7 +193,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "  changed: roll/IMG_0001.jpg",
             "  missing: roll/IMG_0004.jpg",
             &format!(
-                "next: albumen export --from <your photos folder> --to {} --apply",
+                "next: albumen backup --from <your photos folder> --to {}",
                 p(&damaged)
             ),
         ]
@@ -212,7 +212,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "not backed up: no Albumen backup found here",
             p(&never),
             &format!(
-                "next: albumen export --from <your photos folder> --to {} --apply",
+                "next: albumen backup --from <your photos folder> --to {}",
                 p(&never)
             ),
         ]
