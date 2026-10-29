@@ -227,6 +227,14 @@ albumen verify-manifest --manifest ./library-manifest.txt --against s3://my-buck
 
 The manifest lists SHA-256, byte length, and the relative path. `verify-manifest` hashes the destination bytes and fails if a file is missing, extra, or different. S3 uses the same `ALBUMEN_S3_*` variables as ingest.
 
+To ask whether a backup is current and intact, without changing anything:
+
+```
+albumen status /backup/library --max-age 7d
+```
+
+It prints `ok`, `stale`, `damaged`, `not backed up`, or `unreadable` for each folder and exits 0, 1, 1, 3, or 4 (the worst wins when you pass several). Anything other than `ok` ends with a `next:` line to run.
+
 ### Shell completions
 
 `albumen completions <bash|zsh|fish|powershell|elvish>` prints a completion script to stdout and writes nothing else. Install it once per shell:

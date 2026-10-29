@@ -30,6 +30,7 @@ use clap_complete::Shell;
 
 mod family;
 mod receive;
+mod status;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -241,6 +242,20 @@ enum Command {
         #[arg(long)]
         proof: Option<PathBuf>,
     },
+    /// Say when each destination last had a good backup. Read-only.
+    ///
+    /// Re-reads every item an export recorded at DEST and prints one block per
+    /// destination: ok, stale (older than --max-age), damaged, not backed up,
+    /// or unreadable. Exit 0 ok, 1 stale or damaged, 3 not backed up, 4
+    /// unreadable, 2 bad flags; with several destinations the worst wins.
+    Status {
+        /// Backup folders to check, in order.
+        #[arg(required = true, num_args = 1..)]
+        dest: Vec<String>,
+        /// Oldest a good backup may be and still count as ok: Nd or Nh.
+        #[arg(long, default_value = status::DEFAULT_MAX_AGE)]
+        max_age: String,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// Writes nothing except the script. Redirect it into your shell's
@@ -293,6 +308,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("receive unhide", "albumen receive unhide --library ~/received --name IMG_0001.HEIC --apply"),
     ("ledger", "albumen ledger --library ~/Pictures/library"),
     ("verify-manifest", "albumen verify-manifest --manifest /Volumes/Backup/export/ALBUMEN-MANIFEST.txt --against /Volumes/Backup/export --proof ~/proof"),
+    ("status", "albumen status /Volumes/PhotoBackup --max-age 7d"),
     ("completions", "albumen completions bash > ~/.local/share/bash-completion/completions/albumen"),
 ];
 
@@ -587,6 +603,29 @@ fn run() -> Result<(), IngestError> {
             println!(
                 "{{\"summary\":true,\"count_in\":{count},\"count_out\":{count},\"mismatched\":0}}"
             );
+            Ok(())
+        }
+        Command::Status { dest, max_age } => {
+            let max_age_secs = status::parse_max_age(&max_age)
+                .map_err(|message| IngestError::Usage { message })?;
+            if let Some(remote) = dest.iter().find(|d| is_remote(d)) {
+                return Err(IngestError::Usage {
+                    message: format!("{remote}: status reads a local backup folder"),
+                });
+            }
+            let now = std::time::SystemTime::now();
+            let reports: Vec<status::Report> = dest
+                .iter()
+                .map(|d| status::check(d, max_age_secs, now))
+                .collect();
+            let (text, code) = status::render(&reports);
+            use std::io::Write as _;
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(text.as_bytes());
+            let _ = stdout.flush();
+            if code != 0 {
+                std::process::exit(code);
+            }
             Ok(())
         }
         Command::Completions { shell } => {
