@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use albumen_ingest::takeout_fidelity;
 use albumen_ingest::{
     dest, export_tree_counted, import_card_local, import_icloud, import_takeout_with,
     parse_manifest, plan_card, plan_icloud, plan_takeout, platform_dirs, scan_tree,
@@ -98,6 +99,10 @@ enum Command {
     /// original. Without `--apply` or `--execute`, print the plan and write
     /// nothing. The command exits non-zero when the reconciliation report
     /// does not match.
+    ///
+    /// Next: run `albumen takeout-fidelity --report <report> --library <to>
+    /// --out <file>` to compare each original's JSON and EXIF capture time and
+    /// GPS. The last line of `--apply` output prints that command.
     ImportTakeout {
         /// Directory of split .zip and .tgz parts, one archive, or an extracted folder.
         #[arg(long)]
@@ -140,6 +145,25 @@ enum Command {
         /// Same as `--apply`.
         #[arg(long)]
         execute: bool,
+    },
+    /// Compare each Takeout original's JSON capture time and GPS with its EXIF.
+    ///
+    /// Reads an `import-takeout` report and the library it wrote, read-only.
+    /// Writes one JSONL line per original with both values, which one wins
+    /// (EXIF when present, else JSON; nothing is written into originals), and
+    /// flags: missing, or disagree by more than 1 minute or 100 metres. A
+    /// missing value is reported missing, never filled in. Refuses to
+    /// overwrite `--out`.
+    TakeoutFidelity {
+        /// JSONL report written by `import-takeout --apply`.
+        #[arg(long)]
+        report: PathBuf,
+        /// Library the import wrote to (its `--to`).
+        #[arg(long)]
+        library: PathBuf,
+        /// New JSONL fidelity report. Must not exist.
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Copy an iCloud Photos download, export, or Photos library.
     ///
@@ -245,6 +269,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("scan", "albumen scan ~/Pictures/library --manifest ~/scan.jsonl"),
     ("import-card", "albumen import-card --from /Volumes/CARD --to ~/Pictures/library --apply"),
     ("import-takeout", "albumen import-takeout --from ~/Downloads/takeout --to ~/Pictures/library --report ~/takeout.jsonl --apply"),
+    ("takeout-fidelity", "albumen takeout-fidelity --report ~/takeout.jsonl --library ~/Pictures/library --out ~/fidelity.jsonl"),
     ("import-icloud", "albumen import-icloud --from ~/Downloads/iCloud --to ~/Pictures/library --report ~/icloud.jsonl --apply"),
     ("family", "albumen family init --to ~/family --key ~/founder.key --apply"),
     ("family keygen", "albumen family keygen --key ~/founder.key --apply"),
@@ -360,6 +385,19 @@ fn run() -> Result<(), IngestError> {
             );
             Ok(())
         }
+        Command::TakeoutFidelity {
+            report,
+            library,
+            out,
+        } => {
+            let summary = takeout_fidelity(&report, &library, &out)?;
+            println!("takeout-fidelity: {} originals compared", summary.originals);
+            for (flag, count) in &summary.flags {
+                println!("  {flag}: {count}");
+            }
+            println!("  report: {}", out.display());
+            Ok(())
+        }
         Command::ImportTakeout {
             from,
             to,
@@ -398,6 +436,11 @@ fn run() -> Result<(), IngestError> {
                 to.display()
             );
             println!("report {}", report.display());
+            println!(
+                "next: albumen takeout-fidelity --report {} --library {} --out <file>",
+                report.display(),
+                to.display()
+            );
             Ok(())
         }
         Command::ImportCard {
