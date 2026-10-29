@@ -35,7 +35,9 @@ mod source;
 mod store;
 mod takeout;
 
-pub use card::{import_card, import_card_local, CardReport};
+pub use card::{
+    import_card, import_card_local, plan_card, CardReport, Renamed, CARD_RECORD_SUFFIX,
+};
 pub use checksum::{sha256_file, sha256_hex};
 pub use copy_profile::{
     enable_thread as enable_copy_profile_thread, reset as reset_copy_profile,

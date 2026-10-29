@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use albumen_ingest::{
-    import_card, import_card_local, sha256_hex, BlobStore, IngestError, LocalStore, VerifiedObject,
+    import_card, import_card_local, sha256_hex, BlobStore, IngestError, LocalStore, Renamed,
+    VerifiedObject, CARD_RECORD_SUFFIX,
 };
 
 const FIXTURES: &[&str] = &[
@@ -185,25 +186,133 @@ fn reimporting_the_same_card_dedupes_by_sha256() {
     assert_eq!(snapshot(&card), card_before);
 }
 
+fn read_record(library: &Path, primary: &str) -> serde_json::Value {
+    let path = library.join(format!("{primary}{CARD_RECORD_SUFFIX}"));
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
 #[test]
-fn different_bytes_under_a_taken_name_are_refused_not_overwritten() {
+fn a_taken_camera_name_renames_the_whole_asset_and_records_it() {
     let tmp = tempfile::tempdir().unwrap();
     let card = make_card(tmp.path());
     let library = tmp.path().join("library");
     fs::create_dir_all(&library).unwrap();
     fs::write(library.join("IMG_0004.jpg"), b"someone else's photo").unwrap();
-    let lib_before = snapshot(&library);
+    let taken_before = snapshot(&library);
+    let card_before = snapshot(&card);
+    let jpg = card.join("DCIM/100TEST/IMG_0004.jpg");
+    let xmp = card.join("DCIM/100TEST/IMG_0004.xmp");
+    let sha = sha256_hex(&jpg).unwrap();
+    let new_jpg = format!("IMG_0004~{}.jpg", &sha[..8]);
+    let new_xmp = format!("IMG_0004~{}.xmp", &sha[..8]);
+
+    let report = import_card_local(&card, &library).unwrap();
+
+    assert_eq!(snapshot(&card), card_before, "card untouched");
+    assert_eq!((report.assets, report.deduped), (3, 0));
+    let now = snapshot(&library);
+    assert_eq!(
+        now.iter().find(|s| s.relative == "IMG_0004.jpg"),
+        taken_before.first(),
+        "the existing library file keeps its bytes and mtime"
+    );
+    assert!(
+        !library.join("IMG_0004.xmp").exists(),
+        "sidecar renamed with its original"
+    );
+    for (camera, renamed) in [(&jpg, &new_jpg), (&xmp, &new_xmp)] {
+        let copy = library.join(renamed);
+        assert_eq!(sha256_hex(&copy).unwrap(), sha256_hex(camera).unwrap());
+        assert_eq!(
+            fs::metadata(&copy).unwrap().modified().unwrap(),
+            fs::metadata(camera).unwrap().modified().unwrap()
+        );
+    }
+    assert_eq!(
+        report.renamed,
+        vec![
+            Renamed {
+                camera_filename: "IMG_0004.jpg".into(),
+                library_filename: new_jpg.clone()
+            },
+            Renamed {
+                camera_filename: "IMG_0004.xmp".into(),
+                library_filename: new_xmp.clone()
+            },
+        ]
+    );
+    let record = read_record(&library, &new_jpg);
+    let files = record["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["camera_filename"], "IMG_0004.jpg");
+    assert_eq!(files[0]["library_filename"], new_jpg.as_str());
+    assert_eq!(files[0]["sha256"], sha.as_str());
+    assert!(
+        !library.join(".albumen-card-staging").exists(),
+        "staging removed"
+    );
+
+    // A second import of the same card dedupes the renamed asset too.
+    let lib_after = snapshot(&library);
+    let again = import_card_local(&card, &library).unwrap();
+    assert_eq!((again.assets, again.deduped), (0, 3));
+    assert!(again.renamed.is_empty());
+    assert_eq!(snapshot(&library), lib_after);
+}
+
+#[test]
+fn a_raw_jpeg_pair_is_renamed_together_when_one_name_is_taken() {
+    let tmp = tempfile::tempdir().unwrap();
+    let card = make_card(tmp.path());
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    // Only the JPEG half of the pair collides.
+    fs::write(library.join("IMG_0003.jpg"), b"other jpeg").unwrap();
+    let dng_sha = sha256_hex(&card.join("DCIM/100TEST/IMG_0003.dng")).unwrap();
+
+    let report = import_card_local(&card, &library).unwrap();
+
+    let suffix = &dng_sha[..8];
+    assert!(library.join(format!("IMG_0003~{suffix}.dng")).exists());
+    assert!(library.join(format!("IMG_0003~{suffix}.jpg")).exists());
+    assert!(
+        !library.join("IMG_0003.dng").exists(),
+        "pair keeps one stem"
+    );
+    assert_eq!(
+        fs::read(library.join("IMG_0003.jpg")).unwrap(),
+        b"other jpeg"
+    );
+    assert_eq!(report.renamed.len(), 2);
+}
+
+#[test]
+fn a_renamed_target_with_other_bytes_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let card = make_card(tmp.path());
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    let sha = sha256_hex(&card.join("DCIM/100TEST/IMG_0004.jpg")).unwrap();
+    let squatter = format!("IMG_0004~{}.jpg", &sha[..8]);
+    fs::write(library.join("IMG_0004.jpg"), b"taken").unwrap();
+    fs::write(library.join(&squatter), b"also taken").unwrap();
     let card_before = snapshot(&card);
 
     let err = import_card_local(&card, &library).unwrap_err();
 
     assert!(err.to_string().contains("not overwritten"), "{err}");
     assert_eq!(snapshot(&card), card_before);
-    let taken = lib_before.iter().find(|s| s.relative == "IMG_0004.jpg");
-    let now = snapshot(&library);
-    assert_eq!(now.iter().find(|s| s.relative == "IMG_0004.jpg"), taken);
-    assert!(
-        !now.iter().any(|s| s.relative == "IMG_0004.xmp"),
-        "no part of the colliding asset is copied"
-    );
+    assert_eq!(fs::read(library.join(&squatter)).unwrap(), b"also taken");
+    assert_eq!(fs::read(library.join("IMG_0004.jpg")).unwrap(), b"taken");
+}
+
+#[test]
+fn a_library_inside_the_card_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let card = make_card(tmp.path());
+    let library = card.join("library");
+    fs::create_dir_all(&library).unwrap();
+    let before = snapshot(&card);
+    assert!(import_card_local(&card, &library).is_err());
+    assert_eq!(snapshot(&card), before);
 }
