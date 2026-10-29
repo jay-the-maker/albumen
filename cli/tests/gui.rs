@@ -236,3 +236,32 @@ fn ok_card_says_match_what_was_backed_up_not_your_originals() {
     );
     assert!(!status.contains("all match your originals"));
 }
+
+/// The health screen shows the same words as `albumen status` for a folder
+/// with no backup record.
+#[test]
+fn not_backed_up_card_is_word_for_word_the_cli() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, status) = get(&addr, "/api/status");
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let mut seen = 0;
+    for d in status["destinations"].as_array().unwrap() {
+        if d["state"] != "not backed up" {
+            continue;
+        }
+        let dest = d["dest"].as_str().unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_albumen"))
+            .args(["status", dest])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3));
+        let cli = String::from_utf8_lossy(&out.stdout);
+        let gui = d["text"].as_str().unwrap();
+        assert!(cli.starts_with(gui), "gui:\n{gui}\ncli:\n{cli}");
+        assert!(gui.contains("next: to back up this folder, run albumen backup --from "));
+        assert_eq!(d["next"].as_str().unwrap(), gui.lines().last().unwrap());
+        seen += 1;
+    }
+    assert!(seen >= 1);
+}

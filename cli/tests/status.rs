@@ -212,7 +212,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "not backed up: no Albumen backup found here",
             p(&never),
             &format!(
-                "next: albumen backup --from <your photos folder> --to {}",
+                "next: to back up this folder, run albumen backup --from {} --to <your backup disk>",
                 p(&never)
             ),
         ]
@@ -320,7 +320,10 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
     fs::create_dir_all(&never).unwrap();
     let (_, text) = status(&[p(&never)]);
     assert!(
-        text.ends_with(&format!("--to {}\n", q(p(&never)))),
+        text.ends_with(&format!(
+            "--from {} --to <your backup disk>\n",
+            q(p(&never))
+        )),
         "{text}"
     );
     let gone = tmp.path().join("gone disk");
@@ -340,4 +343,55 @@ fn bad_max_age_is_a_usage_error() {
     }
     let (code, _) = status(&[]);
     assert_eq!(code, 2);
+}
+
+/// Folders `albumen-receive` writes have no backup record. They carry no
+/// definitive receive marker, so status gives the same neutral hint as for
+/// any other folder, keeps exit 3, and only reads.
+#[test]
+fn receive_libraries_get_the_neutral_hint_and_stay_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plain = tmp.path().join("plain receive");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("IMG_0001.jpg"), b"photo").unwrap();
+    fs::write(
+        plain.join("IMG_0001.jpg.albumen.json"),
+        "{\"camera_filename\":\"IMG_0001.jpg\",\"directory\":\"DCIM\",\"mtime_conflicts\":[],\"received_at\":\"1\",\"sha256\":\"00\",\"source_mtime\":\"1\",\"stored_name\":\"IMG_0001.jpg\"}\n",
+    )
+    .unwrap();
+    let family = tmp.path().join("family");
+    let member = family.join("members").join("ab".repeat(32));
+    fs::create_dir_all(member.join("devices/0e74/log")).unwrap();
+    fs::write(
+        family.join("genesis.json"),
+        "{\"payload\":{\"albumen_family\":1}}\n",
+    )
+    .unwrap();
+    fs::write(member.join("IMG_0002.jpg"), b"photo").unwrap();
+    fs::write(member.join("IMG_0002.jpg.albumen.json"), "{}\n").unwrap();
+    let empty = tmp.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    for dir in [&plain, &family, &empty] {
+        let before = snapshot(dir);
+        let (code, text) = status(&[p(dir)]);
+        assert_eq!(code, 3, "{text}");
+        let quoted = if p(dir).contains(' ') {
+            format!("'{}'", p(dir))
+        } else {
+            p(dir).to_string()
+        };
+        assert_eq!(
+            lines(&text),
+            vec![
+                "not backed up: no Albumen backup found here",
+                p(dir),
+                &format!(
+                    "next: to back up this folder, run albumen backup --from {quoted} --to <your backup disk>"
+                ),
+            ]
+        );
+        assert_plain_words(&text);
+        assert_next_rules(code, &text);
+        assert_eq!(before, snapshot(dir), "status changed {}", p(dir));
+    }
 }

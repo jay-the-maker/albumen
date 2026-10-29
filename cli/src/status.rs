@@ -85,6 +85,17 @@ fn export_next(dest: &str) -> String {
 /// For damage that includes changed files: a rerun would refuse the changed
 /// copy as a conflict, so the next step is to move it aside (nothing is
 /// deleted). Names the first changed file and counts the others.
+/// For a folder with no backup record. Phone receive libraries leave no
+/// definitive marker (their `.albumen.json` sidecars are also written by
+/// other importers, and a family library is not always fed by a receiver),
+/// so this hint is the same for every such folder.
+fn no_record_next(dest: &str) -> String {
+    format!(
+        "next: to back up this folder, run albumen backup --from {} --to <your backup disk>",
+        shell_quote(dest)
+    )
+}
+
 fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
     let path = Path::new(dest).join(first_changed).display().to_string();
     let aside = format!("{path}.changed");
@@ -190,7 +201,7 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
     let text = match std::fs::read_to_string(&record) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let next = export_next(dest);
+            let next = no_record_next(dest);
             return Report {
                 state: State::NotBackedUp,
                 text: format!("not backed up: no Albumen backup found here\n{dest}\n{next}\n"),
