@@ -103,7 +103,17 @@ That mount is read-only. A writable directory for opt-in export or upload is a s
 
 ## Try it
 
-This walkthrough uses only the synthetic files in `fixtures/` and writes only under `/tmp`. It takes about a minute after the build. It needs the build and ExifTool from [Install from source](#install-from-source). Run it from the repository root.
+This walkthrough runs install, scan, export and verify in under five minutes. It uses only the synthetic files in `fixtures/` and writes only under `/tmp`, the checkout and `~/.cache/albumen`. It needs Rust 1.94 or newer and no account. Nothing is installed system-wide.
+
+0. Install from source. ExifTool is unpacked under your user cache (`~/.cache/albumen`), not system-wide. On a clean checkout this took 91 s on an 8-core Linux box with the crates and the ExifTool tarball already downloaded. A first build on a slow network takes longer.
+
+   ```bash
+   git clone https://github.com/jay-the-maker/albumen.git && cd albumen
+   cargo build --release --locked -p albumen
+   export PATH="$(scripts/install-exiftool.sh):$PATH"
+   ```
+
+The remaining steps take a few seconds. Run them from the repository root.
 
 1. Scan the fixtures. Scan only reads the source and writes a JSON Lines manifest elsewhere.
 
@@ -143,6 +153,7 @@ This walkthrough uses only the synthetic files in `fixtures/` and writes only un
      ...
      files: 20
      bytes: 101153
+   would export 20 new, 0 already present and verified
    ```
 
 4. Run the export, then verify the copy against the manifest it wrote.
@@ -153,11 +164,14 @@ This walkthrough uses only the synthetic files in `fixtures/` and writes only un
    ```
 
    ```text
-   exported 20 files to /tmp/albumen-export
+   exported 20 new, 0 already present and verified
+   to /tmp/albumen-export
    manifest /tmp/albumen-export/ALBUMEN-MANIFEST.txt
    verified 20 files in /tmp/albumen-export
    {"summary":true,"count_in":20,"count_out":20,"mismatched":0}
    ```
+
+   Run the same `--apply` again and it prints `exported 0 new, 20 already present and verified`. Nothing is copied twice.
 
 5. Check that the source did not change: `(cd fixtures && sha256sum -c --quiet SHA256SUMS)` prints nothing and exits 0. To clean up, remove `/tmp/albumen-scan.jsonl` and `/tmp/albumen-export`.
 
