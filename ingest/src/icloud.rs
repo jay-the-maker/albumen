@@ -45,6 +45,13 @@ struct Counters {
     count_out: u64,
     mismatched: u64,
     unmatched: u64,
+    basis_path_rule: u64,
+    basis_name_rule: u64,
+    basis_unknown: u64,
+    pair_content_id: u64,
+    pair_stem: u64,
+    pair_stem_only: u64,
+    pair_id_mismatch: u64,
 }
 
 struct ReportFile {
@@ -300,6 +307,17 @@ pub fn import_icloud(from: &Path, to: &Path, report: &Path) -> Result<IcloudRepo
         "count_out": counters.count_out,
         "mismatched": counters.mismatched,
         "unmatched": counters.unmatched,
+        "classification_basis": {
+            "path_rule": counters.basis_path_rule,
+            "name_rule": counters.basis_name_rule,
+            "unknown": counters.basis_unknown,
+        },
+        "pair_basis": {
+            "content_id": counters.pair_content_id,
+            "stem": counters.pair_stem,
+            "stem_only": counters.pair_stem_only,
+            "content_id_mismatch": counters.pair_id_mismatch,
+        },
         "sources_unchanged": sources_unchanged,
     }))?;
     report_file.finish()?;
@@ -1220,10 +1238,11 @@ impl Session<'_> {
     }
 
     fn emit(&mut self, note: Note<'_>) -> Result<(), IngestError> {
-        let kind = if note.member.is_empty() {
-            "file"
+        let (kind, basis) = if note.member.is_empty() {
+            ("file", None)
         } else {
-            kind_of(note.member)
+            let (kind, basis) = classify(note.member);
+            (kind, Some(basis))
         };
         let mut line = json!({
             "archive": self.archive_name,
@@ -1234,9 +1253,47 @@ impl Session<'_> {
             "kind": kind,
             "status": note.status,
         });
+        if let Some(basis) = basis {
+            line["classification_basis"] = json!(basis);
+            let counter = match basis {
+                "path rule" => &mut self.counters.basis_path_rule,
+                "name rule" => &mut self.counters.basis_name_rule,
+                _ => &mut self.counters.basis_unknown,
+            };
+            *counter = counter.saturating_add(1);
+        }
         if let Some(stem) = live_photo_stem(note.member) {
             if live_pair_present(self.label, note.member, stem, self.on_disk, self.names) {
                 line["live_photo_stem"] = json!(stem);
+                let pairing = if self.on_disk {
+                    pair_ids(self.label, note.member, stem)
+                } else {
+                    PairIds::default()
+                };
+                match (&pairing.this, &pairing.partner) {
+                    (Some(this), Some(partner)) if this == partner => {
+                        line["pair_basis"] = json!("content-id");
+                        line["content_identifier"] = json!(this);
+                        self.counters.pair_content_id =
+                            self.counters.pair_content_id.saturating_add(1);
+                    }
+                    (Some(this), Some(partner)) => {
+                        line["pair_basis"] = json!("stem");
+                        line["pair_flag"] = json!("content_id_mismatch");
+                        line["content_identifier"] = json!(this);
+                        line["partner_content_identifier"] = json!(partner);
+                        self.counters.pair_stem = self.counters.pair_stem.saturating_add(1);
+                        self.counters.pair_id_mismatch =
+                            self.counters.pair_id_mismatch.saturating_add(1);
+                    }
+                    _ => {
+                        line["pair_basis"] = json!("stem");
+                        line["pair_flag"] = json!("stem_only");
+                        self.counters.pair_stem = self.counters.pair_stem.saturating_add(1);
+                        self.counters.pair_stem_only =
+                            self.counters.pair_stem_only.saturating_add(1);
+                    }
+                }
             }
         }
         if kind == "sidecar" {
@@ -1268,6 +1325,16 @@ impl Session<'_> {
 }
 
 fn kind_of(member: &str) -> &'static str {
+    classify(member).0
+}
+
+/// The kind of a member and the rule that decided it.
+///
+/// The basis is `"path rule"` when a folder name decided, `"name rule"` when
+/// the file name or extension decided, and `"unknown"` when no rule matched.
+/// A member that matches no rule is kind `"unknown"`. It is never defaulted
+/// to an original.
+fn classify(member: &str) -> (&'static str, &'static str) {
     let name = member.rsplit('/').next().unwrap_or(member);
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".aae")
@@ -1275,31 +1342,103 @@ fn kind_of(member: &str) -> &'static str {
         || lower.ends_with(".albumen.json")
         || lower.ends_with(".csv")
     {
-        return "sidecar";
+        return ("sidecar", "name rule");
     }
-    if is_edited_path(member) {
-        return "edited";
+    if is_edited_name(name) {
+        return ("edited", "name rule");
     }
-    if is_media_name(name) || is_original_path(member) {
-        return "original";
+    if is_edited_dir(member) {
+        return ("edited", "path rule");
     }
-    "file"
+    if is_original_path(member) {
+        return ("original", "path rule");
+    }
+    if is_media_name(name) {
+        return ("original", "name rule");
+    }
+    ("unknown", "unknown")
 }
 
-fn is_edited_path(member: &str) -> bool {
-    let name = member.rsplit('/').next().unwrap_or(member);
+fn is_edited_name(name: &str) -> bool {
     let lower_name = name.to_ascii_lowercase();
-    if let Some(stem) = lower_name.rsplit_once('.').map(|(stem, _)| stem) {
-        if stem.ends_with("-edited") {
-            return true;
-        }
-    }
-    member.split('/').any(|part| {
-        part == "renders"
-            || part == "derivatives"
-            || part == "Edited"
-            || part.eq_ignore_ascii_case("edited")
+    lower_name
+        .rsplit_once('.')
+        .is_some_and(|(stem, _)| stem.ends_with("-edited"))
+}
+
+fn is_edited_dir(member: &str) -> bool {
+    let mut parts: Vec<&str> = member.split('/').collect();
+    parts.pop();
+    parts.iter().any(|part| {
+        *part == "renders" || *part == "derivatives" || part.eq_ignore_ascii_case("edited")
     })
+}
+
+#[derive(Default)]
+struct PairIds {
+    this: Option<String>,
+    partner: Option<String>,
+}
+
+/// Read the ContentIdentifier of a Live Photo half and of its partner.
+///
+/// Both files are read with ExifTool, which opens them read-only. A file
+/// whose identifier cannot be read, or a missing ExifTool, gives `None`.
+fn pair_ids(root: &Path, member: &str, stem: &str) -> PairIds {
+    let source = root.join(member);
+    let Some(partner) = live_partner(&source, stem) else {
+        return PairIds::default();
+    };
+    PairIds {
+        this: content_identifier(&source),
+        partner: content_identifier(&partner),
+    }
+}
+
+fn live_partner(source: &Path, stem: &str) -> Option<PathBuf> {
+    let parent = source.parent()?;
+    let own = source.file_name()?.to_str()?;
+    let source_video = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(is_video_ext);
+    let mut found: Vec<PathBuf> = fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            if name == own {
+                return None;
+            }
+            let (other, ext) = name.rsplit_once('.')?;
+            let opposite = if source_video {
+                is_still_ext(ext)
+            } else {
+                is_video_ext(ext)
+            };
+            (opposite && other.eq_ignore_ascii_case(stem)).then(|| entry.path())
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+fn content_identifier(path: &Path) -> Option<String> {
+    let output = crate::exiftool::exiftool_command()
+        .args(["-s3", "-ContentIdentifier"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let value = text.lines().next()?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn is_original_path(member: &str) -> bool {
@@ -2183,6 +2322,25 @@ mod tests {
             .unwrap();
         assert_eq!(edit_line["kind"], "edited");
         assert!(edit_line.get("capture_time").is_none());
+        assert_eq!(edit_line["classification_basis"], "path rule");
+        assert_eq!(heic_line["classification_basis"], "path rule");
+        assert_eq!(xmp_line["classification_basis"], "name rule");
+        assert_eq!(heic_line["pair_basis"], "stem");
+        assert_eq!(heic_line["pair_flag"], "stem_only");
+        assert_eq!(mov_line["pair_flag"], "stem_only");
+        let db_line = lines
+            .iter()
+            .find(|line| line["member"] == "database/Photos.sqlite")
+            .unwrap();
+        assert_eq!(db_line["kind"], "unknown");
+        assert_eq!(db_line["classification_basis"], "unknown");
+        assert_eq!(summary["classification_basis"]["path_rule"], 3);
+        assert_eq!(summary["classification_basis"]["name_rule"], 2);
+        assert_eq!(summary["classification_basis"]["unknown"], 1);
+        assert_eq!(summary["pair_basis"]["content_id"], 0);
+        assert_eq!(summary["pair_basis"]["stem"], 2);
+        assert_eq!(summary["pair_basis"]["stem_only"], 2);
+        assert_eq!(summary["pair_basis"]["content_id_mismatch"], 0);
         for line in lines.iter().filter(|line| line.get("summary").is_none()) {
             let dest = to.join(line["destination"].as_str().unwrap());
             assert_eq!(line["sha256"], crate::sha256_hex(&dest).unwrap());
@@ -2200,6 +2358,24 @@ mod tests {
             mtime_of(&to.join("originals/0/IMG_0001.HEIC")).unwrap(),
             stamp()
         );
+    }
+
+    #[test]
+    fn classify_records_the_rule_and_never_guesses() {
+        assert_eq!(
+            classify("originals/0/IMG_1.HEIC"),
+            ("original", "path rule")
+        );
+        assert_eq!(classify("Masters/2020/notes"), ("original", "path rule"));
+        assert_eq!(classify("Album/IMG_1.jpg"), ("original", "name rule"));
+        assert_eq!(classify("Album/IMG_1-edited.jpg"), ("edited", "name rule"));
+        assert_eq!(
+            classify("resources/renders/0/a.jpeg"),
+            ("edited", "path rule")
+        );
+        assert_eq!(classify("Album/IMG_1.AAE"), ("sidecar", "name rule"));
+        assert_eq!(classify("Album/readme.txt"), ("unknown", "unknown"));
+        assert_eq!(classify("Album/no-extension"), ("unknown", "unknown"));
     }
 
     #[test]
