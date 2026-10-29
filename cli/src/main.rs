@@ -31,6 +31,7 @@ use clap_complete::Shell;
 
 mod backup;
 mod family;
+mod gui;
 mod receive;
 mod status;
 
@@ -285,6 +286,39 @@ enum Command {
         #[arg(long, default_value = status::DEFAULT_MAX_AGE)]
         max_age: String,
     },
+    /// Open a local window over these commands (DEMO-ONLY).
+    ///
+    /// Serves a page on 127.0.0.1 and opens the browser. The page runs scan,
+    /// backup, status, verify-manifest, and an import-card dry run as this
+    /// binary; it has no write path of its own and no delete control.
+    /// `--demo` builds 12 synthetic photos and four backup folders in a new
+    /// dated folder under --work (default: the temp directory).
+    Gui {
+        /// Photos folder to show. Only read.
+        #[arg(long, required_unless_present = "demo")]
+        library: Option<PathBuf>,
+        /// Backup folder to offer and check. Repeat for several.
+        #[arg(long = "backup")]
+        backups: Vec<String>,
+        /// Mounted card for the import dry run.
+        #[arg(long)]
+        card: Option<PathBuf>,
+        /// Folder for the GUI's scan state, and for --demo's sample set.
+        #[arg(long)]
+        work: Option<PathBuf>,
+        /// Build a synthetic sample library and backup folders.
+        #[arg(long)]
+        demo: bool,
+        /// Port on 127.0.0.1. 0 picks a free one.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Do not open a browser.
+        #[arg(long)]
+        no_open: bool,
+        /// Oldest a good backup may be and still count as ok: Nd or Nh.
+        #[arg(long, default_value = status::DEFAULT_MAX_AGE)]
+        max_age: String,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// Writes nothing except the script. Redirect it into your shell's
@@ -340,6 +374,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("backup", "albumen backup --from ~/Pictures --to /Volumes/PhotoBackup"),
     ("status", "albumen status /Volumes/PhotoBackup --max-age 7d"),
     ("completions", "albumen completions bash > ~/.local/share/bash-completion/completions/albumen"),
+    ("gui", "albumen gui --demo"),
 ];
 
 const EXIT_CODES_HELP: &str =
@@ -662,6 +697,25 @@ fn run() -> Result<(), IngestError> {
             }
             Ok(())
         }
+        Command::Gui {
+            library,
+            backups,
+            card,
+            work,
+            demo,
+            port,
+            no_open,
+            max_age,
+        } => gui::run(gui::GuiArgs {
+            library,
+            backups,
+            card,
+            work,
+            demo,
+            port,
+            open: !no_open,
+            max_age,
+        }),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "albumen", &mut std::io::stdout());
