@@ -44,8 +44,8 @@ pub use error::IngestError;
 pub use exiftool::exiftool_command;
 pub use export::{
     export_tree, export_tree_counted, format_manifest, is_copy_local_tombstone, parse_manifest,
-    verify_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest, ExportReport,
-    ManifestEntry, Placed, WalkControl,
+    tree_drift, verify_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest, ExportReport,
+    ManifestEntry, Placed, TreeDrift, WalkControl,
 };
 pub use family_export::{export_family, plan_family_export, FamilyExportPlan, FamilyExportReport};
 pub use family_source::FamilySource;
