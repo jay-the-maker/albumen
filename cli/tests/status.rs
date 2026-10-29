@@ -166,7 +166,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
     assert_eq!(
         l[3],
         format!(
-            "next: albumen export --from <your photos folder> --to {} --apply",
+            "next: albumen backup --from <your photos folder> --to {}",
             p(&stale)
         )
     );
@@ -212,7 +212,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "not backed up: no Albumen backup found here",
             p(&never),
             &format!(
-                "next: albumen export --from <your photos folder> --to {} --apply",
+                "next: albumen backup --from <your photos folder> --to {}",
                 p(&never)
             ),
         ]
@@ -277,14 +277,14 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
     let dest = backup(tmp.path(), "Photo Backup's", 4);
     let d = p(&dest).to_string();
 
-    // Only missing items: rerunning the export puts them back.
+    // Only missing items: rerunning the backup puts them back.
     fs::remove_file(dest.join("roll/IMG_0002.jpg")).unwrap();
     let (code, text) = status(&[&d]);
     assert_eq!(code, 1, "{text}");
     assert_eq!(
         text.lines().last().unwrap(),
         format!(
-            "next: albumen export --from <your photos folder> --to {} --apply",
+            "next: albumen backup --from <your photos folder> --to {}",
             q(&d)
         )
     );

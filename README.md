@@ -241,6 +241,14 @@ albumen status /backup/library --max-age 7d
 
 It prints `ok`, `stale`, `damaged`, `not backed up`, or `unreadable` for each folder and exits 0, 1, 1, 3, or 4 (the worst wins when you pass several). Anything other than `ok` ends with a `next:` line to run.
 
+To back up on a schedule, run one command from cron, a systemd timer, or launchd (examples in [docs/scheduled-backup.md](docs/scheduled-backup.md)):
+
+```
+albumen backup --from ~/Pictures --to /Volumes/PhotoBackup
+```
+
+Each run re-scans incrementally, copies only what is new, checks every item at the backup, and writes a dated proof to `ALBUMEN-PROOFS/` there. A second run with no changes copies nothing; a killed run is finished by the next one. `albumen status` reports the newest proof.
+
 ### Shell completions
 
 `albumen completions <bash|zsh|fish|powershell|elvish>` prints a completion script to stdout and writes nothing else. Install it once per shell:
