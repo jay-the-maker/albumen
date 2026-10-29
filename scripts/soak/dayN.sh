@@ -1,9 +1,10 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# M1 soak Day N (protocol v1 section 4). Usage: dayN.sh N [--fault RELPATH]
+# M1 soak Day N (protocol v2 section 4). Usage: dayN.sh N [--fault RELPATH]
 # Env: CORPUS LIB DEST STALE SOAK, FIXTURES (default: repo fixtures/),
 # ALBUMEN (default: albumen), STALE_FROM (default 3: first day STALE must
-# be stale under --max-age 2d).
+# be stale under --max-age 60h), STALE7_FROM (default 8: first day STALE must
+# be stale under --max-age 180h).
 # --fault RELPATH (Day 5): after the backup, flip one byte of
 # DEST/zz-synthetic/RELPATH, expect verify, status and the audit to catch
 # exactly that file, then restore it from FIXTURES with cp -p and expect a
@@ -15,6 +16,7 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 . "$here/common.sh"
 FIXTURES=${FIXTURES:-$here/../../fixtures}
 STALE_FROM=${STALE_FROM:-3}
+STALE7_FROM=${STALE7_FROM:-8}
 need CORPUS LIB DEST STALE SOAK
 [ $# -ge 1 ] || die "usage: dayN.sh N [--fault RELPATH]"
 N=$(printf '%02d' "$1")
@@ -74,11 +76,16 @@ rc=$(run_exit "$E/status.out" "$E/status.out" "$ALBUMEN" status "$DEST")
 echo "$rc" >"$E/status.exit"
 check status "$bad" "$rc"
 
-rc=$(run_exit "$E/stale.out" "$E/stale.out" "$ALBUMEN" status --max-age 2d "$STALE")
+rc=$(run_exit "$E/stale.out" "$E/stale.out" "$ALBUMEN" status --max-age 60h "$STALE")
 echo "$rc" >"$E/stale.exit"
 if [ "$(expr "$N" + 0)" -ge "$STALE_FROM" ]; then want=1; else want=0; fi
-check "stale (--max-age 2d)" "$want" "$rc"
-if [ "$rc" = 0 ] && [ "$want" = 1 ]; then echo "  STALE reported ok after day $STALE_FROM: lying status"; fi
+check "stale (--max-age 60h)" "$want" "$rc"
+if [ "$rc" = 0 ] && [ "$want" = 1 ]; then echo "  STALE reported ok from day $STALE_FROM: lying status"; fi
+rc=$(run_exit "$E/stale7.out" "$E/stale7.out" "$ALBUMEN" status --max-age 180h "$STALE")
+echo "$rc" >"$E/stale7.exit"
+if [ "$(expr "$N" + 0)" -ge "$STALE7_FROM" ]; then want=1; else want=0; fi
+check "stale7 (--max-age 180h)" "$want" "$rc"
+if [ "$rc" = 0 ] && [ "$want" = 1 ]; then echo "  STALE reported ok from day $STALE7_FROM: lying status"; fi
 
 rc=$(run_exit "$E/verify.out" "$E/verify.out" "$ALBUMEN" verify-manifest --manifest "$DEST/ALBUMEN-MANIFEST.txt" --against "$DEST" --proof "$E/verify")
 echo "$rc" >"$E/verify.exit"

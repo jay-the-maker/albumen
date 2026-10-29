@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# M1 soak Day 0 (protocol v1 section 4). Env: CORPUS LIB DEST STALE SOAK
+# M1 soak Day 0 (protocol v2 section 4). Env: CORPUS LIB DEST STALE SOAK
 # FIXTURES (default: this repo's fixtures/), ALBUMEN (default: albumen).
 # CORPUS and FIXTURES are only read. LIB must not exist yet.
 set -eu
@@ -30,7 +30,11 @@ fail=0
 "$ALBUMEN" backup --from "$LIB" --to "$DEST" --state "$SOAK/state" >"$SOAK/day00-backup.out" 2>&1 || fail=1
 "$ALBUMEN" backup --from "$LIB" --to "$STALE" --state "$SOAK/state-stale" >"$SOAK/day00-stale.out" 2>&1 || fail=1
 {
-  "$ALBUMEN" --version 2>/dev/null || true
+  # There is no albumen --version (protocol v2 erratum 4): record the build.
+  printf 'git HEAD: %s\n' "$(git -C "$here" rev-parse HEAD 2>/dev/null || echo unknown)"
+  for j in "$DEST"/ALBUMEN-PROOFS/*.json; do
+    if [ -f "$j" ]; then sed -n 's/.*"commit": *"\([^"]*\)".*/proof commit: \1/p' "$j"; fi
+  done
   uname -a
   if command -v sw_vers >/dev/null 2>&1; then sw_vers; sysctl -n hw.model; fi
   printf 'LIB files: %s\n' "$(wc -l <"$SOAK/source-day00.sha" | tr -d ' ')"

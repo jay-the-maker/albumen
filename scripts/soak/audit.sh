@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# Independent audit of one backup folder (protocol v1 section 4).
+# Independent audit of one backup folder (protocol v2 section 4).
 # Usage: audit.sh DEST EVIDENCE_DIR [LIB]
 # Does not run albumen. Reads DEST/ALBUMEN-MANIFEST.txt ("# albumen-manifest-v1",
 # then "<sha256> <bytes> <path>" lines), re-hashes every file itself with

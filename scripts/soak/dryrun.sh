@@ -3,7 +3,7 @@
 # Day -1 synthetic dry run of the M1 soak scripts on repo fixtures/ only.
 # Usage: dryrun.sh WORKDIR   (WORKDIR must not exist; nothing else is written)
 # Builds a fake CORPUS from fixtures/ (day0 = all fixtures, daily batches =
-# renamed fixture copies), then runs day0.sh and dayN.sh for days 1-5 with
+# renamed fixture copies), then runs day0.sh and dayN.sh for days 1-8 with
 # the Day 5 changed-copy fault on zz-synthetic/aae/IMG_0008.jpg.
 # A day cannot be waited out here, so before each day the STALE folder's
 # Day 0 proof time is moved back N days + 60 s (scratch copy only). That
@@ -19,7 +19,7 @@ export CORPUS="$w/corpus" LIB="$w/lib" DEST="$w/disk/dest" STALE="$w/disk/stale"
 export ALBUMEN_HOME="$w/home" FIXTURES="$fx"
 mkdir -p "$CORPUS/day0" "$w/disk"
 cp -Rp "$fx/." "$CORPUS/day0/"
-for n in 01 02 03 04 05; do
+for n in 01 02 03 04 05 06 07 08; do
   mkdir -p "$CORPUS/new/day$n"
   cp -p "$fx/aae/IMG_0008.jpg" "$CORPUS/new/day$n/d$n-IMG_A.jpg"
   cp -p "$fx/xmp/"*.xmp "$CORPUS/new/day$n/d$n-SIDE.xmp" 2>/dev/null || true
@@ -37,7 +37,7 @@ age_stale() { # N: pretend the STALE Day 0 backup was N days ago
 
 result=0
 sh "$here/day0.sh" || { echo "dryrun: day 0 failed, stopping" >&2; exit 1; }
-for n in 1 2 3 4 5; do
+for n in 1 2 3 4 5 6 7 8; do
   chmod u+w "$STALE/ALBUMEN-PROOFS" "$STALE"/ALBUMEN-PROOFS/*.json 2>/dev/null || true
   age_stale "$n"
   if [ "$n" = 5 ]; then
