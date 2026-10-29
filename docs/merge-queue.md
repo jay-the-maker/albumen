@@ -16,7 +16,7 @@ Order: docs first, then tests and CI, then MCP and mobile, then export and CLI b
 | 1 | issue-38-ci-doc-windows-2025 | d9cdbf0 | main | 0/1 | 0/1 | none | none (no PR) | One line in docs/ci.md. Low. |
 | 2 | issue-47-readme-try-it | 3499670 | main | 0/1 | 0/1 | none | none (no PR) | README only. Conflicts with exit-codes in README.md. |
 | 3 | readme-quickstart-timed | 250e2c4 | issue-47-readme-try-it | 0/2 | 0/3 | 2; describe after 14 lands | none (no PR) | README only. Conflicts with exit-codes in README.md. |
-| 4 | compare-doc | cb6536c | readme-quickstart-timed | 0/2 | 0/5 | 3 | none (no PR) | Competitor claims age; every one is sourced and dated 2026-10-29. Conflicts with exit-codes in README.md. |
+| 4 | compare-doc | 5069720 | readme-quickstart-timed | 0/3 | 0/6 | 3 | none (no PR) | Competitor claims age; every one is sourced and dated 2026-10-29. Conflicts with exit-codes in README.md. |
 | 5 | issue-45-live-photo-edge-tests | 97b53f0 | main | 0/1 | 0/1 | none | none (no PR) | Test-only, in ingest/src/discover.rs. Low. |
 | 6 | issue-46-receive-frontend-tests | 1134a01 | main | 0/1 | 0/1 | none | none (no PR) | Test-only, in receive/src/roundtrip.rs. Low. |
 | 7 | issue-138-dir-sync-scale | 7c531b8 | main | 0/1 | 0/1 | none | none (no PR) | New test; partial fix for #138, Windows CPU target not measured. |
@@ -35,6 +35,45 @@ Order: docs first, then tests and CI, then MCP and mobile, then export and CLI b
 | 20 | issue-28-card-import | 611c403 | main | 0/4 | 0/4 | none | none (no PR) | New importer (879 lines). Conflicts with 14–18 and 21 in cli/src/main.rs or ingest/src/lib.rs. |
 | 21 | takeout-fidelity | eaeecf4 | main | 0/3 | 0/3 | none | none (no PR) | New read-only command. Conflicts with 15 and 16 (Cargo.lock) and 20 (cli/src/main.rs). |
 | 22 | icloud-fidelity | 4487c4d | issue-45-live-photo-edge-tests | 0/1 | 0/2 | 5 | none (no PR) | Changes the iCloud report format. Needs exiftool for ContentIdentifier. |
+
+## Merge train
+
+Built 2026-10-29 PDT. Each `-train` branch is the previous one plus the original branch's commits, cherry-picked with `-x`. Conflicts were resolved once, here. The original branches are untouched. Jay merges top to bottom; each compare link shows only that step.
+
+Gate at every step: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked -p albumen -p albumen-ingest --all-targets --no-fail-fast` with `ALBUMEN_S3_UNAVAILABLE=1`. The only failure at each step is the MinIO-only test `a_delete_or_tombstone_on_copy_a_never_reaches_the_s3_copy` (two_copy_s3); no MinIO is installed. The gate does not run mcp or receive tests, and it does not cover iOS; clippy compiles mcp and receive only.
+
+Every remote head below has an empty `git diff` against the locally gated tree, and each one descends from the one before it.
+
+| # | Branch | Head | Parent | Conflicts resolved | Gate (test secs) | Compare |
+|---|---|---|---|---|---|---|
+| 1 | issue-38-ci-doc-windows-2025-train | 894090a | main | none | green except MinIO (37s) | [main...issue-38-ci-doc-windows-2025-train](https://github.com/jay-the-maker/albumen/compare/main...issue-38-ci-doc-windows-2025-train) |
+| 2 | issue-47-readme-try-it-train | 9669285 | issue-38-ci-doc-windows-2025-train | none | green except MinIO (24s) | [issue-38-ci-doc-windows-2025-train...issue-47-readme-try-it-train](https://github.com/jay-the-maker/albumen/compare/issue-38-ci-doc-windows-2025-train...issue-47-readme-try-it-train) |
+| 3 | readme-quickstart-timed-train2 | 8748599 | issue-47-readme-try-it-train | none | green except MinIO (24s) | [issue-47-readme-try-it-train...readme-quickstart-timed-train2](https://github.com/jay-the-maker/albumen/compare/issue-47-readme-try-it-train...readme-quickstart-timed-train2) |
+| 4 | compare-doc-train | defadd5 | readme-quickstart-timed-train2 | none | green except MinIO (24s) | [readme-quickstart-timed-train2...compare-doc-train](https://github.com/jay-the-maker/albumen/compare/readme-quickstart-timed-train2...compare-doc-train) |
+| 5 | issue-45-live-photo-edge-tests-train | 5e40dd8 | compare-doc-train | none | green except MinIO (39s) | [compare-doc-train...issue-45-live-photo-edge-tests-train](https://github.com/jay-the-maker/albumen/compare/compare-doc-train...issue-45-live-photo-edge-tests-train) |
+| 6 | issue-46-receive-frontend-tests-train | 008bfc7 | issue-45-live-photo-edge-tests-train | none | green except MinIO (25s) | [issue-45-live-photo-edge-tests-train...issue-46-receive-frontend-tests-train](https://github.com/jay-the-maker/albumen/compare/issue-45-live-photo-edge-tests-train...issue-46-receive-frontend-tests-train) |
+| 7 | issue-138-dir-sync-scale-train | d1dad0f | issue-46-receive-frontend-tests-train | none | green except MinIO (26s) | [issue-46-receive-frontend-tests-train...issue-138-dir-sync-scale-train](https://github.com/jay-the-maker/albumen/compare/issue-46-receive-frontend-tests-train...issue-138-dir-sync-scale-train) |
+| 8 | scan-export-scale-train | 32010ee | issue-138-dir-sync-scale-train | none | green except MinIO (25s) | [issue-138-dir-sync-scale-train...scan-export-scale-train](https://github.com/jay-the-maker/albumen/compare/issue-138-dir-sync-scale-train...scan-export-scale-train) |
+| 9 | issue-mcp-stdio-ndjson-train | 274915f | scan-export-scale-train | none | green except MinIO (27s) | [scan-export-scale-train...issue-mcp-stdio-ndjson-train](https://github.com/jay-the-maker/albumen/compare/scan-export-scale-train...issue-mcp-stdio-ndjson-train) |
+| 10 | mcp-real-clients-train | de39401 | issue-mcp-stdio-ndjson-train | none | green except MinIO (26s) | [issue-mcp-stdio-ndjson-train...mcp-real-clients-train](https://github.com/jay-the-maker/albumen/compare/issue-mcp-stdio-ndjson-train...mcp-real-clients-train) |
+| 11 | mcp-thumbnail-image-block-train | 0e70060 | mcp-real-clients-train | none | green except MinIO (27s) | [mcp-real-clients-train...mcp-thumbnail-image-block-train](https://github.com/jay-the-maker/albumen/compare/mcp-real-clients-train...mcp-thumbnail-image-block-train) |
+| 12 | issue-25-gps-stripped-train | 3ed36c9 | mcp-thumbnail-image-block-train | none | green except MinIO (26s) | [mcp-thumbnail-image-block-train...issue-25-gps-stripped-train](https://github.com/jay-the-maker/albumen/compare/mcp-thumbnail-image-block-train...issue-25-gps-stripped-train) |
+| 13 | export-honest-rerun-count-train | 37f93eb | issue-25-gps-stripped-train | none | green except MinIO (37s) | [issue-25-gps-stripped-train...export-honest-rerun-count-train](https://github.com/jay-the-maker/albumen/compare/issue-25-gps-stripped-train...export-honest-rerun-count-train) |
+| 14 | verify-manifest-proof-train | f273fa9 | export-honest-rerun-count-train | none | green except MinIO (39s) | [export-honest-rerun-count-train...verify-manifest-proof-train](https://github.com/jay-the-maker/albumen/compare/export-honest-rerun-count-train...verify-manifest-proof-train) |
+| 15 | exit-codes-train | 862d1c6 | verify-manifest-proof-train | README.md: "## Try it" stays first, then "## Exit codes". | green except MinIO (39s) | [verify-manifest-proof-train...exit-codes-train](https://github.com/jay-the-maker/albumen/compare/verify-manifest-proof-train...exit-codes-train) |
+| 16 | issue-40-dry-run-conflicts-train2 | fd8639a | exit-codes-train | cli/src/main.rs `print_export_plan` and export_rerun test; see notes. | green except MinIO (77s) | [exit-codes-train...issue-40-dry-run-conflicts-train2](https://github.com/jay-the-maker/albumen/compare/exit-codes-train...issue-40-dry-run-conflicts-train2) |
+| 17 | issue-23-rclone-export-train | bc53af0 | issue-40-dry-run-conflicts-train2 | `is_remote()` replaces `starts_with("s3://")`; keeps `IngestError::Usage`; cli/tests/export.rs keeps both test sets. | green except MinIO (50s) | [issue-40-dry-run-conflicts-train2...issue-23-rclone-export-train](https://github.com/jay-the-maker/albumen/compare/issue-40-dry-run-conflicts-train2...issue-23-rclone-export-train) |
+| 18 | issue-22-rclone-smb-train | 14359a1 | issue-23-rclone-export-train | none (clean pick) | green except MinIO (50s) | [issue-23-rclone-export-train...issue-22-rclone-smb-train](https://github.com/jay-the-maker/albumen/compare/issue-23-rclone-export-train...issue-22-rclone-smb-train) |
+| 19 | issue-28-card-import-train | dfdc669 | issue-22-rclone-smb-train | ingest/src/lib.rs and main.rs imports; added the `import-card` help example. | green except MinIO (39s) | [issue-22-rclone-smb-train...issue-28-card-import-train](https://github.com/jay-the-maker/albumen/compare/issue-22-rclone-smb-train...issue-28-card-import-train) |
+| 20 | takeout-fidelity-train | 43a30a4 | issue-28-card-import-train | main.rs keeps ImportCard and TakeoutFidelity; Cargo.lock keeps `sha2 0.10.9`; added the `takeout-fidelity` help example. | green except MinIO (39s) | [issue-28-card-import-train...takeout-fidelity-train](https://github.com/jay-the-maker/albumen/compare/issue-28-card-import-train...takeout-fidelity-train) |
+| 21 | icloud-fidelity-train | 9ff189c | takeout-fidelity-train | none (clean pick) | green except MinIO (49s) | [takeout-fidelity-train...icloud-fidelity-train](https://github.com/jay-the-maker/albumen/compare/takeout-fidelity-train...icloud-fidelity-train) |
+
+Notes:
+
+- issue-40 versus export-rerun: the dry run now prints `  present: X`, `  conflict: X` or `  X` for each file, and it skips tombstones. For local targets it then prints `  already present: P`, `  conflicts: C` and `would export N new, P already present and verified`. On the first conflict it exits 3 (`IngestError::AlreadyExists`), which matches exit-codes. S3 targets keep the "would export up to" message. `same_bytes` was removed because nothing used it. `dry_run_names_a_conflict_that_apply_refuses` now asserts a non-zero exit. README Try it shows `already present: 0` and `conflicts: 0`.
+- issue-42-sidecar-names is not in the train. It is blocked on Jay's 4 fixture images.
+- Two stray remote branches are left over from a push race. They are unused and Jay can delete them: `readme-quickstart-timed-train` (894090a) and `issue-40-dry-run-conflicts-train` (593544a). The `-train2` names replace them.
+- Remote heads differ from local SHAs because they were pushed through the GitHub API. The trees are identical.
 
 ## Superseded branches
 
