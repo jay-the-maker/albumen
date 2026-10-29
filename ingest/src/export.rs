@@ -260,7 +260,8 @@ pub fn export_tree_counted(
 /// Hash every listed file and require the destination to contain exactly that set.
 ///
 /// `ignore` names destination paths that are not library files, such as the
-/// manifest when it was written inside the export directory.
+/// manifest when it was written inside the export directory. A name ending
+/// in `/` skips everything under that folder.
 pub fn verify_tree(
     entries: &[ManifestEntry],
     dest: &dyn ExportDest,
@@ -286,7 +287,7 @@ pub fn verify_tree(
         }
     }
     for relative in dest.list()? {
-        if ignore.iter().any(|name| name == &relative) {
+        if is_ignored(ignore, &relative) {
             continue;
         }
         if !expected.contains(&relative) {
@@ -338,7 +339,7 @@ pub fn tree_drift(
         }
     }
     for relative in dest.list()? {
-        if ignore.iter().any(|name| name == &relative) || expected.contains(&relative) {
+        if is_ignored(ignore, &relative) || expected.contains(&relative) {
             continue;
         }
         drift.push(TreeDrift {
@@ -348,6 +349,13 @@ pub fn tree_drift(
         });
     }
     Ok(drift)
+}
+
+/// `ignore` holds exact relative paths, or folder prefixes ending in `/`.
+fn is_ignored(ignore: &[String], relative: &str) -> bool {
+    ignore.iter().any(|name| {
+        name == relative || (name.ends_with('/') && relative.starts_with(name.as_str()))
+    })
 }
 
 pub fn format_manifest(entries: &[ManifestEntry]) -> String {

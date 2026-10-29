@@ -77,7 +77,7 @@ use crate::proof::shell_quote;
 
 fn export_next(dest: &str) -> String {
     format!(
-        "next: albumen export --from <your photos folder> --to {} --apply",
+        "next: albumen backup --from <your photos folder> --to {}",
         shell_quote(dest)
     )
 }
@@ -101,6 +101,71 @@ fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
         shell_quote(&path),
         shell_quote(&aside)
     )
+}
+
+/// Folder of `albumen backup` proofs at a destination.
+const PROOF_DIR: &str = crate::backup::PROOF_DIR;
+
+/// Seconds since 1970 for `YYYY-MM-DDTHH:MM:SSZ`, the form proofs use.
+fn parse_utc(text: &str) -> Option<u64> {
+    let b = text.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hh * 3_600 + mm * 60 + ss).ok()
+}
+
+/// The newest verified proof for this exact record: its finish time and its
+/// `.md` path relative to the destination.
+fn latest_proof(root: &Path, record: &Path) -> Option<(SystemTime, String)> {
+    let record_sha = albumen_ingest::sha256_hex(record).ok()?;
+    let mut best: Option<(u64, String)> = None;
+    for item in std::fs::read_dir(root.join(PROOF_DIR)).ok()?.flatten() {
+        let name = item.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(item.path()) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if value["result"] != "verified" || value["manifest_sha256"] != record_sha.as_str() {
+            continue;
+        }
+        let Some(secs) = value["finished_utc"].as_str().and_then(parse_utc) else {
+            continue;
+        };
+        // Two runs in one second are `backup-<t>` then `backup-<t>-2`:
+        // the longer name is the later one.
+        let md = format!("{PROOF_DIR}/{stem}.md");
+        let later = |(b, name): &(u64, String)| (secs, md.len(), &md) > (*b, name.len(), name);
+        if best.as_ref().is_none_or(later) {
+            best = Some((secs, md));
+        }
+    }
+    best.map(|(secs, md)| (UNIX_EPOCH + std::time::Duration::from_secs(secs), md))
 }
 
 /// Check one destination. `now` and `max_age_secs` come from the caller.
@@ -135,15 +200,27 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
         }
         Err(err) => return unreadable(plain_io(&err)),
     };
-    let when = match std::fs::metadata(&record).and_then(|meta| meta.modified()) {
-        Ok(when) => when,
-        Err(err) => return unreadable(plain_io(&err)),
+    let proof = latest_proof(root, &record);
+    let when = match &proof {
+        Some((when, _)) => *when,
+        None => match std::fs::metadata(&record).and_then(|meta| meta.modified()) {
+            Ok(when) => when,
+            Err(err) => return unreadable(plain_io(&err)),
+        },
     };
+    let proof_line = proof
+        .as_ref()
+        .map(|(_, md)| format!("proof: {md}\n"))
+        .unwrap_or_default();
     let Ok(entries) = parse_manifest(&text) else {
         return unreadable("the backup record is not readable".to_string());
     };
     let tree = DirectoryTree::new(root);
-    let found = match tree_drift(&entries, &tree, &[RECORD_NAME.to_string()]) {
+    let found = match tree_drift(
+        &entries,
+        &tree,
+        &[RECORD_NAME.to_string(), format!("{PROOF_DIR}/")],
+    ) {
         Ok(found) => found,
         Err(_) => return unreadable("an item could not be read".to_string()),
     };
@@ -208,7 +285,7 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
         return Report {
             state: State::Stale,
             text: format!(
-                "stale: last good backup was {} ({stamp}), limit is {}\n{} items were verified then; changes since are not checked\n{dest}\n{next}\n",
+                "stale: last good backup was {} ({stamp}), limit is {}\n{} items were verified then; changes since are not checked\n{dest}\n{proof_line}{next}\n",
                 relative_age(age),
                 days_word(max_age_secs),
                 group_thousands(total)
@@ -219,7 +296,7 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
     Report {
         state: State::Ok,
         text: format!(
-            "ok: backup checked {} ({stamp})\n{} items, all match your originals\n{dest}\n",
+            "ok: backup checked {} ({stamp})\n{} items, all match your originals\n{dest}\n{proof_line}",
             relative_age(age),
             group_thousands(total)
         ),
@@ -367,6 +444,16 @@ pub fn utc_stamp(unix: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_utc_round_trips_proof_times() {
+        for secs in [0u64, 951_782_400, 1_793_270_400, 4_102_444_799] {
+            let text = crate::proof::utc(UNIX_EPOCH + std::time::Duration::from_secs(secs));
+            assert_eq!(parse_utc(&text), Some(secs), "{text}");
+        }
+        assert_eq!(parse_utc("2026-13-01T00:00:00Z"), None);
+        assert_eq!(parse_utc("2026-10-29 10:00:00Z"), None);
+    }
 
     #[test]
     fn max_age_takes_days_or_hours_only() {
