@@ -20,7 +20,7 @@ This is the outline of the system. The ingest crate, the export command, and the
 | Export-everything command (`albumen export`) | Here |
 | Google Takeout import (`albumen import-takeout`) | Here. Streams split zip and tgz parts read-only. See [importers/takeout.md](importers/takeout.md) |
 | iCloud Photos import (`albumen import-icloud`) | Here. Reads a download, export, or Photos library copy. See [importers/icloud.md](importers/icloud.md) |
-| rclone-backed SMB, SFTP, WebDAV, B2 | SFTP, WebDAV, and B2 write through `RcloneStore` and `copy_verify`. SMB is not started |
+| rclone-backed SMB, SFTP, WebDAV, B2 | SFTP, WebDAV, SMB, and B2 write through `RcloneStore` and `copy_verify`. The SMB round-trip runs only with `ALBUMEN_SMB_ENDPOINT` set |
 | Family library | `albumen family` namespaces, signed manifest, invite, revoke, per-viewer hide, and `family export` on a local directory or S3. [design/family-sharing.md](design/family-sharing.md). Rotation and sealing are still design |
 
 ## Shape
@@ -128,7 +128,7 @@ Android motion photos and Ultra HDR gain maps are one file each. The motion phot
 
 - `LocalStore` is a directory. Synced Google Drive and Dropbox folders are this store. Albumen does not talk to those vendors' APIs.
 - `S3Store` speaks the S3 API with path-style addressing, so MinIO, AWS S3, and other S3-compatible endpoints work. Checksums on the request are sent only when required, which is what MinIO accepts.
-- SMB, SFTP, WebDAV, and B2 are planned through rclone, or through B2's S3 API for the second. They are not implemented.
+- SFTP, WebDAV, SMB, and B2 go through `RcloneStore`, with rclone as the transport. The SMB round-trip runs only when `ALBUMEN_SMB_ENDPOINT` is set.
 
 S3 does not have a Unix mtime. `Last-Modified` is the upload instant and must not be shown as the time the photo was taken or the file was last modified. The original mtime is user metadata `albumen-mtime-ns` (signed Unix nanoseconds). The source SHA-256 is `albumen-sha256`. After `PUT`, the object is read back and hashed. If the metadata did not stick, or the body hash differs, the object is deleted and the call fails.
 
