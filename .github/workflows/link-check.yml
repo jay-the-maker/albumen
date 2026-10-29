@@ -1,0 +1,28 @@
+# Checks the links in docs/compare.md and README.md. Uses only the built-in GITHUB_TOKEN.
+name: link-check
+
+on:
+  push:
+    branches: [main]
+    paths: [docs/compare.md, README.md, .github/workflows/link-check.yml]
+  pull_request:
+    paths: [docs/compare.md, README.md, .github/workflows/link-check.yml]
+  schedule:
+    - cron: "41 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lychee:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      # lychee-action v2.9.0
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
+        with:
+          args: --no-progress --max-retries 3 --accept 200,429 docs/compare.md README.md
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -298,7 +298,7 @@ albumen-mcp --library ./library --destination ./destination --enable-export --en
 
 `--destination` is required with those flags. It must be a directory that is not the library and not another mount of that same directory.
 
-Details are in [docs/architecture.md](docs/architecture.md). What is not built yet is listed in [ROADMAP.md](ROADMAP.md).
+How Albumen compares with iCloud Photos, Google Photos and Frame.io is in [docs/compare.md](docs/compare.md). Details are in [docs/architecture.md](docs/architecture.md). What is not built yet is listed in [ROADMAP.md](ROADMAP.md).
 
 ## Support
 
