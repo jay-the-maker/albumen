@@ -49,7 +49,7 @@ a library path like `"D:\\Photos\\Library"`.
 ## Smoke test
 
 These steps build the server, then connect and search over stdio against a
-temp library of synthetic files. They also check that the library bytes are
+temp library of synthetic files (plus `fixtures/jpeg-gps/IMG_0001.jpg` for `thumbnail`). They also check that the library bytes are
 unchanged.
 
 ```sh
@@ -63,7 +63,7 @@ into a temp folder, so nothing goes in system-wide:
 ```sh
 d=$(mktemp -d) && cp scripts/mcp-sdk-smoke.mjs "$d" && cd "$d" &&
 npm init -y >/dev/null && npm install --silent @modelcontextprotocol/sdk &&
-node mcp-sdk-smoke.mjs /abs/path/to/target/debug/albumen-mcp
+node mcp-sdk-smoke.mjs /abs/path/to/target/debug/albumen-mcp /abs/path/to/fixtures/jpeg-gps/IMG_0001.jpg
 ```
 
 ## Known limits
@@ -82,6 +82,8 @@ node mcp-sdk-smoke.mjs /abs/path/to/target/debug/albumen-mcp
   client call does not wait or time out.
 - **One library per entry.** Add a second `mcpServers` entry for another library.
 - **Writes.** `export` and `upload` need explicit flags. There is no delete tool.
-- **Thumbnails.** `thumbnail` returns the JPEG as base64 (`data_base64`) inside
-  its JSON text result, not as an MCP `image` content block. Clients show it as
-  text, not as a picture.
+- **Thumbnails.** `thumbnail` returns an MCP image content block,
+  `{"type": "image", "data": <base64>, "mimeType": "image/jpeg"}`, followed by a
+  text block with path, width, height and cache state. Both smoke scripts check
+  the block type, and the SDK client accepts it. Whether Claude Desktop or Cursor
+  draws the picture inline has not been checked in those apps.

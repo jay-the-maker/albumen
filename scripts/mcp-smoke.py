@@ -30,6 +30,9 @@ def main():
             os.makedirs(os.path.dirname(os.path.join(lib, rel)), exist_ok=True)
             with open(os.path.join(lib, rel), "wb") as f:
                 f.write(b"\xff\xd8\xff\xd9")  # synthetic, not a real photo
+        fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures", "jpeg-gps", "IMG_0001.jpg")
+        with open(fixture, "rb") as src, open(os.path.join(lib, "2022/01/fixture_gps.jpg"), "wb") as dst:
+            dst.write(src.read())  # synthetic fixture from fixtures/
         before = tree_digest(lib)
         start = time.monotonic()
         proc = subprocess.Popen(
@@ -67,12 +70,21 @@ def main():
         assert not result.get("isError"), result
         text = json.dumps(result)
         assert "beach_sunset.jpg" in text and "IMG_0001" not in text, text
+        send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+              "params": {"name": "thumbnail", "arguments": {"path": "2022/01/fixture_gps.jpg", "size": 64}}})
+        thumb = reply(3)["result"]
+        assert not thumb.get("isError"), thumb
+        block = thumb["content"][0]
+        assert block["type"] == "image" and block["mimeType"] == "image/jpeg", block.get("type")
+        import base64
+        assert base64.b64decode(block["data"])[:2] == b"\xff\xd8", "not a JPEG"
+        assert "data_base64" not in json.dumps(thumb["content"][1:]), "bytes also inside text"
         proc.stdin.close()
         proc.wait(timeout=10)
         assert tree_digest(lib) == before, "library changed"
         print(f"ok: {init['serverInfo']['name']} {init['serverInfo']['version']} "
               f"protocol {init.get('protocolVersion')}; tools {tools}; "
-              f"search 'beach' -> 1 hit; library unchanged; {time.monotonic()-start:.2f}s")
+              f"search 'beach' -> 1 hit; thumbnail -> image block image/jpeg; library unchanged; {time.monotonic()-start:.2f}s")
 
 if __name__ == "__main__":
     main()
