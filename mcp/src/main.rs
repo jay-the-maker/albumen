@@ -164,7 +164,30 @@ fn call_tool(library: &Library, params: &Value) -> Value {
     }
 }
 
-fn tool_ok(value: Value) -> Value {
+fn tool_ok(mut value: Value) -> Value {
+    // A thumbnail goes out as an MCP image content block, so clients render
+    // it. Its metadata follows as a text block, without the bytes.
+    if let (Some(data), Some(mime)) = (
+        value
+            .get("data_base64")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        value
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    ) {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("data_base64");
+        }
+        return json!({
+            "content": [
+                {"type": "image", "data": data, "mimeType": mime},
+                {"type": "text", "text": serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())},
+            ],
+            "isError": false,
+        });
+    }
     json!({
         "content": [{"type": "text", "text": serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())}],
         "isError": false,
