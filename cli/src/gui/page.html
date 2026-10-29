@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Albumen (demo)</title>
+<style>
+:root{--ink:#1d1f23;--mute:#6b7078;--line:#e4e6ea;--bg:#fafaf8;--ok:#1f7a3f;--stale:#b26a00;--bad:#b3261e;--none:#6b7078;--accent:#2b5fd9}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg)}
+.demo{background:#fff4d6;border-bottom:1px solid #ecd9a0;padding:6px 20px;font-size:13px;color:#6b5100}
+header{display:flex;align-items:center;gap:28px;padding:14px 20px;border-bottom:1px solid var(--line);background:#fff}
+header b{font-size:18px;letter-spacing:.2px}nav{display:flex;gap:4px}
+nav button{border:0;background:none;padding:7px 12px;border-radius:7px;color:var(--mute);font:inherit;cursor:pointer}
+nav button.on{background:#eef1f6;color:var(--ink)}
+main{max-width:1060px;margin:0 auto;padding:26px 20px 60px}
+h1{font-size:22px;font-weight:600;margin:0 0 4px}.sub{color:var(--mute);margin:0 0 18px}
+.runs{font:12px ui-monospace,Menlo,Consolas,monospace;color:#8a8f97;margin:0 0 18px;word-break:break-all}
+.folder{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:18px}
+.folder code{flex:1;font-size:13px;word-break:break-all}.lock{font-size:12px;color:var(--ok);border:1px solid #cfe5d6;background:#f0f8f3;border-radius:20px;padding:2px 10px;white-space:nowrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:18px}
+.grid figure{margin:0}.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:6px;display:block;background:#eee}
+.grid figcaption{font-size:12px;color:var(--mute);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 20px;font:inherit;font-weight:600;cursor:pointer}
+.primary:disabled{opacity:.5;cursor:default}
+select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:100%}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+.out{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;min-height:20px}
+.out:empty{display:none}
+.bar{height:6px;background:#eceef2;border-radius:3px;overflow:hidden;margin:4px 0 6px}.bar i{display:block;height:100%;background:var(--accent);width:0}
+.count{font-size:13px;color:var(--mute)}
+.card{background:#fff;border:1px solid var(--line);border-left:5px solid var(--none);border-radius:10px;padding:12px 16px;margin-bottom:12px}
+.card .w{font-weight:700;text-transform:none}.card pre{margin:4px 0 0;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}
+.s-fresh{border-left-color:var(--ok)}.s-fresh .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
+.s-damaged{border-left-color:var(--bad)}.s-damaged .w{color:var(--bad)}.s-none .w{color:var(--none)}
+.badge{display:inline-flex;align-items:center;gap:8px;background:#e9f6ee;color:var(--ok);border:1px solid #bfe0cb;border-radius:22px;padding:6px 16px;font-weight:700;font-size:17px}
+.proof{margin-top:16px}.proof table{border-collapse:collapse;font-size:13px}.proof td{padding:4px 14px 4px 0;vertical-align:top}.proof td:first-child{color:var(--mute)}
+.proof code{word-break:break-all}a{color:var(--accent)}
+.close{margin-top:28px;font-size:19px;font-weight:600;color:var(--ok)}
+[hidden]{display:none!important}
+</style></head>
+<body>
+<div class="demo">DEMO-ONLY window. Synthetic sample images. Runs locally on this computer; nothing leaves it.</div>
+<header><b>Albumen</b>
+<nav><button data-s="photos" class="on">1 Choose photos</button><button data-s="backup">2 Back up</button><button data-s="health">3 Backup health</button><button data-s="proof">4 Proof</button></nav></header>
+<main>
+<section id="photos">
+<h1>Choose your photos folder.</h1>
+<p class="sub">Albumen only reads this folder. Nothing in it is changed, moved or deleted.</p>
+<p class="runs" id="runs-photos">runs: albumen scan</p>
+<div class="folder"><span>Folder</span><code id="lib"></code><span class="lock">&#128274; read-only</span></div>
+<div class="grid" id="grid"></div>
+<div class="row"><button class="primary" id="go-scan">Check photos</button><span class="count" id="scan-count"></span></div>
+<div class="bar" id="scan-bar" hidden><i></i></div>
+<div class="out" id="scan-out"></div>
+</section>
+<section id="backup" hidden>
+<h1>Back up</h1>
+<p class="sub">Copies new and changed photos to a local or mounted folder, then checks every copy.</p>
+<p class="runs" id="runs-backup">runs: albumen backup --from … --to …</p>
+<div class="row"><label for="dest-b">To</label><select id="dest-b"></select><button class="primary" id="go-backup">Back up</button><span class="count" id="backup-count"></span></div>
+<div class="out" id="backup-out"></div>
+</section>
+<section id="health" hidden>
+<h1>Backup health</h1>
+<p class="sub">One honest state per backup folder.</p>
+<p class="runs" id="runs-health">runs: albumen status DEST…</p>
+<div id="cards"></div>
+<p class="close" id="close" hidden>Your originals, bit for bit, provably intact.</p>
+</section>
+<section id="proof" hidden>
+<h1>Proof</h1>
+<p class="sub">Re-reads every backed-up copy and keeps a proof file you can open.</p>
+<p class="runs" id="runs-proof">runs: albumen verify-manifest --proof</p>
+<div class="row"><label for="dest-v">Backup</label><select id="dest-v"></select><button class="primary" id="go-verify">Check backup</button></div>
+<div id="verified" hidden><span class="badge">&#10003; Verified</span><p id="match"></p></div>
+<div class="out" id="verify-out"></div>
+<div class="proof" id="proof-box" hidden><table>
+<tr><td>Proof file</td><td><code id="p-path"></code> &nbsp;<a id="p-open" target="_blank" rel="noopener">Open proof file</a></td></tr>
+<tr><td>Size</td><td id="p-size"></td></tr><tr><td>SHA-256</td><td><code id="p-sha"></code></td></tr></table></div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const H={'X-Albumen':'1'};
+const enc=encodeURIComponent;
+let dests=[];
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.s));
+function show(s){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.s==s));
+ document.querySelectorAll('main section').forEach(x=>x.hidden=x.id!=s); if(s=='health')health();}
+async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(await r.text());return r.json();}
+let attach=null; // a job id from the URL (#screen:job:ID), shown instead of starting one
+async function job(kind,dest,on){
+ const id=attach!==null?attach:(await j('/api/job?kind='+kind+(dest?'&dest='+enc(dest):''),{method:'POST',headers:H})).id;attach=null;
+ for(;;){const s=await j('/api/job?id='+id);on(s);if(s.exit!==null)return s;await new Promise(r=>setTimeout(r,150));}}
+function q(s){return /[\s"'$`\\]/.test(s)?'"'+s.replace(/(["\\$`])/g,'\\$1')+'"':s}
+async function init(){
+ const lib=await j('/api/library');$('lib').textContent=lib.library;
+ $('grid').innerHTML='';for(const im of lib.images){const f=document.createElement('figure');
+  const i=new Image();i.loading='lazy';i.alt=im.path;i.src='/img?p='+enc(im.path);
+  const c=document.createElement('figcaption');c.textContent=im.path.split('/').pop();f.append(i,c);$('grid').append(f);}
+ const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);
+ for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=d;$(sel).append(o);}}
+ $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';
+ $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ');
+ runsB();runsV();}
+function runsB(){$('runs-backup').textContent='runs: albumen backup --from '+q($('lib').textContent)+' --to '+q($('dest-b').value);}
+function runsV(){const d=$('dest-v').value;$('runs-proof').textContent='runs: albumen verify-manifest --manifest '+q(d+'/ALBUMEN-MANIFEST.txt')+' --against '+q(d)+' --proof '+q(d+'/ALBUMEN-PROOFS/verify-…');}
+$('dest-b').onchange=runsB;$('dest-v').onchange=runsV;
+const stdout=s=>s.lines.slice(1);
+$('go-scan').onclick=async()=>{const b=$('go-scan');b.disabled=true;$('scan-bar').hidden=false;$('scan-out').textContent='';
+ const s=await job('scan',null,s=>{$('scan-count').textContent=s.done+' of '+s.total+' files';$('scan-bar').firstChild.style.width=(s.total?100*s.done/s.total:0)+'%';});
+ $('scan-out').textContent=stdout(s).filter(l=>/^(scanned|hashed) /.test(l)).map(l=>l.replace(/ into .*$/,'')).join('\n')||stdout(s).join('\n');b.disabled=false;};
+$('go-backup').onclick=async()=>{const b=$('go-backup');b.disabled=true;const d=$('dest-b').value;$('backup-out').textContent='';
+ const s=await job('backup',d,s=>{const l=stdout(s).filter(l=>/^(scan|export|verify): /.test(l));$('backup-count').textContent=s.exit===null?'working… '+l.length+' of 3 steps':'';
+  $('backup-out').textContent=l.join('\n');});
+ const keep=stdout(s).filter(l=>/^(export|verify): |^backup ok: /.test(l)||!/^(scan|proof|albumen[^:]*): /.test(l));
+ $('backup-out').textContent=keep.map(l=>l.startsWith('backup ok: ')?'backup ok\n'+l.slice(11):l).join('\n');b.disabled=false;};
+async function health(){const st=await j('/api/status');$('cards').innerHTML='';
+ for(const d of st.destinations){const c=document.createElement('div');
+  const cls={fresh:'s-fresh',stale:'s-stale',damaged:'s-damaged'}[d.state]||'s-none';c.className='card '+cls;
+  const t=d.text.trimEnd();const i=t.indexOf(':');const w=document.createElement('span');w.className='w';w.textContent=t.slice(0,i+1);
+  const pre=document.createElement('pre');pre.append(w,document.createTextNode(t.slice(i+1)));c.append(pre);$('cards').append(c);}
+ $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ')+'   (exit '+st.exit+')';
+ $('close').hidden=!st.destinations.some(d=>d.state=='fresh');}
+$('go-verify').onclick=async()=>{const b=$('go-verify');b.disabled=true;$('verified').hidden=true;$('proof-box').hidden=true;$('verify-out').textContent='';
+ const s=await job('verify',$('dest-v').value,()=>{});
+ const md=(stdout(s).find(l=>/^proof: .*\.md$/.test(l))||'').slice(7);
+ if(s.exit===0&&md){const p=await j('/api/proof?path='+enc(md));const n=(p.text.match(/\| Files \| `(\d+)` \|/)||[])[1];
+  $('match').textContent=n+' items match, checked with SHA-256.';$('verified').hidden=false;
+  $('p-path').textContent=p.path;$('p-open').href='/api/proof?raw=1&path='+enc(p.path);$('p-size').textContent=p.bytes+' bytes';$('p-sha').textContent=p.sha256;$('proof-box').hidden=false;}
+ else{const bad=stdout(s).map(l=>l.match(/^(changed|missing) (.+?)(?: expected .*)?$/)).filter(Boolean);
+ $('verify-out').textContent='Not verified (exit '+s.exit+').\n'+(bad.length?bad.length+' item(s) no longer match what was backed up:\n'+bad.map(m=>'  '+m[1]+': '+m[2]).join('\n')+'\nyour originals were not touched\nnext: see Backup health for the line to run':stdout(s).filter(l=>!/^(proof|albumen[^:]*): /.test(l)).join('\n'));}
+ b.disabled=false;};
+// #screen or #screen:run opens a screen (and presses its button) for a scripted walk-through.
+init().then(()=>{const [s,r,arg,dn]=location.hash.slice(1).split(':');if(!s)return;
+ if(r=='job')attach=Number(arg);
+ const i=dests.findIndex(d=>d.endsWith('/'+decodeURIComponent((r=='job'?dn:arg)||'')));if(i>=0){$('dest-b').selectedIndex=i;$('dest-v').selectedIndex=i;runsB();runsV();}
+ show(s);if(r=='run'||r=='job')({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]&&$({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]).click());});
+</script></body></html>
