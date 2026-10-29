@@ -18,9 +18,10 @@ use std::process::ExitCode;
 use albumen_ingest::takeout_fidelity;
 use albumen_ingest::{
     dest, export_tree_counted, import_card_local, import_icloud, import_takeout_with,
-    parse_manifest, plan_card, plan_icloud, plan_takeout, platform_dirs, scan_tree,
+    parse_manifest, plan_card, plan_icloud, plan_takeout, platform_dirs, scan_tree_with,
     verify_scan_manifest, verify_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest,
-    IngestError, ManifestEntry, RcloneStore, S3Config, S3Store, SourceRoot, WalkControl,
+    IngestError, ManifestEntry, RcloneStore, S3Config, S3Store, ScanOptions, SourceRoot,
+    WalkControl,
 };
 mod proof;
 
@@ -91,6 +92,14 @@ enum Command {
         /// directory, keyed by source. Refused inside the source or its parent.
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// Earlier manifest of this library. Files whose size and mtime match
+        /// keep their hash and are not read again; changed and new files are
+        /// hashed. Read only; must differ from --manifest.
+        #[arg(long)]
+        previous: Option<PathBuf>,
+        /// With --previous, hash every file anyway.
+        #[arg(long, requires = "previous")]
+        rehash_all: bool,
     },
     /// Copy a Google Takeout archive or extracted folder into a library.
     ///
@@ -395,18 +404,31 @@ fn run() -> Result<(), IngestError> {
             dir,
             manifest,
             ledger,
+            previous,
+            rehash_all,
         } => {
             let source = SourceRoot::open(&dir)?;
             if let Some(ledger) = ledger.as_deref() {
                 albumen_ingest::ledger::set_ledger_dir(ledger, source.canonical())?;
             }
-            let stats = scan_tree(&source, &manifest)?;
+            let incremental = previous.is_some();
+            let options = ScanOptions {
+                previous,
+                rehash_all,
+            };
+            let stats = scan_tree_with(&source, &manifest, &options)?;
             println!(
                 "scanned {} files ({} bytes) into {}",
                 stats.files,
                 stats.bytes,
                 manifest.display()
             );
+            if incremental {
+                println!(
+                    "hashed {} files, reused {} unchanged",
+                    stats.hashed, stats.reused
+                );
+            }
             Ok(())
         }
         Command::TakeoutFidelity {

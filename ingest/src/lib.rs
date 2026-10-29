@@ -63,7 +63,9 @@ pub use local::{
 pub use platform::platform_dirs;
 pub use rclone::RcloneStore;
 pub use s3::{S3Config, S3Store};
-pub use scan::{scan_tree, verify_scan_manifest, ScanDrift, ScanStats};
+pub use scan::{
+    scan_tree, scan_tree_with, verify_scan_manifest, ScanDrift, ScanOptions, ScanStats,
+};
 pub use source::SourceRoot;
 pub use store::{
     copy_verify, copy_verify_quarantine, BlobStore, IngestReport, Quarantine, StoredFile,
