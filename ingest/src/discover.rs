@@ -514,6 +514,73 @@ mod tests {
         assert_eq!(asset.files()[1].path.file_name().unwrap(), "IMG_0005.MOV");
     }
 
+    fn file_set(asset: &Asset) -> Vec<(String, Role)> {
+        asset
+            .files()
+            .iter()
+            .map(|file| {
+                (
+                    file.path.file_name().unwrap().to_str().unwrap().to_string(),
+                    file.role,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn discovers_live_photo_from_the_mov() {
+        let tmp = Tmp::new();
+        let dir = tmp.path();
+        touch(dir, "IMG_0006.heic");
+        touch(dir, "IMG_0006.mov");
+        let asset = discover(&dir.join("IMG_0006.mov")).unwrap();
+        assert_eq!(
+            file_set(&asset),
+            vec![
+                ("IMG_0006.mov".to_string(), Role::Primary),
+                ("IMG_0006.heic".to_string(), Role::Pair),
+            ]
+        );
+    }
+
+    #[test]
+    fn discovers_uppercase_live_photo_from_either_side() {
+        let tmp = Tmp::new();
+        let dir = tmp.path();
+        touch(dir, "IMG.HEIC");
+        touch(dir, "IMG.MOV");
+        let from_still = discover(&dir.join("IMG.HEIC")).unwrap();
+        assert_eq!(
+            file_set(&from_still),
+            vec![
+                ("IMG.HEIC".to_string(), Role::Primary),
+                ("IMG.MOV".to_string(), Role::Pair),
+            ]
+        );
+        let from_video = discover(&dir.join("IMG.MOV")).unwrap();
+        assert_eq!(
+            file_set(&from_video),
+            vec![
+                ("IMG.MOV".to_string(), Role::Primary),
+                ("IMG.HEIC".to_string(), Role::Pair),
+            ]
+        );
+    }
+
+    #[test]
+    fn still_without_its_video_is_the_still_alone() {
+        let tmp = Tmp::new();
+        let dir = tmp.path();
+        touch(dir, "IMG_0007.HEIC");
+        touch(dir, "IMG_0070.MOV");
+        touch(dir, "IMG_0007-1.MOV");
+        let asset = discover(&dir.join("IMG_0007.HEIC")).unwrap();
+        assert_eq!(
+            file_set(&asset),
+            vec![("IMG_0007.HEIC".to_string(), Role::Primary)]
+        );
+    }
+
     #[test]
     fn companion_names_stat_known_siblings_only() {
         let tmp = Tmp::new();
