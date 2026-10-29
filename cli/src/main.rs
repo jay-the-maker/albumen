@@ -24,7 +24,7 @@ use albumen_ingest::{
 mod proof;
 
 use albumen_ingest::tree_drift;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 
 mod family;
@@ -207,13 +207,84 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("albumen: {err}");
-            ExitCode::from(1)
+            eprintln!("next: {}", err.next_step());
+            ExitCode::from(err.exit_code())
         }
     }
 }
 
+/// One example per command, shown at the end of its `--help`.
+const EXAMPLES: &[(&str, &str)] = &[
+    ("export", "albumen export --from ~/Pictures/library --to /Volumes/Backup/export --apply"),
+    ("platform-dirs", "albumen platform-dirs"),
+    ("scan", "albumen scan ~/Pictures/library --manifest ~/scan.jsonl"),
+    ("import-takeout", "albumen import-takeout --from ~/Downloads/takeout --to ~/Pictures/library --report ~/takeout.jsonl --apply"),
+    ("import-icloud", "albumen import-icloud --from ~/Downloads/iCloud --to ~/Pictures/library --report ~/icloud.jsonl --apply"),
+    ("family", "albumen family init --to ~/family --key ~/founder.key --apply"),
+    ("family keygen", "albumen family keygen --key ~/founder.key --apply"),
+    ("family init", "albumen family init --to ~/family --key ~/founder.key --apply"),
+    ("family export", "albumen family export --library ~/family --to /Volumes/Backup/family --apply"),
+    ("family add", "albumen family add --library ~/family --key ~/me.key --from ~/Pictures/IMG_0001.HEIC --apply"),
+    ("family invite", "albumen family invite --library ~/family --key ~/founder.key --member sam --apply"),
+    ("family join", "albumen family join --library ~/family --key ~/sam.key --token TOKEN --name sam --apply"),
+    ("family admit", "albumen family admit --library ~/family --key ~/founder.key --member sam --token TOKEN --apply"),
+    ("family revoke", "albumen family revoke --library ~/family --key ~/founder.key --member sam --apply"),
+    ("family tombstone", "albumen family tombstone --library ~/family --key ~/me.key --sha256 SHA256 --apply"),
+    ("family hide", "albumen family hide --library ~/family --key ~/me.key --sha256 SHA256 --apply"),
+    ("family album-add", "albumen family album-add --library ~/family --key ~/me.key --album Summer --sha256 SHA256 --apply"),
+    ("family album-omit", "albumen family album-omit --library ~/family --key ~/me.key --add Summer --apply"),
+    ("family manifest", "albumen family manifest --library ~/family --key ~/founder.key --apply"),
+    ("family sync", "albumen family sync --from ~/family --to /Volumes/Backup/family --apply"),
+    ("family policy", "albumen family policy --bucket my-bucket --member sam"),
+    ("family publish", "albumen family publish --library ~/family --key ~/founder.key --apply"),
+    ("receive", "albumen receive hide --library ~/received --name IMG_0001.HEIC --apply"),
+    ("receive hide", "albumen receive hide --library ~/received --name IMG_0001.HEIC --apply"),
+    ("receive unhide", "albumen receive unhide --library ~/received --name IMG_0001.HEIC --apply"),
+    ("ledger", "albumen ledger --library ~/Pictures/library"),
+    ("verify-manifest", "albumen verify-manifest --manifest /Volumes/Backup/export/ALBUMEN-MANIFEST.txt --against /Volumes/Backup/export --proof ~/proof"),
+    ("completions", "albumen completions bash > ~/.local/share/bash-completion/completions/albumen"),
+];
+
+const EXIT_CODES_HELP: &str =
+    "Exit codes: 0 ok, 1 verification mismatch or drift, 2 usage, 3 refused unsafe layout, 4 I/O.";
+
+fn with_examples(mut command: clap::Command, prefix: &str) -> clap::Command {
+    let names: Vec<String> = command
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_string())
+        .collect();
+    for name in names {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix} {name}")
+        };
+        let example = EXAMPLES
+            .iter()
+            .find(|(key, _)| *key == path)
+            .map(|(_, example)| *example);
+        command = command.mut_subcommand(&name, |sub| {
+            let sub = with_examples(sub, &path);
+            match example {
+                Some(example) => sub.after_help(format!("Example:\n  {example}")),
+                None => sub,
+            }
+        });
+    }
+    command
+}
+
+fn cli_command() -> clap::Command {
+    with_examples(Cli::command(), "").after_help(EXIT_CODES_HELP)
+}
+
 fn run() -> Result<(), IngestError> {
-    let cli = Cli::parse();
+    let cli = match cli_command().try_get_matches() {
+        Ok(matches) => Cli::from_arg_matches(&matches)
+            .map_err(|err| err.exit())
+            .unwrap(),
+        Err(err) => err.exit(),
+    };
     match cli.command {
         Command::Export {
             from,
@@ -377,11 +448,11 @@ fn run() -> Result<(), IngestError> {
         } => {
             if manifest_is_jsonl(&manifest)? {
                 if against.starts_with("s3://") {
-                    return Err(IngestError::Store {
-                        operation: "verify-manifest",
-                        filename: against,
-                        message: "a scan manifest is verified against a local directory"
-                            .to_string(),
+                    return Err(IngestError::Usage {
+                        message: format!(
+                            "{}: a scan manifest is verified against a local directory",
+                            against
+                        ),
                     });
                 }
                 let source = SourceRoot::open(Path::new(&against))?;
@@ -429,10 +500,11 @@ fn verify_with_proof(manifest: &Path, against: &str, proof_path: &Path) -> Resul
     let mut files = Vec::new();
     if manifest_is_jsonl(manifest)? {
         if against.starts_with("s3://") {
-            return Err(IngestError::Store {
-                operation: "verify-manifest",
-                filename: against.to_string(),
-                message: "a scan manifest is verified against a local directory".to_string(),
+            return Err(IngestError::Usage {
+                message: format!(
+                    "{}: a scan manifest is verified against a local directory",
+                    against
+                ),
             });
         }
         let text = std::fs::read_to_string(manifest).map_err(|err| IngestError::Io {
@@ -616,10 +688,8 @@ fn open_target(spec: &str) -> Result<Box<dyn ExportDest>, IngestError> {
 fn split_s3(rest: &str) -> Result<(String, String), IngestError> {
     let rest = rest.trim_end_matches('/');
     if rest.is_empty() || rest.contains(' ') {
-        return Err(IngestError::Store {
-            operation: "s3",
-            filename: rest.to_string(),
-            message: "expected s3://bucket or s3://bucket/prefix".to_string(),
+        return Err(IngestError::Usage {
+            message: format!("{rest}: expected s3://bucket or s3://bucket/prefix"),
         });
     }
     let (bucket, prefix) = match rest.split_once('/') {
@@ -636,10 +706,8 @@ fn split_s3(rest: &str) -> Result<(String, String), IngestError> {
 
 fn default_manifest(to: &str) -> Result<PathBuf, IngestError> {
     if to.starts_with("s3://") {
-        return Err(IngestError::Store {
-            operation: "manifest",
-            filename: to.to_string(),
-            message: "pass --manifest when exporting to S3".to_string(),
+        return Err(IngestError::Usage {
+            message: format!("{to}: pass --manifest when exporting to S3"),
         });
     }
     Ok(Path::new(to).join("ALBUMEN-MANIFEST.txt"))
@@ -684,4 +752,49 @@ fn manifest_ignore(manifest: &Path, against: &str) -> Result<Vec<String>, Ingest
         .collect::<Vec<_>>()
         .join("/");
     Ok(vec![text])
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+
+    fn walk(command: &clap::Command, prefix: &str, seen: &mut Vec<String>) {
+        for sub in command.get_subcommands() {
+            if sub.get_name() == "help" {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                sub.get_name().to_string()
+            } else {
+                format!("{prefix} {}", sub.get_name())
+            };
+            let after = sub
+                .get_after_help()
+                .map(|text| text.to_string())
+                .unwrap_or_default();
+            let examples = after.matches("Example:").count();
+            assert_eq!(examples, 1, "`albumen {path} --help` needs one example");
+            assert!(
+                after.contains(&format!("albumen {path}")),
+                "{path}: {after}"
+            );
+            seen.push(path.clone());
+            walk(sub, &path, seen);
+        }
+    }
+
+    #[test]
+    fn every_command_help_shows_one_example() {
+        let command = cli_command();
+        let mut seen = Vec::new();
+        walk(&command, "", &mut seen);
+        for (key, _) in EXAMPLES {
+            assert!(seen.iter().any(|path| path == key), "unused example {key}");
+        }
+        let top = command
+            .get_after_help()
+            .map(|text| text.to_string())
+            .unwrap();
+        assert!(top.contains("3 refused unsafe layout"));
+    }
 }

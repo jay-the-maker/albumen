@@ -101,6 +101,18 @@ docker run --rm -i --mount type=bind,src="$PWD/library",dst=/library,readonly al
 
 That mount is read-only. A writable directory for opt-in export or upload is a separate mount at `/destination`, not the library of originals. Tag `v0.1.1` publishes `ghcr.io/jay-the-maker/albumen-mcp:0.1.1` and the [server.json](server.json) entry `io.github.jay-the-maker/albumen` to the MCP Registry. [glama.json](glama.json) names the maintainer for Glama. This repository does not submit Glama, Smithery, PulseMCP, or mcp.so by itself.
 
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | ok |
+| 1 | verification mismatch or drift (checksum, manifest, reconciliation) |
+| 2 | usage: the arguments cannot be used as given |
+| 3 | refused unsafe layout, such as a destination inside the source, an existing file, or a symlink |
+| 4 | I/O or storage failure |
+
+Every error ends with a `next:` line on stderr that says what to do. `albumen <command> --help` ends with one example.
+
 ## Ingest core
 
 `ingest/` is the `albumen-ingest` crate. The operation that matters is `copy_verify`:
