@@ -1,21 +1,34 @@
+Albumen is the open-source alternative to iCloud Photos, Google Photos and Frame.io.
+
 # How Albumen compares
 
-This page compares Albumen with iCloud Photos, Google Photos and Frame.io.
 Every Albumen row points at a file or command on `main`.
 
 - **on a branch, not released**: the work is pushed to a branch and is not merged into `main` yet.
 - **not yet**: Albumen does not have the feature.
 
-Every competitor price and feature claim comes from a vendor page fetched on 2026-10-29 and linked below. A claim no fetched page backs is marked **unverified**. Prices are US prices before tax; check the linked page for your country.
+Every competitor price and feature claim comes from a vendor page fetched on 2026-10-29 and linked below. Each vendor cell names its source. A claim no fetched page backs is marked **unverified**. Vendor features use the vendor's own names. Prices are US prices before tax; check the linked page for your country.
 
 Sources, all fetched 2026-10-29:
 
 - [A1] Apple, Set up and use iCloud Photos: https://support.apple.com/en-us/108782
 - [A2] Apple, iCloud+ plans and pricing: https://support.apple.com/en-us/108047
+- [A3] Apple, How to use iCloud Shared Photo Library on iPhone or iPad: https://support.apple.com/en-us/118229
+- [A4] Apple, Find People and Pets in Photos on your iPhone or iPad: https://support.apple.com/en-us/108795
+- [A5] Apple, Search for photos and videos on iPhone: https://support.apple.com/guide/iphone/search-for-photos-and-videos-iph392d77d5f/ios
+- [A6] Apple, Transfer a copy of your iCloud Photos collection to another service: https://support.apple.com/en-us/118257
+- [A7] Apple, Transfer a copy of your photos and videos to iCloud Photos: https://support.apple.com/en-us/120924
 - [G1] Google Photos Help, Back up photos & videos: https://support.google.com/photos/answer/6193313
 - [G2] Google Photos Help, Set up & manage your face groups: https://support.google.com/photos/answer/6128838
 - [G3] Google One plans: https://one.google.com/about/plans
+- [G4] Google Photos Help, Set up partner sharing: https://support.google.com/photos/answer/7378858
+- [G5] Google Photos Help, Transfer iCloud photos and videos to Google Photos: https://support.google.com/photos/answer/10502587
+- [G6] Google Account Help, How to download your Google data: https://support.google.com/accounts/answer/3024190
+- [G7] Google Photos Help, Copy your photos & videos to a service outside of Google: https://support.google.com/photos/answer/9666875
 - [F1] Frame.io pricing and FAQ: https://frame.io/pricing
+- [F2] Frame.io, Storage Connect for Frame.io: https://help.frame.io/en/articles/9179936-storage-connect-for-frame-io
+- [F3] Frame.io, Getting started in the iOS app: https://help.frame.io/en/articles/9105533-getting-started-in-the-ios-app
+- [F4] Frame.io, Enhanced search with AI Search: https://help.frame.io/en/articles/9101079-enhanced-search-with-ai-search
 
 ## Price
 
@@ -28,25 +41,26 @@ Sources, all fetched 2026-10-29:
 
 | Feature | Albumen | iCloud Photos | Google Photos | Frame.io |
 |---|---|---|---|---|
-| Bit-exact copy with SHA-256 read-back | Yes: `albumen export` ([cli/src/main.rs](../cli/src/main.rs), [ingest/src/local.rs](../ingest/src/local.rs)) | unverified | unverified | unverified |
-| Re-check an export later | Yes: `albumen verify-manifest` ([cli/src/main.rs](../cli/src/main.rs)) | unverified | unverified | unverified |
-| Proof file you can keep from a verify run | on a branch, not released (`verify-manifest --proof`, branch `verify-manifest-proof`) | unverified | unverified | unverified |
-| Import from Google Takeout | Yes: `albumen import-takeout` ([docs/importers/takeout.md](importers/takeout.md)) | unverified | unverified | unverified |
-| Compare Takeout JSON and EXIF time and GPS | on a branch, not released (`albumen takeout-fidelity`, branch `takeout-fidelity`) | unverified | unverified | unverified |
-| Import from iCloud or a Photos library | Yes: `albumen import-icloud` ([docs/importers/icloud.md](importers/icloud.md)) | Download copies of your library [A1] | unverified | unverified |
+| Integrity proof you can re-check (SHA-256 manifest, re-verify, proof file) | `albumen export` writes a SHA-256 manifest and reads every copy back ([cli/src/main.rs](../cli/src/main.rs), [ingest/src/local.rs](../ingest/src/local.rs)). `albumen verify-manifest` re-checks it later. The proof file (`verify-manifest --proof`) is on a branch, not released (branch `verify-manifest-proof`). | none documented¹ | none documented¹ | none documented¹ |
+| Import from Google Takeout | Yes: `albumen import-takeout` ([docs/importers/takeout.md](importers/takeout.md)). Albumen keeps what Takeout gives, bit-exact. It cannot add back anything Takeout leaves out. | Transfer from Google Photos to iCloud Photos, started in Google Takeout. Motion Photos and Live Photos are not transferred [A7] | Google Takeout export of Photos [G6]. Transfer to another service leaves out the video portion of Motion Photos and Live Photos [G7] | unverified |
+| Compare Takeout JSON and EXIF time and GPS | on a branch, not released (`albumen takeout-fidelity`, branch `takeout-fidelity`) | unverified | Takeout puts metadata that is not in the original file, such as comments, in a separate JSON file [G6] | unverified |
+| Import from iCloud or a Photos library | Yes: `albumen import-icloud` ([docs/importers/icloud.md](importers/icloud.md)) | Download copies of your library [A1]. Transfer to Google Photos sends only the most recent edit, not the original, and does not transfer Live Photos [A6] | Transfer from iCloud. The video portion of Live Photos does not transfer [G5] | unverified |
 | Live Photos kept | Yes, as pairs ([ingest/tests/synthetic_live_photo.rs](../ingest/tests/synthetic_live_photo.rs)). Pairing by ContentIdentifier with flags is on a branch, not released (branch `icloud-fidelity`). | Stored in original format [A1] | Backed up from the iPhone or iPad app [G1] | unverified |
 | Read-only scan of an existing library | Yes: `albumen scan` ([cli/tests/scan_source_untouched.rs](../cli/tests/scan_source_untouched.rs)) | unverified | unverified | unverified |
 | Local account of every file and connection | Yes: `albumen ledger` ([ingest/src/ledger.rs](../ingest/src/ledger.rs)) | unverified | unverified | unverified |
-| Copy to your own S3 bucket | Yes: `albumen export --to s3://bucket/prefix` ([ingest/src/s3.rs](../ingest/src/s3.rs)) | unverified | unverified | Storage Connect, Enterprise Prime only [F1] |
-| Shared family or team library | Yes: `albumen family` ([docs/design/family-sharing.md](design/family-sharing.md)) | unverified | unverified | Members, projects and workspaces [F1] |
-| Camera upload | `albumen-receive` over WebDAV, SFTP and FTP ([README.md](../README.md#camera-receiver)) | unverified | unverified | Camera to Cloud [F1] |
-| Phone camera-roll backup | Android app and iOS library ([docs/mobile-android-backup.md](mobile-android-backup.md), [mobile/ios](../mobile/ios)) | Automatic upload [A1] | Automatic backup [G1] | unverified |
-| Metadata search | By date, camera, lens, GPS box and keywords: `albumen-mcp` ([mcp/src/tools.rs](../mcp/src/tools.rs)) | unverified | Search by places and things [G1] | Custom and default metadata [F1] |
+| Copy to your own S3 bucket | Yes: `albumen export --to s3://bucket/prefix` ([ingest/src/s3.rs](../ingest/src/s3.rs)) | unverified | Takeout delivers by email link, Drive, Dropbox, OneDrive or Box; S3 is not on the list [G6] | Storage Connect: your own Amazon S3 bucket in us-east-1, Enterprise only [F1][F2] |
+| Family library | `albumen family` ([cli/src/main.rs](../cli/src/main.rs), subcommands in [cli/src/family.rs](../cli/src/family.rs)): creates a family library with a signing key file kept outside it, copies originals into each member's own namespace, signs invites, admits and revokes members, tombstones, hides and album entries, and rebuilds the shared manifest from signed logs. Writes need `--apply` or `--execute`. No account. | Shared Library, with up to five other people [A3] | Partner sharing, with one partner at a time [G4] | Workspaces and project members [F1][F3] |
+| Camera upload | `albumen-receive` over WebDAV, SFTP and FTP ([README.md](../README.md#camera-receiver)) | unverified | unverified | Camera to Cloud [F1][F3] |
+| Phone camera-roll backup | Android app and iOS library ([docs/mobile-android-backup.md](mobile-android-backup.md), [mobile/ios](../mobile/ios)) | Automatic upload [A1] | Automatic backup [G1] | Upload from the photo library in the iOS app, picked by hand [F3] |
+| Metadata search | By date, camera, lens, GPS box and keywords: `albumen-mcp` ([mcp/src/tools.rs](../mcp/src/tools.rs)) | Search by date, place, category, text and caption [A5] | Search by places and things [G1] | Search by status, keywords, uploader, file type, format and more [F4] |
 | Agent access over MCP | Yes: `albumen-mcp` ([AGENTS.md](../AGENTS.md)) | unverified | unverified | unverified |
-| Exit codes 0–4 and a `next:` line on errors | on a branch, not released (branch `exit-codes`) | n/a | n/a | n/a |
-| Face or people search | not yet | unverified | Face Groups, not in all regions [G2] | unverified |
+| Face or people search | not yet | People & Pets [A4] | Face Groups, not in all regions [G2] | AI Search has no face detection [F4] |
 | Review and approval with frame-accurate comments | not yet | unverified | unverified | Frame-accurate comments, annotations, share for review [F1] |
 | Hosted sync service | not yet. Albumen copies to a disk or bucket you own. | Synced across devices [A1] | Automatic sync [G1] | Hosted storage [F1] |
 | Gallery app | not yet ([ROADMAP.md](../ROADMAP.md)) | Photos app [A1] | Google Photos app [G1] | iOS and tvOS apps [F1] |
 
+¹ None of the three vendors documents an equivalent on the pages above.
+
 **unverified** means none of the pages above settles it either way. It is not a claim that the product lacks the feature.
+
+`.github/workflows/link-check.yml` checks every link on this page.
