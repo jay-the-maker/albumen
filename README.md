@@ -153,6 +153,8 @@ The remaining steps take a few seconds. Run them from the repository root.
      ...
      files: 20
      bytes: 101153
+     already present: 0
+     conflicts: 0
    would export 20 new, 0 already present and verified
    ```
 

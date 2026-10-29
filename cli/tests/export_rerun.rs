@@ -123,12 +123,22 @@ fn dry_run_names_a_conflict_that_apply_refuses() {
     let manifests = tmp.path().join("m");
     fs::create_dir_all(&manifests).unwrap();
 
-    let plan = export(&library, &target, &manifests.join("a.txt"), false);
+    let (success, plan) = run(&[
+        "export",
+        "--from",
+        p(&library),
+        "--to",
+        p(&target),
+        "--manifest",
+        p(&manifests.join("a.txt")),
+    ]);
+    assert!(!success, "a dry-run with a conflict exits non-zero: {plan}");
     assert!(
         plan.lines()
             .any(|line| line == "would export 0 new, 0 already present and verified"),
         "{plan}"
     );
+    assert!(plan.contains("  conflict: IMG_0001.jpg"), "{plan}");
     assert!(plan.contains("conflicts: 1"), "{plan}");
 
     let m = manifests.join("b.txt");

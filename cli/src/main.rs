@@ -581,22 +581,6 @@ fn refuse_export_targets(from: &Path, to: &str, manifest: &Path) -> Result<(), I
     source.refuse_destination(manifest)
 }
 
-/// Same SHA-256 and length. Any read error counts as different.
-fn same_bytes(left: &Path, right: &Path) -> bool {
-    let len = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).ok();
-    match (len(left), len(right)) {
-        (Some(a), Some(b)) if a == b => {}
-        _ => return false,
-    }
-    match (
-        albumen_ingest::sha256_hex(left),
-        albumen_ingest::sha256_hex(right),
-    ) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
 fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), IngestError> {
     if !from.is_dir() {
         return Err(IngestError::NotAFile(from.to_path_buf()));
@@ -614,47 +598,86 @@ fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), Inges
         println!("  network: none");
     }
     let source = SourceRoot::open(from)?;
+    let local = (!to.starts_with("s3://")).then(|| Path::new(to));
     let mut files = 0u64;
     let mut bytes = 0u64;
-    let local_target = !to.starts_with("s3://");
-    let (mut new, mut present, mut conflicting) = (0u64, 0u64, 0u64);
+    let (mut new, mut present) = (0u64, 0u64);
+    let mut conflicts: Vec<String> = Vec::new();
     walk_sorted(from, None, &mut |relative| {
         let full = from.join(relative);
         let len = source
             .metadata_nofollow(&full)
             .map(|meta| meta.len())
             .unwrap_or(0);
-        println!("  {relative}");
         files += 1;
         bytes += len;
-        if !local_target || albumen_ingest::is_copy_local_tombstone(relative) {
-            return WalkControl::Continue;
-        }
-        let existing = Path::new(to).join(relative);
-        if !existing.exists() {
-            new += 1;
-        } else if existing.is_file() && same_bytes(&existing, &full) {
-            present += 1;
-        } else {
-            conflicting += 1;
+        let status = match local {
+            Some(root) if !albumen_ingest::is_copy_local_tombstone(relative) => {
+                Some(plan_status(&source, &full, &root.join(relative), len))
+            }
+            _ => None,
+        };
+        match status {
+            Some(PlanStatus::Present) => {
+                println!("  present: {relative}");
+                present += 1;
+            }
+            Some(PlanStatus::Conflict) => {
+                println!("  conflict: {relative}");
+                conflicts.push(relative.to_string());
+            }
+            Some(PlanStatus::Place) => {
+                println!("  {relative}");
+                new += 1;
+            }
+            None => println!("  {relative}"),
         }
         WalkControl::Continue
     })?;
     println!("  files: {files}");
     println!("  bytes: {bytes}");
-    if local_target {
-        println!("would export {new} new, {present} already present and verified");
-        if conflicting > 0 {
-            println!(
-                "  conflicts: {conflicting} destination files differ from the library; --apply will refuse them"
-            );
+    match local {
+        Some(root) => {
+            println!("  already present: {present}");
+            println!("  conflicts: {}", conflicts.len());
+            println!("would export {new} new, {present} already present and verified");
+            if let Some(first) = conflicts.first() {
+                return Err(IngestError::AlreadyExists {
+                    filename: first.clone(),
+                    destination: root.join(first).display().to_string(),
+                });
+            }
         }
-    } else {
-        println!(
+        None => println!(
             "would export up to {files} files to {to}; the already-present count needs --apply, because a dry-run opens no network"
-        );
+        ),
     }
     Ok(())
+}
+
+enum PlanStatus {
+    Place,
+    Present,
+    Conflict,
+}
+
+/// Mirrors `DirectoryTree::place`: identical bytes are skipped, anything
+/// else already at the destination path would fail with `AlreadyExists`.
+/// Reads only; nothing at the destination is changed.
+fn plan_status(source: &SourceRoot, path: &Path, dest: &Path, source_len: u64) -> PlanStatus {
+    let Ok(meta) = std::fs::symlink_metadata(dest) else {
+        return PlanStatus::Place;
+    };
+    if !meta.is_file() || meta.len() != source_len {
+        return PlanStatus::Conflict;
+    }
+    let source_hash = source
+        .open_read(path)
+        .and_then(|file| albumen_ingest::sha256_reader(file, path));
+    match (albumen_ingest::sha256_file(dest), source_hash) {
+        (Ok(a), Ok(b)) if a == b => PlanStatus::Present,
+        _ => PlanStatus::Conflict,
+    }
 }
 
 fn manifest_is_jsonl(path: &Path) -> Result<bool, IngestError> {
