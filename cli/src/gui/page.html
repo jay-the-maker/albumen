@@ -33,7 +33,6 @@ select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:
 .badge{display:inline-flex;align-items:center;gap:8px;background:#e9f6ee;color:var(--ok);border:1px solid #bfe0cb;border-radius:22px;padding:6px 16px;font-weight:700;font-size:17px}
 .proof{margin-top:16px}.proof table{border-collapse:collapse;font-size:13px}.proof td{padding:4px 14px 4px 0;vertical-align:top}.proof td:first-child{color:var(--mute)}
 .proof code{word-break:break-all}a{color:var(--accent)}
-.close{margin-top:28px;font-size:19px;font-weight:600;color:var(--ok)}
 [hidden]{display:none!important}
 </style></head>
 <body>
@@ -65,7 +64,6 @@ select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:
 <pre class="summary" id="health-summary" hidden></pre>
 <div id="cards"></div>
 <pre class="summary" id="health-next" hidden></pre>
-<p class="close" id="close" hidden>Your originals, bit for bit, provably intact.</p>
 </section>
 <section id="proof" hidden>
 <h1>Proof</h1>
@@ -122,8 +120,7 @@ async function health(){const st=await j('/api/status');$('cards').innerHTML='';
   const cls={fresh:'s-fresh',stale:'s-stale',damaged:'s-damaged'}[d.state]||'s-none';c.className='card '+cls;
   const t=d.text.trimEnd();const i=t.indexOf(':');const w=document.createElement('span');w.className='w';w.textContent=t.slice(0,i+1);
   const pre=document.createElement('pre');pre.append(w,document.createTextNode(t.slice(i+1)));c.append(pre);$('cards').append(c);}
- $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ')+'   (exit '+st.exit+')';
- $('close').hidden=!st.destinations.some(d=>d.state=='fresh');}
+ $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ')+'   (exit '+st.exit+')';}
 $('go-verify').onclick=async()=>{const b=$('go-verify');b.disabled=true;$('verified').hidden=true;$('proof-box').hidden=true;$('verify-out').textContent='';
  const s=await job('verify',$('dest-v').value,()=>{});
  const md=(stdout(s).find(l=>/^proof: .*\.md$/.test(l))||'').slice(7);

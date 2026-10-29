@@ -58,7 +58,6 @@ fn demo_serves_page_and_four_honest_states() {
     let (code, page) = get(&addr, "/");
     assert_eq!(code, 200);
     assert!(page.contains("DEMO-ONLY"));
-    assert!(page.contains("Your originals, bit for bit, provably intact."));
     let (code, status) = get(&addr, "/api/status");
     assert_eq!(code, 200);
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
@@ -131,4 +130,22 @@ fn health_summary_and_next_match_the_cli_word_for_word() {
     assert_eq!(lines[lines.len() - 2], summary);
     assert_eq!(lines[lines.len() - 1], next);
     assert_eq!(status["exit"].as_i64(), out.status.code().map(i64::from));
+}
+
+/// The tagline overclaims on health, and the GUI has no exit-0-only screen
+/// that shows it, so it must appear nowhere: not on the page (all screens,
+/// health included) and not in any API response, whatever the exit code.
+#[test]
+fn tagline_is_never_shown_on_health_or_after_a_nonzero_exit() {
+    const TAGLINE: &str = "bit for bit, provably intact";
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (code, page) = get(&addr, "/");
+    assert_eq!(code, 200);
+    assert!(page.contains("<section id=\"health\""));
+    assert!(!page.contains(TAGLINE), "page shows the tagline");
+    let (_, status) = get(&addr, "/api/status");
+    let json: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_ne!(json["exit"].as_i64(), Some(0), "demo health exits non-zero");
+    assert!(!status.contains(TAGLINE), "health data carries the tagline");
 }
