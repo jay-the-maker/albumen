@@ -130,7 +130,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
         l[0].starts_with("ok: backup checked 2 hours ago (") && l[0].ends_with(" UTC)"),
         "{text}"
     );
-    assert_eq!(l[1], "12 items, all match your originals");
+    assert_eq!(l[1], "12 items, all match what was backed up");
     assert_eq!(l[2], p(&fresh));
     assert_plain_words(&text);
     assert_next_rules(code, &text);

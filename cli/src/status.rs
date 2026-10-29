@@ -298,7 +298,7 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
     Report {
         state: State::Ok,
         text: format!(
-            "ok: backup checked {} ({stamp})\n{} items, all match your originals\n{dest}\n{proof_line}",
+            "ok: backup checked {} ({stamp})\n{} items, all match what was backed up\n{dest}\n{proof_line}",
             relative_age(age),
             group_thousands(total)
         ),

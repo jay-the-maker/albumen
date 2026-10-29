@@ -178,3 +178,56 @@ fn demo_banner_and_verify_failure_copy_are_scoped_not_overclaimed() {
     assert!(status.contains("status only read the backup; your photos folder was not opened"));
     assert!(!status.contains("your originals were not touched"));
 }
+
+/// After a GUI backup, the ok card says what status checked: the copies match
+/// what was backed up. It does not claim anything about the originals.
+#[test]
+fn ok_card_says_match_what_was_backed_up_not_your_originals() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, status) = get(&addr, "/api/status");
+    let json: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let dest = json["destinations"][0]["dest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let enc: String = dest
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"/-._".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let (code, body) = request(
+        &addr,
+        &format!(
+            "POST /api/job?kind=backup&dest={enc} HTTP/1.1\r\nHost: {addr}\r\nX-Albumen: 1\r\nContent-Length: 0\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 200, "{body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let mut exit = serde_json::Value::Null;
+    for _ in 0..300 {
+        let (_, job) = get(&addr, &format!("/api/job?id={id}"));
+        exit = serde_json::from_str::<serde_json::Value>(&job).unwrap()["exit"].clone();
+        if !exit.is_null() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(exit.as_i64(), Some(0));
+    let (_, status) = get(&addr, "/api/status");
+    let json: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let card = json["destinations"][0]["text"].as_str().unwrap();
+    assert_eq!(json["destinations"][0]["state"], "ok", "{card}");
+    assert!(
+        card.contains("12 items, all match what was backed up"),
+        "{card}"
+    );
+    assert!(!status.contains("all match your originals"));
+}
