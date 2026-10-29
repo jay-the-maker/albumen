@@ -79,6 +79,16 @@ fn scan_hashes(manifest: &Path) -> Result<HashMap<String, String>, IngestError> 
     Ok(out)
 }
 
+/// Like `println!`, but a closed stdout (EPIPE, e.g. `| head -1` or the GUI
+/// demo started with nobody reading) is ignored instead of panicking. The
+/// exit code still reports the backup result.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 pub fn run(args: &BackupArgs<'_>) -> Result<(), IngestError> {
     if crate::is_remote(args.to) {
         return Err(IngestError::Usage {
@@ -105,16 +115,19 @@ pub fn run(args: &BackupArgs<'_>) -> Result<(), IngestError> {
     };
     let scanned = scan_tree_with(&source, &next, &options)?;
     dest::rename(&next, &previous)?;
-    println!(
+    say!(
         "scan: {} files, {} hashed, {} unchanged",
-        scanned.files, scanned.hashed, scanned.reused
+        scanned.files,
+        scanned.hashed,
+        scanned.reused
     );
 
     // 2. Resumable export.
     let report = crate::export_apply(args.from, args.to, &manifest)?;
-    println!(
+    say!(
         "export: {} copied, {} already there and verified",
-        report.copied, report.already_present
+        report.copied,
+        report.already_present
     );
 
     // 3. Verify DEST, and cross-check against the scan.
@@ -166,11 +179,11 @@ pub fn run(args: &BackupArgs<'_>) -> Result<(), IngestError> {
             drift,
         },
     )?;
-    println!("verify: {} items, {} problems", report.entries.len(), count);
-    println!("proof: {}", md.display());
-    println!("proof: {}", json.display());
+    say!("verify: {} items, {} problems", report.entries.len(), count);
+    say!("proof: {}", md.display());
+    say!("proof: {}", json.display());
     if count == 0 {
-        println!("backup ok: {}", args.to);
+        say!("backup ok: {}", args.to);
         Ok(())
     } else {
         Err(IngestError::ManifestDrift { count })

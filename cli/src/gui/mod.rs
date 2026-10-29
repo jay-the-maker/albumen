@@ -103,13 +103,18 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
         .map_err(|err| io_err(Path::new("127.0.0.1"), err))?
         .port();
     let url = format!("http://127.0.0.1:{port}/");
-    println!("albumen gui: {url}");
-    println!("  library: {}", config.library.display());
+    // The banner is best-effort: a closed stdout (`albumen gui | head -1`)
+    // returns EPIPE, which println! would turn into a panic. Ignore write
+    // errors and keep serving.
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "albumen gui: {url}");
+    let _ = writeln!(out, "  library: {}", config.library.display());
     for b in &config.backups {
-        println!("  backup: {b}");
+        let _ = writeln!(out, "  backup: {b}");
     }
-    println!("  Ctrl-C stops it.");
-    let _ = std::io::stdout().flush();
+    let _ = writeln!(out, "  Ctrl-C stops it.");
+    let _ = out.flush();
+    drop(out);
     if args.open {
         open_browser(&url);
     }
