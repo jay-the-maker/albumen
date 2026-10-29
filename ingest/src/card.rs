@@ -261,7 +261,7 @@ fn copy_renamed(
         }
         Ok(())
     })();
-    let _ = std::fs::remove_dir(&staging);
+    dest::remove_empty_dir_best_effort(&staging);
     if let Err(err) = result {
         for path in done.iter().rev() {
             dest::remove_file_best_effort(path);
