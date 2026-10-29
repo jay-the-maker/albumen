@@ -1,3 +1,7 @@
+Tip: 9e8e089 (changelog-release-notes-train3, step 26)
+No GitHub CI run yet; CI runs first when PRs open.
+After merge, run the scale workflow once with write_baseline.
+
 # Merge queue
 
 Snapshot taken 2026-10-29 at about 1:50 AM PDT against `main` at `4dad880`. Jay merges, in this order. Nothing here is merged, force-pushed, or deleted.
@@ -67,19 +71,20 @@ Every remote head below has an empty `git diff` against the locally gated tree, 
 | 19 | issue-28-card-import-train3 | 9167896 | issue-22-rclone-smb-train | as -train, plus a commit routing the staging-dir `remove_dir` through `dest::remove_empty_dir_best_effort` | green except MinIO (59s); check-dest-writes pass | [issue-22-rclone-smb-train...issue-28-card-import-train3](https://github.com/jay-the-maker/albumen/compare/issue-22-rclone-smb-train...issue-28-card-import-train3) | 7: `cli/src/main.rs`, `cli/tests/card.rs`, `ingest/src/card.rs`, `ingest/src/dest.rs`, `ingest/src/lib.rs`, … |
 | 20 | takeout-fidelity-train3 | 3b391fc | issue-28-card-import-train3 | same as -train | green except MinIO (56s); check-dest-writes pass | [issue-28-card-import-train3...takeout-fidelity-train3](https://github.com/jay-the-maker/albumen/compare/issue-28-card-import-train3...takeout-fidelity-train3) | 7: `cli/Cargo.toml`, `cli/src/main.rs`, `cli/tests/takeout_fidelity.rs`, `docs/takeout-fidelity.md`, … |
 | 21 | icloud-fidelity-train3 | 9c28a65 | takeout-fidelity-train3 | none (clean pick) | green except MinIO (55s); check-dest-writes pass | [takeout-fidelity-train3...icloud-fidelity-train3](https://github.com/jay-the-maker/albumen/compare/takeout-fidelity-train3...icloud-fidelity-train3) | 3: `docs/icloud-report.md`, `ingest/src/icloud.rs`, `ingest/tests/synthetic_live_photo.rs` |
-| 22 | dry-run-all-conflicts-train3 | a0be1f7 | merge-queue-train3 | none (new behaviour, one commit) | green except MinIO (43s); check-dest-writes pass | [merge-queue-train3...dry-run-all-conflicts-train3](https://github.com/jay-the-maker/albumen/compare/merge-queue-train3...dry-run-all-conflicts-train3) | 3: `cli/src/main.rs`, `cli/tests/export_rerun.rs`, `docs/merge-queue.md` |
+| 22 | merge-queue-train3 | 7cc5098 | icloud-fidelity-train3 | none (docs only: adds `docs/merge-queue.md`) | green except MinIO (43s); check-dest-writes pass | [icloud-fidelity-train3...merge-queue-train3](https://github.com/jay-the-maker/albumen/compare/icloud-fidelity-train3...merge-queue-train3) | 1: `docs/merge-queue.md` |
+| 23 | dry-run-all-conflicts-train3 | a0be1f7 | merge-queue-train3 | none (new behaviour, one commit) | green except MinIO (43s); check-dest-writes pass | [merge-queue-train3...dry-run-all-conflicts-train3](https://github.com/jay-the-maker/albumen/compare/merge-queue-train3...dry-run-all-conflicts-train3) | 3: `cli/src/main.rs`, `cli/tests/export_rerun.rs`, `docs/merge-queue.md` |
 
 Notes:
 
-- train3 (2026-10-29 PDT): `scripts/check-dest-writes.py` failed from step 19 because `ingest/src/card.rs:264` called `std::fs::remove_dir` directly. The fix is now at step 19 (issue-28-card-import-train3 = issue-28-card-import-train plus one commit), and steps 20–25 were re-stacked as `-train3` branches (merge-queue-train3 is 7cc5098, between 21 and 22). The old `-train` branches for steps 19–22 and the old item 3–5 branches are kept, not deleted; merge the `-train3` ones. All 8 new heads were gated and pass check-dest-writes locally. Steps 1–18 are unchanged and already passed it.
+- train3 (2026-10-29 PDT): `scripts/check-dest-writes.py` failed from step 19 because `ingest/src/card.rs:264` called `std::fs::remove_dir` directly. The fix is now at step 19 (issue-28-card-import-train3 = issue-28-card-import-train plus one commit), and steps 20–26 were re-stacked as `-train3` branches (merge-queue-train3 7cc5098 is now its own step 22). The old `-train` branches for steps 19–22 and the old item 3–5 branches are kept, not deleted; merge the `-train3` ones. All 8 new heads were gated and pass check-dest-writes locally. Steps 1–18 are unchanged and already passed it.
 - The card.rs `remove_dir` only ever targets `<library>/.albumen-card-staging`, a directory Albumen creates; it fails if the directory is not empty. It is not on main (4dad880). It never touches card or user data.
-- merge-queue-train (9512d88, now merge-queue-train3 7cc5098) only adds this doc on top of step 21. Step 22 sits on it.
-- Conflicts (Product Lead decision, step 22): for a local target, both the dry run and `--apply` list every conflict as `  conflict: <path>`, print `N conflicts, nothing written` and exit 3. `--apply` checks first and writes nothing: no files and no manifest. Tested by `every_conflict_is_listed_and_nothing_is_written_in_dry_run_and_apply` (2 conflicts and 1 identical file).
-- Re-gate 2026-10-29 PDT: all 23 remote heads (steps 1–22 and merge-queue-train) re-gated from scratch in one working copy with a fresh target dir. Every step is green except the MinIO test; no result changed. Test seconds: 116 (cold build), 24, 25, 24, 42, 26, 29, 27, 26, 25, 27, 26, 39, 38, 40, 40, 48, 48, 48, 51, 52, 43 (merge-queue-train), 43. Passing tests rise from 145 at step 1 to 190 at step 22.
+- Step 22, merge-queue-train3 (7cc5098), only adds this doc on top of step 21. Step 23 sits on it. The train now has 26 steps: 1–23 here and 24–26 stacked below.
+- Conflicts (Product Lead decision, step 23): for a local target, both the dry run and `--apply` list every conflict as `  conflict: <path>`, print `N conflicts, nothing written` and exit 3. `--apply` checks first and writes nothing: no files and no manifest. Tested by `every_conflict_is_listed_and_nothing_is_written_in_dry_run_and_apply` (2 conflicts and 1 identical file).
+- Re-gate 2026-10-29 PDT: all 23 remote heads (old numbering: steps 1–22 and merge-queue-train; today's steps 1–21, 22 and 23) re-gated from scratch in one working copy with a fresh target dir. Every step is green except the MinIO test; no result changed. Test seconds: 116 (cold build), 24, 25, 24, 42, 26, 29, 27, 26, 25, 27, 26, 39, 38, 40, 40, 48, 48, 48, 51, 52, 43 (merge-queue-train), 43. Passing tests rise from 145 at step 1 to 190 at old step 22 (today's step 23).
 - The original issue-28-card-import branch (611c403) still fails check-dest-writes; use the train3 step instead.
-- issue-40 versus export-rerun: the dry run now prints `  present: X`, `  conflict: X` or `  X` for each file, and it skips tombstones. For local targets it then prints `  already present: P`, `  conflicts: C` and `would export N new, P already present and verified`. On the first conflict it exits 3 (`IngestError::AlreadyExists`), which matches exit-codes. S3 targets keep the "would export up to" message. `same_bytes` was removed because nothing used it. `dry_run_names_a_conflict_that_apply_refuses` now asserts a non-zero exit. README Try it shows `already present: 0` and `conflicts: 0`.
+- issue-40 (steps 16 and 23): for a local target, the dry run lists every conflict as `  conflict: <path>`, prints `N conflicts, nothing written` and exits 3. `--apply` does the same: it checks every file first, lists all conflicts, prints `N conflicts, nothing written`, exits 3 and writes nothing (no files, no manifest). With no conflicts the dry run prints `would export N new, P already present and verified` and exits 0. Tombstones are skipped. S3 targets keep the "would export up to" message. Test: `every_conflict_is_listed_and_nothing_is_written_in_dry_run_and_apply`.
 - issue-42-sidecar-names is not in the train. It is blocked on Jay's 4 fixture images.
-- Two stray remote branches are left over from a push race. They are unused and Jay can delete them: `readme-quickstart-timed-train` (894090a) and `issue-40-dry-run-conflicts-train` (593544a). The `-train2` names replace them.
+- Two stray remote branches are left over from a push race; see "Do NOT merge".
 - Remote heads differ from local SHAs because they were pushed through the GitHub API. The trees are identical.
 
 ## Stacked on the train (items 3–5)
@@ -88,12 +93,30 @@ Each branch is one step on the one before it, all on the train3 tip. All green e
 
 | # | Branch | Head | Parent | Conflicts resolved | Gate (test secs) | Compare | Files |
 |---|---|---|---|---|---|---|---|
-| 23 | switch-from-google-e2e-train3 | ff3551e | dry-run-all-conflicts-train3 | none | green except MinIO (44s); check-dest-writes pass | [dry-run-all-conflicts-train3...switch-from-google-e2e-train3](https://github.com/jay-the-maker/albumen/compare/dry-run-all-conflicts-train3...switch-from-google-e2e-train3) | 1: `cli/tests/switch_from_google.rs` |
-| 24 | no-network-audit-fidelity-proof-train3 | 2d7e15b | switch-from-google-e2e-train3 | none; card.rs/dest.rs now come from step 19 | green except MinIO (42s); check-dest-writes pass | [switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3](https://github.com/jay-the-maker/albumen/compare/switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3) | 4: `.github/workflows/ci.yml`, `docs/test-ladder.md`, `scripts/check-fidelity-proof-strace.py`, `scripts/fidelity-proof-no-network.sh` |
-| 25 | changelog-release-notes-train3 | 9e8e089 | no-network-audit-fidelity-proof-train3 | none | green except MinIO (41s); check-dest-writes pass | [no-network-audit-fidelity-proof-train3...changelog-release-notes-train3](https://github.com/jay-the-maker/albumen/compare/no-network-audit-fidelity-proof-train3...changelog-release-notes-train3) | 2: `CHANGELOG.md`, `docs/release-notes-draft.md` |
+| 24 | switch-from-google-e2e-train3 | ff3551e | dry-run-all-conflicts-train3 | none | green except MinIO (44s); check-dest-writes pass | [dry-run-all-conflicts-train3...switch-from-google-e2e-train3](https://github.com/jay-the-maker/albumen/compare/dry-run-all-conflicts-train3...switch-from-google-e2e-train3) | 1: `cli/tests/switch_from_google.rs` |
+| 25 | no-network-audit-fidelity-proof-train3 | 2d7e15b | switch-from-google-e2e-train3 | none; card.rs/dest.rs now come from step 19 | green except MinIO (42s); check-dest-writes pass | [switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3](https://github.com/jay-the-maker/albumen/compare/switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3) | 4: `.github/workflows/ci.yml`, `docs/test-ladder.md`, `scripts/check-fidelity-proof-strace.py`, `scripts/fidelity-proof-no-network.sh` |
+| 26 | changelog-release-notes-train3 | 9e8e089 | no-network-audit-fidelity-proof-train3 | none | green except MinIO (41s); check-dest-writes pass | [no-network-audit-fidelity-proof-train3...changelog-release-notes-train3](https://github.com/jay-the-maker/albumen/compare/no-network-audit-fidelity-proof-train3...changelog-release-notes-train3) | 2: `CHANGELOG.md`, `docs/release-notes-draft.md` |
 
-- Step 24's strace audit: first real run in CI. It has not run end to end yet, because the build box has no strace. Its first real run will be in CI. The parser self-test passes, and a fake strace shim was used to check the pipeline. The scripts are mode 100644 on the remote (the API cannot set the exec bit), so CI calls them with `bash`.
-- Step 25 adds no tag and no release.
+- Step 25's strace audit: first real run in CI. It has not run end to end yet, because the build box has no strace. Its first real run will be in CI. The parser self-test passes, and a fake strace shim was used to check the pipeline. The scripts are mode 100644 on the remote (the API cannot set the exec bit), so CI calls them with `bash`.
+- Step 26 adds no tag and no release.
+
+## Do NOT merge
+
+All of these are kept (nothing deleted). Merge only the 26 steps above, in order.
+
+| Branch | Head | Reason |
+|---|---|---|
+| issue-28-card-import-train | dfdc669 | Replaced by step 19 issue-28-card-import-train3; fails check-dest-writes (`ingest/src/card.rs:264` `remove_dir`). |
+| takeout-fidelity-train | 43a30a4 | Replaced by step 20 takeout-fidelity-train3; sits on the failing step 19. |
+| icloud-fidelity-train | 9ff189c | Replaced by step 21 icloud-fidelity-train3; sits on the failing step 19. |
+| merge-queue-train | 9512d88 | Replaced by step 22 merge-queue-train3; sits on the old icloud-fidelity-train. |
+| dry-run-all-conflicts-train | b0f8be1 | Replaced by step 23 dry-run-all-conflicts-train3; fails check-dest-writes through step 19. |
+| switch-from-google-e2e | 120c6a5 | Replaced by step 24 switch-from-google-e2e-train3; stacked on the old train. |
+| no-network-audit-fidelity-proof | 62318ee | Replaced by step 25 no-network-audit-fidelity-proof-train3; stacked on the old train. |
+| changelog-release-notes | 7cd06ed | Replaced by step 26 changelog-release-notes-train3; stacked on the old train. |
+| readme-quickstart-timed-train | 894090a | Stray from a push race; same head as step 1, replaced by readme-quickstart-timed-train2 (step 3). |
+| issue-40-dry-run-conflicts-train | 593544a | Stray from a push race; replaced by issue-40-dry-run-conflicts-train2 (step 16). |
+| issue-28-card-import | 611c403 | Original branch; fails check-dest-writes (`std::fs::remove_dir` in card.rs). Use step 19. |
 
 ## Superseded branches
 
