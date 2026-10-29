@@ -11,7 +11,10 @@ under --workdir (ALBUMEN_HOME too), which must not exist yet.
 and fails when scan or export is more than 20 percent slower per 1,000
 files. While that entry has "placeholder": true, it prints
 "BASELINE PLACEHOLDER: regression check not enforced" (as a ::warning::
-annotation on GitHub Actions) and does not compare. --write prints the entry to put in the baseline.
+annotation on GitHub Actions) and does not compare, until a real baseline has
+been recorded: --baseline-out sets the top-level
+"scan_export_real_baseline_recorded" marker, and once the file carries it a
+placeholder scan_export fails --check instead of warning. --write prints the entry to put in the baseline.
 --baseline-out writes a whole baseline file with this run as scan_export, the
 placeholder removed and the runner and commit SHA recorded; pull-request CI
 uploads it as the "baseline" artifact. --keep leaves the
@@ -25,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -127,6 +131,19 @@ def self_test():
     entry = baseline_entry(run, "ubuntu-24.04", "abc123")
     assert "placeholder" not in entry and entry["runner"] == "ubuntu-24.04" and entry["commit"] == "abc123"
     assert baseline_problems(entry, run) == []
+    # Follow-up: after the real recording, a placeholder fails the check.
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "baseline.json")
+        data = write_baseline_file(out, {"scan_export": {"placeholder": True}}, entry)
+        assert data[REAL_MARKER] == {"runner": "ubuntu-24.04", "commit": "abc123"}
+        with open(out, encoding="utf-8") as f:
+            assert json.load(f)[REAL_MARKER]["commit"] == "abc123"
+    placeholder = {"placeholder": True, "scan_s_per_1k": 1.0, "export_s_per_1k": 1.0}
+    assert baseline_problems(placeholder, run, real_recorded=False) is None
+    failed = baseline_problems(placeholder, run, real_recorded=True)
+    assert failed and "placeholder" in failed[0]
+    assert baseline_problems(entry, run, real_recorded=True) == []
+    assert len(baseline_problems(entry, {"scan_s_per_1k": 0.61, "export_s_per_1k": 0.7}, True)) == 1
     expect_exit(lambda: baseline_entry(run, "", "abc123"), "runner name")
     print("self-test ok")
 
@@ -142,19 +159,34 @@ def baseline_entry(run, runner, commit):
     return entry
 
 
+# Top-level marker set by the first real recording (write_baseline). It is
+# sticky: once a real scan_export baseline has existed, a placeholder entry
+# means the real numbers were lost, and --check fails instead of warning.
+REAL_MARKER = "scan_export_real_baseline_recorded"
+
+
 def write_baseline_file(path, current, entry):
     """Copy of the current baseline file with scan_export replaced by entry."""
     data = dict(current)
     data["scan_export"] = entry
+    data[REAL_MARKER] = {"runner": entry["runner"], "commit": entry["commit"]}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
     return data
 
 
-def baseline_problems(base, run):
-    """None while the baseline is a placeholder (warn only), else the regressions."""
+def baseline_problems(base, run, real_recorded=False):
+    """Regressions against base, or None to warn only.
+
+    A placeholder warns (None) until a real baseline has been recorded
+    (real_recorded, from the REAL_MARKER in the file). After that a
+    placeholder is itself a failure: the 20 percent check cannot be skipped
+    by putting the placeholder back."""
     if base.get("placeholder"):
+        if real_recorded:
+            return ["scan_export is a placeholder, but a real baseline was recorded "
+                    "before; restore the recorded entry (the baseline artifact) instead"]
         return None
     problems = []
     for key in ("scan_s_per_1k", "export_s_per_1k"):
@@ -245,10 +277,11 @@ def main():
             print(f"wrote {a.baseline_out}", file=sys.stderr)
         if a.check:
             with open(a.baseline, encoding="utf-8") as f:
-                base = json.load(f).get("scan_export")
+                current = json.load(f)
+            base = current.get("scan_export")
             if base is None:
                 raise SystemExit(f"{a.baseline} has no scan_export entry")
-            problems = baseline_problems(base, run)
+            problems = baseline_problems(base, run, real_recorded=bool(current.get(REAL_MARKER)))
             if problems is None:
                 line = "BASELINE PLACEHOLDER: regression check not enforced"
                 print(line)

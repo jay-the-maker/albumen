@@ -239,7 +239,7 @@ Do not set `ALBUMEN_BENCH_ITEMS` in CI. The workflow uses the default 128.
 
 | Leg | When it runs | Budget | Gate |
 | --- | --- | --- | --- |
-| 100,000 files | Every pull request that touches `ingest/`, `cli/`, the script, the workflow, or the baseline; weekly cron | `scan_s_per_1k` and `export_s_per_1k` no more than 20 percent over `bench/baseline.json` | Warning only while the baseline has `"placeholder": true` |
+| 100,000 files | Every pull request that touches `ingest/`, `cli/`, the script, the workflow, or the baseline; weekly cron | `scan_s_per_1k` and `export_s_per_1k` no more than 20 percent over `bench/baseline.json` | Warning only while the baseline has `"placeholder": true` and no real baseline was ever recorded; after that a placeholder fails |
 | 380,000 files | Weekly cron, `workflow_dispatch` | Same per-1,000-file budget; peak RSS reported | Same |
 | 1,000,000 files | Weekly cron only (CI only, never on a dev box) | Same per-1,000-file budget; peak RSS reported | Same |
 | Cold start, search p50/p95, peak memory at 380,000 items | `library scale` workflow | Cold start ≤ 1.5 s, search p95 ≤ 200 ms | Report only; see [Search index at 380,000 items](#search-index-at-380000-items) |
@@ -264,6 +264,15 @@ uploads a `baseline` artifact: a copy of `bench/baseline.json` whose
 workflow reaches the default branch. Nothing commits it automatically; copy
 the artifact over `bench/baseline.json` in a normal commit to start enforcing
 the 20 percent check. Until then the placeholder only warns.
+
+The recorded file also carries a top-level
+`"scan_export_real_baseline_recorded": {"runner": ..., "commit": ...}` marker.
+It is the follow-up switch: once `bench/baseline.json` has it, a
+`"placeholder": true` scan_export entry fails `--check` (red) instead of
+warning, so the 20 percent check cannot be turned off by restoring the
+placeholder. Before Jay's first `write_baseline` run there is no marker and
+the placeholder stays a warning. `scripts/scan-export-scale.py --self-test`
+covers both cases.
 
 ## Takeout import, 100,000 items
 
