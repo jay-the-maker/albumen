@@ -43,8 +43,9 @@ pub use discover::{discover, Asset, AssetFile, Role};
 pub use error::IngestError;
 pub use exiftool::exiftool_command;
 pub use export::{
-    export_tree, format_manifest, parse_manifest, verify_tree, walk_sorted, write_manifest,
-    DirectoryTree, ExportDest, ManifestEntry, Placed, WalkControl,
+    export_tree, export_tree_counted, format_manifest, is_copy_local_tombstone, parse_manifest,
+    verify_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest, ExportReport,
+    ManifestEntry, Placed, WalkControl,
 };
 pub use family_export::{export_family, plan_family_export, FamilyExportPlan, FamilyExportReport};
 pub use family_source::FamilySource;
