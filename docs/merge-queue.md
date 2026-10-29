@@ -1,4 +1,4 @@
-Tip: 513579a (switch-from-apple-e2e, step 27)
+Tip: bccc7ea (audit-tree-hash-proof-path, step 28)
 No GitHub CI run yet; CI runs first when PRs open.
 After merge, run the scale workflow once with write_baseline.
 
@@ -97,9 +97,11 @@ Each branch is one step on the one before it, all on the train3 tip. All green e
 | 25 | no-network-audit-fidelity-proof-train3 | 2d7e15b | switch-from-google-e2e-train3 | none; card.rs/dest.rs now come from step 19 | green except MinIO (42s); check-dest-writes pass | [switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3](https://github.com/jay-the-maker/albumen/compare/switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3) | 4: `.github/workflows/ci.yml`, `docs/test-ladder.md`, `scripts/check-fidelity-proof-strace.py`, `scripts/fidelity-proof-no-network.sh` |
 | 26 | changelog-release-notes-train3 | 9e8e089 | no-network-audit-fidelity-proof-train3 | none | green except MinIO (41s); check-dest-writes pass | [no-network-audit-fidelity-proof-train3...changelog-release-notes-train3](https://github.com/jay-the-maker/albumen/compare/no-network-audit-fidelity-proof-train3...changelog-release-notes-train3) | 2: `CHANGELOG.md`, `docs/release-notes-draft.md` |
 | 27 | switch-from-apple-e2e | 513579a | changelog-release-notes-train3 | none (new test plus refusal exit-code fix) | green except MinIO (56s, 192 passed; the e2e test runs in about 2s); check-dest-writes pass | [changelog-release-notes-train3...switch-from-apple-e2e](https://github.com/jay-the-maker/albumen/compare/changelog-release-notes-train3...switch-from-apple-e2e) | 3: `cli/tests/switch_from_apple.rs`, `ingest/src/icloud.rs`, `ingest/src/takeout.rs` |
+| 28 | audit-tree-hash-proof-path | bccc7ea | switch-from-apple-e2e | none (audit script and its checker only) | green except MinIO (67s, 192 passed); check-dest-writes pass; checker self-test ok; end-to-end run with a stub strace ok, and a stray write and a tampered source both fail | [switch-from-apple-e2e...audit-tree-hash-proof-path](https://github.com/jay-the-maker/albumen/compare/switch-from-apple-e2e...audit-tree-hash-proof-path) | 2: `scripts/check-fidelity-proof-strace.py`, `scripts/fidelity-proof-no-network.sh` |
 
 - Step 25's strace audit: first real run in CI. It has not run end to end yet, because the build box has no strace. Its first real run will be in CI. The parser self-test passes, and a fake strace shim was used to check the pipeline. The scripts are mode 100644 on the remote (the API cannot set the exec bit), so CI calls them with `bash`.
 - Step 26 adds no tag and no release.
+- Step 28 hashes the Takeout, library and export trees (path, size, sha256, mode) before and after each audited command. It allows only fidelity.jsonl and exactly `<path>.md`/`<path>.json` for a non-default --proof path in the work dir, ALBUMEN_HOME and a private TMPDIR. The strace reader adds fd-based writes, relative paths and AT_FDCWD. Sockets stay strict: AF_UNIX also fails, because an exemption needs fd family tracking. strace has not run for real yet; CI runs it first.
 - Step 27 (item 6, switch from Apple): synthetic Photos library (generated Live Photo pair, a JPEG with an XMP sidecar, an edited render) through `import-icloud` dry run and `--apply`, content-id pairing in the report (`pair_basis` content_id 2), export, export re-run (0 new), `verify-manifest --proof` (exit 0), proof again (exit 3), tamper (exit 1, drift 1). It also asserts exit 2 for a missing `--from`, exit 3 for a library inside the source and for an existing report, bit-exact sources, and under 120 s.
 - Step 27 changes import exit codes 4→3 for overlap refusals: `import-icloud` and `import-takeout` now exit 3 (not 4) when the destination or report overlaps the source or library.
 - Step 27 also fixes a bug from #51 that its exit-code assertions found: `import-icloud` and `import-takeout` reported an overlapping destination or report as a storage failure (exit 4, with the hint "check the storage credentials and network"). They now return `Refused` (exit 3), as the README documents. An existing iCloud report is now `AlreadyExists` (exit 3), as takeout already did. The two `in_place_destination_is_refused` unit tests now assert `Refused` and exit 3.
@@ -107,7 +109,7 @@ Each branch is one step on the one before it, all on the train3 tip. All green e
 
 ## Do NOT merge
 
-All of these are kept (nothing deleted). Merge only the 26 train steps above in order, then step 27.
+All of these are kept (nothing deleted). Merge only the 26 train steps above in order, then steps 27 and 28.
 
 | Branch | Head | Reason |
 |---|---|---|
