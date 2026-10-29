@@ -87,7 +87,7 @@ Notes:
 - Two stray remote branches are left over from a push race; see "Do NOT merge".
 - Remote heads differ from local SHAs because they were pushed through the GitHub API. The trees are identical.
 
-## Stacked on the train (items 3–5)
+## Stacked on the train (items 3–6)
 
 Each branch is one step on the one before it, all on the train3 tip. All green except the MinIO test.
 
@@ -96,13 +96,17 @@ Each branch is one step on the one before it, all on the train3 tip. All green e
 | 24 | switch-from-google-e2e-train3 | ff3551e | dry-run-all-conflicts-train3 | none | green except MinIO (44s); check-dest-writes pass | [dry-run-all-conflicts-train3...switch-from-google-e2e-train3](https://github.com/jay-the-maker/albumen/compare/dry-run-all-conflicts-train3...switch-from-google-e2e-train3) | 1: `cli/tests/switch_from_google.rs` |
 | 25 | no-network-audit-fidelity-proof-train3 | 2d7e15b | switch-from-google-e2e-train3 | none; card.rs/dest.rs now come from step 19 | green except MinIO (42s); check-dest-writes pass | [switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3](https://github.com/jay-the-maker/albumen/compare/switch-from-google-e2e-train3...no-network-audit-fidelity-proof-train3) | 4: `.github/workflows/ci.yml`, `docs/test-ladder.md`, `scripts/check-fidelity-proof-strace.py`, `scripts/fidelity-proof-no-network.sh` |
 | 26 | changelog-release-notes-train3 | 9e8e089 | no-network-audit-fidelity-proof-train3 | none | green except MinIO (41s); check-dest-writes pass | [no-network-audit-fidelity-proof-train3...changelog-release-notes-train3](https://github.com/jay-the-maker/albumen/compare/no-network-audit-fidelity-proof-train3...changelog-release-notes-train3) | 2: `CHANGELOG.md`, `docs/release-notes-draft.md` |
+| 27 | switch-from-apple-e2e | 513579a | changelog-release-notes-train3 | none (new test plus refusal exit-code fix) | green except MinIO (56s, 192 passed; the e2e test runs in about 2s); check-dest-writes pass | [changelog-release-notes-train3...switch-from-apple-e2e](https://github.com/jay-the-maker/albumen/compare/changelog-release-notes-train3...switch-from-apple-e2e) | 3: `cli/tests/switch_from_apple.rs`, `ingest/src/icloud.rs`, `ingest/src/takeout.rs` |
 
 - Step 25's strace audit: first real run in CI. It has not run end to end yet, because the build box has no strace. Its first real run will be in CI. The parser self-test passes, and a fake strace shim was used to check the pipeline. The scripts are mode 100644 on the remote (the API cannot set the exec bit), so CI calls them with `bash`.
 - Step 26 adds no tag and no release.
+- Step 27 (item 6, switch from Apple): synthetic Photos library (generated Live Photo pair, a JPEG with an XMP sidecar, an edited render) through `import-icloud` dry run and `--apply`, content-id pairing in the report (`pair_basis` content_id 2), export, export re-run (0 new), `verify-manifest --proof` (exit 0), proof again (exit 3), tamper (exit 1, drift 1). It also asserts exit 2 for a missing `--from`, exit 3 for a library inside the source and for an existing report, bit-exact sources, and under 120 s.
+- Step 27 also fixes a bug from #51 that its exit-code assertions found: `import-icloud` and `import-takeout` reported an overlapping destination or report as a storage failure (exit 4, with the hint "check the storage credentials and network"). They now return `Refused` (exit 3), as the README documents. An existing iCloud report is now `AlreadyExists` (exit 3), as takeout already did. The two `in_place_destination_is_refused` unit tests now assert `Refused` and exit 3.
+- mcp and receive suites (`cargo test --locked -p albumen-mcp -p albumen-receive --all-targets`), 2026-10-29 PDT: steps 24 ff3551e (21s), 25 2d7e15b (6s), 26 9e8e089, the train3 tip (7s), and 27 513579a (17s). 72 passed on each, no failures, so no fix branch was needed.
 
 ## Do NOT merge
 
-All of these are kept (nothing deleted). Merge only the 26 steps above, in order.
+All of these are kept (nothing deleted). Merge only the 26 train steps above in order, then step 27.
 
 | Branch | Head | Reason |
 |---|---|---|
