@@ -2160,22 +2160,21 @@ fn refuse_layout(source_root: &Path, to: &Path, report: &Path) -> Result<(), Ing
     let dest = normalize_path(to)?;
     let report_path = normalize_path(report)?;
     if dest.starts_with(&source) || source.starts_with(&dest) {
-        return Err(IngestError::store(
-            "takeout",
-            dest.display().to_string(),
-            format!(
+        return Err(IngestError::Refused {
+            message: format!(
                 "refusing to extract in place: destination {} overlaps archive directory {}",
                 dest.display(),
                 source.display()
             ),
-        ));
+        });
     }
     if report_path.starts_with(&source) || report_path.starts_with(&dest) {
-        return Err(IngestError::store(
-            "takeout",
-            report_path.display().to_string(),
-            "reconciliation report must be outside the archives and the library",
-        ));
+        return Err(IngestError::Refused {
+            message: format!(
+                "reconciliation report {} must be outside the archives and the library",
+                report_path.display()
+            ),
+        });
     }
     if report.exists() {
         return Err(IngestError::AlreadyExists {
@@ -2972,7 +2971,8 @@ mod tests {
         );
         let err =
             import_takeout(&from, &from.join("out"), &tmp.path().join("report.jsonl")).unwrap_err();
-        assert!(matches!(err, IngestError::Store { .. }));
+        assert!(matches!(err, IngestError::Refused { .. }), "{err}");
+        assert_eq!(err.exit_code(), 3, "{err}");
         assert!(!from.join("out").exists());
         assert!(!from.join("Takeout").exists());
     }

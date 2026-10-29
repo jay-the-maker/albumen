@@ -2053,22 +2053,30 @@ fn refuse_layout(source_root: &Path, to: &Path, report: &Path) -> Result<(), Ing
     let dest = normalize_path(to)?;
     let report_path = normalize_path(report)?;
     if dest.starts_with(&source) || source.starts_with(&dest) {
-        return Err(IngestError::store(
-            "icloud",
-            dest.display().to_string(),
-            format!(
+        return Err(IngestError::Refused {
+            message: format!(
                 "refusing to import in place: destination {} overlaps source {}",
                 dest.display(),
                 source.display()
             ),
-        ));
+        });
     }
-    if report_path.starts_with(&source) || report_path.starts_with(&dest) || report.exists() {
-        return Err(IngestError::store(
-            "icloud",
-            report.display().to_string(),
-            "reconciliation report must be a new file outside the source and the library",
-        ));
+    if report_path.starts_with(&source) || report_path.starts_with(&dest) {
+        return Err(IngestError::Refused {
+            message: format!(
+                "reconciliation report {} must be a new file outside the source and the library",
+                report.display()
+            ),
+        });
+    }
+    if report.exists() {
+        return Err(IngestError::AlreadyExists {
+            filename: report
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| report.display().to_string()),
+            destination: report.display().to_string(),
+        });
     }
     Ok(())
 }
@@ -2465,7 +2473,8 @@ mod tests {
         write_stamped(&from.join("IMG_0001.HEIC"), b"kept");
         let err =
             import_icloud(&from, &from.join("out"), &tmp.path().join("report.jsonl")).unwrap_err();
-        assert!(matches!(err, IngestError::Store { .. }), "{err}");
+        assert!(matches!(err, IngestError::Refused { .. }), "{err}");
+        assert_eq!(err.exit_code(), 3, "{err}");
         assert!(!from.join("out").exists());
     }
 
