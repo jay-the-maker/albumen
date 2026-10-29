@@ -144,6 +144,11 @@ pub fn remove_file(path: &Path) -> Result<(), IngestError> {
     fs::remove_file(&opened).map_err(|err| IngestError::io(path, err))
 }
 
+/// Removes an empty directory, ignoring any error (for example, not empty).
+pub fn remove_empty_dir_best_effort(path: &Path) {
+    let _ = fs::remove_dir(opened(path));
+}
+
 pub fn remove_file_best_effort(path: &Path) {
     let _ = fs::remove_file(opened(path));
 }
