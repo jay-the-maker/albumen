@@ -38,6 +38,9 @@ Regenerating with different tool versions will not be bit-identical. Treat the c
 | `aae/IMG_0008.jpg` | JPEG still paired with an Apple Photos edit sidecar. |
 | `aae/IMG_0008.aae` | XML property list of non-destructive adjustments (contrast and brightness). ExifTool reads it as `FileType: AAE`. Discovery must copy it with the JPEG. |
 | `ultra-hdr/IMG_0009.jpg` | Synthetic Ultra HDR JPEG. It contains a primary JPEG, a synthetic RGB ICC profile written by `assemble.py` (not a vendor profile), XMP in the `hdrgm` gain-map namespace, and a CIPA MPF segment. The second MPF image is a 32×24 grayscale gain-map JPEG, flagged as a dependent child. This is not an Apple HEIC auxiliary gain map: libheif's encoder cannot write one. |
+| `sidecar-names/IMG_0012.JPG` + `IMG_0012.JPG.xmp` | Full-name sidecar (`{file}.xmp`). Copies of committed fixtures, rewritten by `scripts/write-sidecar-names.sh` (ExifTool 13.59). No GPS. |
+| `sidecar-names/IMG_0013.jpg` + `IMG_0013.XMP` | Uppercase `.XMP` extension on a stem sidecar. No GPS. |
+| `sidecar-names/IMG_0014.dng` + `IMG_0014.jpg` + `IMG_0014.xmp` | XMP sidecar beside a RAW+JPEG pair. The JPEG copy has its GPS removed. |
 
 ## Live Photo note
 
@@ -57,6 +60,13 @@ c724675f291a91aa073d19ef830d58ff33cb9b8f3fe2511fcbec91d849f0e21b  iptc/IMG_0011.
 e3cad4aef31eb49414cbffb98851831265a5d6729438a6efb57a30c3624fa8cc  motion-photo/IMG_0007.jpg
 0ff3550a6267b189a73acb04833f73b7cd3235564dbcf6d2d10a080c78cb9ebf  raw-jpeg/IMG_0003.dng
 f58521ed98a89e7a1348d49bb01b6f3a6b83151e233349153c089bb0f5c73a77  raw-jpeg/IMG_0003.jpg
+0b1e16e07482d8acd29b1c7f1721bd4399743151b1eb87ab238c741cd231efa1  sidecar-names/IMG_0012.JPG
+9ba52ae3185a7eb9c70397a68e8aa320700625f0a58f1026724def7464ee27a0  sidecar-names/IMG_0012.JPG.xmp
+ef818675611901ddfac0f5a2c6a5e23ab7cd887c7f837de7d21cc95e9f5e40cc  sidecar-names/IMG_0013.XMP
+d6000718b1e3e9ef8a431e23bad7ac5ae3167ec615be3d064072d8ccea928ae2  sidecar-names/IMG_0013.jpg
+80e4fc60177a4481584ad1b9b57295c0108643cfa254abe1817c7130e8fd638d  sidecar-names/IMG_0014.dng
+5d23f1799b153735a92e0d511fc947817fb372c6d815830328fd039eba1b3f3f  sidecar-names/IMG_0014.jpg
+e7fbd66300a67f20f4b14e03fa832db62ad91ce5051c63f8927ed1188a3a978d  sidecar-names/IMG_0014.xmp
 daaacfd6ead62f84f2c479beb04cfd2ccf503ad7269ce933654b236d81a823cc  ultra-hdr/IMG_0009.jpg
 c76823b9d3f090fff4291933e3c5d8a30481b1c8b02e4bfa349b16471d2c66cf  video/IMG_0006.mp4
 e29920229ff0be0024a475563406d9118ba852aac8c0eb2fd7fd089d475ed3fc  xmp/IMG_0004.jpg

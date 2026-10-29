@@ -54,6 +54,21 @@
       "id": "ultra-hdr",
       "primary": "ultra-hdr/IMG_0009.jpg",
       "companions": []
+    },
+    {
+      "id": "sidecar-full-name",
+      "primary": "sidecar-names/IMG_0012.JPG",
+      "companions": ["sidecar-names/IMG_0012.JPG.xmp"]
+    },
+    {
+      "id": "sidecar-uppercase",
+      "primary": "sidecar-names/IMG_0013.jpg",
+      "companions": ["sidecar-names/IMG_0013.XMP"]
+    },
+    {
+      "id": "sidecar-raw-jpeg",
+      "primary": "sidecar-names/IMG_0014.dng",
+      "companions": ["sidecar-names/IMG_0014.jpg", "sidecar-names/IMG_0014.xmp"]
     }
   ]
 }

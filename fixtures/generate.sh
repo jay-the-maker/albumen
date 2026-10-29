@@ -290,9 +290,13 @@ find . -name '*_original' -delete
 # produced. Another ExifTool version will not match the pinned SHA-256.
 bash "$ROOT/../scripts/write-iptc-core.sh" "$ROOT/iptc"
 
+# Sidecar naming edge cases (issue #42), also copies under ExifTool 13.59.
+rm -rf "$ROOT/sidecar-names"
+bash "$ROOT/../scripts/write-sidecar-names.sh" "$ROOT/sidecar-names"
+
 (
   cd "$ROOT"
-  find jpeg-gps heic raw-jpeg xmp live-photo video motion-photo aae ultra-hdr iptc -type f ! -name 'src.png' -print0 \
+  find jpeg-gps heic raw-jpeg xmp live-photo video motion-photo aae ultra-hdr iptc sidecar-names -type f ! -name 'src.png' -print0 \
     | sort -z \
     | xargs -0 sha256sum
 ) > SHA256SUMS
