@@ -416,22 +416,70 @@ fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), Inges
         println!("  network: none");
     }
     let source = SourceRoot::open(from)?;
+    let local = (!to.starts_with("s3://")).then(|| Path::new(to));
     let mut files = 0u64;
     let mut bytes = 0u64;
+    let mut present = 0u64;
+    let mut conflicts: Vec<String> = Vec::new();
     walk_sorted(from, None, &mut |relative| {
         let full = from.join(relative);
         let len = source
             .metadata_nofollow(&full)
             .map(|meta| meta.len())
             .unwrap_or(0);
-        println!("  {relative}");
+        match local.map(|root| plan_status(&source, &full, &root.join(relative), len)) {
+            Some(PlanStatus::Present) => {
+                println!("  present: {relative}");
+                present += 1;
+            }
+            Some(PlanStatus::Conflict) => {
+                println!("  conflict: {relative}");
+                conflicts.push(relative.to_string());
+            }
+            _ => println!("  {relative}"),
+        }
         files += 1;
         bytes += len;
         WalkControl::Continue
     })?;
     println!("  files: {files}");
     println!("  bytes: {bytes}");
+    if local.is_some() {
+        println!("  already present: {present}");
+        println!("  conflicts: {}", conflicts.len());
+    }
+    if let (Some(root), Some(first)) = (local, conflicts.first()) {
+        return Err(IngestError::AlreadyExists {
+            filename: first.clone(),
+            destination: root.join(first).display().to_string(),
+        });
+    }
     Ok(())
+}
+
+enum PlanStatus {
+    Place,
+    Present,
+    Conflict,
+}
+
+/// Mirrors `DirectoryTree::place`: identical bytes are skipped, anything
+/// else already at the destination path would fail with `AlreadyExists`.
+/// Reads only; nothing at the destination is changed.
+fn plan_status(source: &SourceRoot, path: &Path, dest: &Path, source_len: u64) -> PlanStatus {
+    let Ok(meta) = std::fs::symlink_metadata(dest) else {
+        return PlanStatus::Place;
+    };
+    if !meta.is_file() || meta.len() != source_len {
+        return PlanStatus::Conflict;
+    }
+    let source_hash = source
+        .open_read(path)
+        .and_then(|file| albumen_ingest::sha256_reader(file, path));
+    match (albumen_ingest::sha256_file(dest), source_hash) {
+        (Ok(a), Ok(b)) if a == b => PlanStatus::Present,
+        _ => PlanStatus::Conflict,
+    }
 }
 
 fn manifest_is_jsonl(path: &Path) -> Result<bool, IngestError> {

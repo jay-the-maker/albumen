@@ -56,7 +56,7 @@ pub fn sha256_file(path: &Path) -> Result<[u8; 32], IngestError> {
     sha256_reader(file, path)
 }
 
-pub(crate) fn sha256_reader<R: Read>(mut reader: R, path: &Path) -> Result<[u8; 32], IngestError> {
+pub fn sha256_reader<R: Read>(mut reader: R, path: &Path) -> Result<[u8; 32], IngestError> {
     let mut hasher = Sha256::new();
     let mut buf = IoBuf::take();
     loop {

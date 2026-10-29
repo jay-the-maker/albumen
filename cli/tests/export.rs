@@ -224,3 +224,85 @@ fn export_and_verify_s3_fixture_corpus() {
     assert!(ok, "{text}");
     source_unchanged(&fixtures);
 }
+
+fn export_args<'a>(from: &'a Path, to: &'a Path, apply: bool) -> Vec<&'a OsStr> {
+    let mut args = vec![
+        OsStr::new("export"),
+        OsStr::new("--from"),
+        from.as_os_str(),
+        OsStr::new("--to"),
+        to.as_os_str(),
+    ];
+    if apply {
+        args.push(OsStr::new("--apply"));
+    }
+    args
+}
+
+fn planned_paths(text: &str) -> Vec<String> {
+    let mut paths: Vec<String> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.contains(": "))
+        .map(str::to_string)
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn placed_paths(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            placed_paths(root, &path, out);
+        } else if path.file_name() != Some(OsStr::new("ALBUMEN-MANIFEST.txt")) {
+            let rel = path.strip_prefix(root).unwrap();
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+#[test]
+fn dry_run_lists_what_apply_places_and_refuses_conflicts() {
+    let work = tempfile::tempdir().unwrap();
+    let from = work.path().join("library");
+    fs::create_dir_all(from.join("sub")).unwrap();
+    fs::write(from.join("a.jpg"), b"synthetic a").unwrap();
+    fs::write(from.join("b.jpg"), b"synthetic b").unwrap();
+    fs::write(from.join("sub/c.jpg"), b"synthetic c").unwrap();
+    let to = work.path().join("out");
+
+    let (ok, plan) = run(&export_args(&from, &to, false));
+    assert!(ok, "{plan}");
+    let planned = planned_paths(&plan);
+    assert_eq!(planned, ["a.jpg", "b.jpg", "sub/c.jpg"], "{plan}");
+    assert!(!to.exists(), "{plan}");
+
+    let (ok, text) = run(&export_args(&from, &to, true));
+    assert!(ok, "{text}");
+    let mut placed = Vec::new();
+    placed_paths(&to, &to, &mut placed);
+    placed.sort();
+    assert_eq!(
+        placed, planned,
+        "dry-run listing must match what --apply placed"
+    );
+
+    let (ok, plan) = run(&export_args(&from, &to, false));
+    assert!(ok, "{plan}");
+    assert!(plan.contains("  present: a.jpg"), "{plan}");
+    assert!(plan.contains("  already present: 3"), "{plan}");
+    assert!(plan.contains("  conflicts: 0"), "{plan}");
+
+    let other = work.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("a.jpg"), b"different bytes, same name").unwrap();
+    fs::write(other.join("d.jpg"), b"synthetic d").unwrap();
+    let (ok, plan) = run(&export_args(&other, &to, false));
+    assert!(!ok, "a conflict must exit non-zero: {plan}");
+    assert!(plan.contains("  conflict: a.jpg"), "{plan}");
+    assert!(plan.contains("  d.jpg"), "{plan}");
+    assert!(plan.contains("  conflicts: 1"), "{plan}");
+    assert_eq!(fs::read(to.join("a.jpg")).unwrap(), b"synthetic a");
+    assert!(!to.join("d.jpg").exists(), "dry-run wrote a file");
+}
