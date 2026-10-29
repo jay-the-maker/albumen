@@ -352,6 +352,14 @@ fn run() -> Result<(), IngestError> {
             if !(apply || execute) {
                 return print_export_plan(&from, &to, &manifest_path);
             }
+            if !is_remote(&to) {
+                let root = Path::new(&to);
+                let conflicts = local_conflicts(&from, root)?;
+                for relative in &conflicts {
+                    println!("  conflict: {relative}");
+                }
+                refuse_conflicts(root, &conflicts)?;
+            }
             albumen_ingest::ledger::anchor(&from, "export");
             let dest = open_target(&to)?;
             let source = SourceRoot::open(&from)?;
@@ -747,18 +755,50 @@ fn print_export_plan(from: &Path, to: &str, manifest: &Path) -> Result<(), Inges
             println!("  already present: {present}");
             println!("  conflicts: {}", conflicts.len());
             println!("would export {new} new, {present} already present and verified");
-            if let Some(first) = conflicts.first() {
-                return Err(IngestError::AlreadyExists {
-                    filename: first.clone(),
-                    destination: root.join(first).display().to_string(),
-                });
-            }
+            refuse_conflicts(root, &conflicts)?;
         }
         None => println!(
             "would export up to {files} files to {to}; the already-present count needs --apply, because a dry-run opens no network"
         ),
     }
     Ok(())
+}
+
+/// Prints `N conflicts, nothing written` and refuses (exit 3) when any
+/// destination path holds different bytes. Callers list every conflict first.
+fn refuse_conflicts(root: &Path, conflicts: &[String]) -> Result<(), IngestError> {
+    let Some(first) = conflicts.first() else {
+        return Ok(());
+    };
+    println!("{} conflicts, nothing written", conflicts.len());
+    Err(IngestError::AlreadyExists {
+        filename: first.clone(),
+        destination: root.join(first).display().to_string(),
+    })
+}
+
+/// Every source file whose destination path already holds different bytes,
+/// in walk order. Reads only; writes nothing anywhere.
+fn local_conflicts(from: &Path, root: &Path) -> Result<Vec<String>, IngestError> {
+    let source = SourceRoot::open(from)?;
+    let mut conflicts = Vec::new();
+    walk_sorted(from, None, &mut |relative| {
+        if !albumen_ingest::is_copy_local_tombstone(relative) {
+            let full = from.join(relative);
+            let len = source
+                .metadata_nofollow(&full)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            if matches!(
+                plan_status(&source, &full, &root.join(relative), len),
+                PlanStatus::Conflict
+            ) {
+                conflicts.push(relative.to_string());
+            }
+        }
+        WalkControl::Continue
+    })?;
+    Ok(conflicts)
 }
 
 enum PlanStatus {

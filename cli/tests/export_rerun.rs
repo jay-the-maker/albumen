@@ -140,6 +140,10 @@ fn dry_run_names_a_conflict_that_apply_refuses() {
     );
     assert!(plan.contains("  conflict: IMG_0001.jpg"), "{plan}");
     assert!(plan.contains("conflicts: 1"), "{plan}");
+    assert!(
+        plan.lines().any(|l| l == "1 conflicts, nothing written"),
+        "{plan}"
+    );
 
     let m = manifests.join("b.txt");
     let (success, text) = run(&[
@@ -153,8 +157,80 @@ fn dry_run_names_a_conflict_that_apply_refuses() {
         "--apply",
     ]);
     assert!(!success, "{text}");
+    assert!(text.contains("  conflict: IMG_0001.jpg"), "{text}");
+    assert!(
+        text.lines().any(|l| l == "1 conflicts, nothing written"),
+        "{text}"
+    );
+    assert!(!m.exists(), "a refused --apply writes no manifest");
     assert_eq!(
         fs::read(target.join("IMG_0001.jpg")).unwrap(),
         b"different bytes"
     );
+}
+
+fn code(args: &[&str]) -> (Option<i32>, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .args(args)
+        .output()
+        .expect("run albumen");
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    (output.status.code(), text)
+}
+
+fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let path = e.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, fs::read(&path).unwrap())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn every_conflict_is_listed_and_nothing_is_written_in_dry_run_and_apply() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    for (name, bytes) in [
+        ("A.jpg", &b"library a"[..]),
+        ("B.jpg", b"library b"),
+        ("C.jpg", b"library c"),
+        ("NEW.jpg", b"library new"),
+    ] {
+        fs::write(library.join(name), bytes).unwrap();
+    }
+    let target = tmp.path().join("export");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("A.jpg"), b"other a").unwrap();
+    fs::write(target.join("B.jpg"), b"library b").unwrap();
+    fs::write(target.join("C.jpg"), b"other c!").unwrap();
+    let before = tree(&target);
+    let manifests = tmp.path().join("m");
+    fs::create_dir_all(&manifests).unwrap();
+
+    for (apply, name) in [(false, "dry.txt"), (true, "apply.txt")] {
+        let m = manifests.join(name);
+        let mut args = vec!["export", "--from", p(&library), "--to", p(&target)];
+        args.extend(["--manifest", p(&m)]);
+        if apply {
+            args.push("--apply");
+        }
+        let (status, text) = code(&args);
+        assert_eq!(status, Some(3), "apply={apply}: {text}");
+        assert!(text.contains("  conflict: A.jpg"), "{text}");
+        assert!(text.contains("  conflict: C.jpg"), "{text}");
+        assert!(!text.contains("  conflict: B.jpg"), "{text}");
+        assert!(
+            text.lines().any(|l| l == "2 conflicts, nothing written"),
+            "{text}"
+        );
+        assert!(!m.exists(), "no manifest is written");
+        assert_eq!(tree(&target), before, "nothing is written to the target");
+    }
 }
