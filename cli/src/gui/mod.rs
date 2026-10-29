@@ -334,7 +334,7 @@ pub fn read_image(library: &Path, rel: &str) -> Option<(Vec<u8>, &'static str)> 
 pub fn state_word(state: crate::status::State) -> &'static str {
     use crate::status::State;
     match state {
-        State::Ok => "fresh",
+        State::Ok => "ok",
         State::Stale => "stale",
         State::Damaged => "damaged",
         State::NotBackedUp => "not backed up",

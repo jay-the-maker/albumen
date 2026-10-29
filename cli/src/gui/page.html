@@ -28,7 +28,7 @@ select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:
 .count{font-size:13px;color:var(--mute)}
 .card{background:#fff;border:1px solid var(--line);border-left:5px solid var(--none);border-radius:10px;padding:12px 16px;margin-bottom:12px}
 .summary{margin:0 0 12px;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}.card .w{font-weight:700;text-transform:none}.card pre{margin:4px 0 0;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}
-.s-fresh{border-left-color:var(--ok)}.s-fresh .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
+.s-ok{border-left-color:var(--ok)}.s-ok .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
 .s-damaged{border-left-color:var(--bad)}.s-damaged .w{color:var(--bad)}.s-none .w{color:var(--none)}
 .badge{display:inline-flex;align-items:center;gap:8px;background:#e9f6ee;color:var(--ok);border:1px solid #bfe0cb;border-radius:22px;padding:6px 16px;font-weight:700;font-size:17px}
 .proof{margin-top:16px}.proof table{border-collapse:collapse;font-size:13px}.proof td{padding:4px 14px 4px 0;vertical-align:top}.proof td:first-child{color:var(--mute)}
@@ -36,7 +36,7 @@ select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:
 [hidden]{display:none!important}
 </style></head>
 <body>
-<div class="demo">DEMO-ONLY window. Synthetic sample images. Runs locally on this computer; nothing leaves it.</div>
+<div class="demo">DEMO-ONLY window. Synthetic sample images. Runs on this computer; the window listens on 127.0.0.1 only.</div>
 <header><b>Albumen</b>
 <nav><button data-s="photos" class="on">1 Choose photos</button><button data-s="backup">2 Back up</button><button data-s="health">3 Backup health</button><button data-s="proof">4 Proof</button></nav></header>
 <main>
@@ -90,6 +90,7 @@ let attach=null; // a job id from the URL (#screen:job:ID), shown instead of sta
 async function job(kind,dest,on){
  const id=attach!==null?attach:(await j('/api/job?kind='+kind+(dest?'&dest='+enc(dest):''),{method:'POST',headers:H})).id;attach=null;
  for(;;){const s=await j('/api/job?id='+id);on(s);if(s.exit!==null)return s;await new Promise(r=>setTimeout(r,150));}}
+function sq(s){return s&&/^[A-Za-z0-9\/._\-:=+@]+$/.test(s)?s:"'"+s.replace(/'/g,"'\\''")+"'"}
 function q(s){return /[\s"'$`\\]/.test(s)?'"'+s.replace(/(["\\$`])/g,'\\$1')+'"':s}
 async function init(){
  const lib=await j('/api/library');$('lib').textContent=lib.library;
@@ -114,10 +115,10 @@ $('go-backup').onclick=async()=>{const b=$('go-backup');b.disabled=true;const d=
  const s=await job('backup',d,s=>{const l=stdout(s).filter(l=>/^(scan|export|verify): /.test(l));$('backup-count').textContent=s.exit===null?'working… '+l.length+' of 3 steps':'';
   $('backup-out').textContent=l.join('\n');});
  const keep=stdout(s).filter(l=>/^(export|verify): |^backup ok: /.test(l)||!/^(scan|proof|albumen[^:]*): /.test(l));
- $('backup-out').textContent=keep.map(l=>l.startsWith('backup ok: ')?'backup ok\n'+l.slice(11):l).join('\n');b.disabled=false;};
+ $('backup-out').textContent=keep.join('\n');b.disabled=false;};
 async function health(){const st=await j('/api/status');$('cards').innerHTML='';
  for(const d of st.destinations){const c=document.createElement('div');
-  const cls={fresh:'s-fresh',stale:'s-stale',damaged:'s-damaged'}[d.state]||'s-none';c.className='card '+cls;
+  const cls={ok:'s-ok',stale:'s-stale',damaged:'s-damaged'}[d.state]||'s-none';c.className='card '+cls;
   const t=d.text.trimEnd();const i=t.indexOf(':');const w=document.createElement('span');w.className='w';w.textContent=t.slice(0,i+1);
   const pre=document.createElement('pre');pre.append(w,document.createTextNode(t.slice(i+1)));c.append(pre);$('cards').append(c);}
  $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ')+'   (exit '+st.exit+')';}
@@ -125,10 +126,10 @@ $('go-verify').onclick=async()=>{const b=$('go-verify');b.disabled=true;$('verif
  const s=await job('verify',$('dest-v').value,()=>{});
  const md=(stdout(s).find(l=>/^proof: .*\.md$/.test(l))||'').slice(7);
  if(s.exit===0&&md){const p=await j('/api/proof?path='+enc(md));const n=(p.text.match(/\| Files \| `(\d+)` \|/)||[])[1];
-  $('match').textContent=n+' items match, checked with SHA-256.';$('verified').hidden=false;
+  $('match').textContent=n?n+' items match, checked with SHA-256.':'Verified by albumen verify-manifest (exit 0).';$('verified').hidden=false;
   $('p-path').textContent=p.path;$('p-open').href='/api/proof?raw=1&path='+enc(p.path);$('p-size').textContent=p.bytes+' bytes';$('p-sha').textContent=p.sha256;$('proof-box').hidden=false;}
  else{const bad=stdout(s).map(l=>l.match(/^(changed|missing) (.+?)(?: expected .*)?$/)).filter(Boolean);
- $('verify-out').textContent='Not verified (exit '+s.exit+').\n'+(bad.length?bad.length+' item(s) no longer match what was backed up:\n'+bad.map(m=>'  '+m[1]+': '+m[2]).join('\n')+'\nyour originals were not touched\nnext: see Backup health for the line to run':stdout(s).filter(l=>!/^(proof|albumen[^:]*): /.test(l)).join('\n'));}
+ $('verify-out').textContent='Not verified (exit '+s.exit+').\n'+(bad.length?bad.length+' item(s) no longer match what was backed up:\n'+bad.map(m=>'  '+m[1]+': '+m[2]).join('\n')+'\nverify-manifest only read the backup; your photos folder was not opened\nnext: albumen status '+sq($('dest-v').value):stdout(s).filter(l=>!/^(proof|albumen[^:]*): /.test(l)).join('\n'));}
  b.disabled=false;};
 // #screen or #screen:run opens a screen (and presses its button) for a scripted walk-through.
 init().then(()=>{const [s,r,arg,dn]=location.hash.slice(1).split(':');if(!s)return;

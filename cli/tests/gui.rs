@@ -149,3 +149,28 @@ fn tagline_is_never_shown_on_health_or_after_a_nonzero_exit() {
     assert_ne!(json["exit"].as_i64(), Some(0), "demo health exits non-zero");
     assert!(!status.contains(TAGLINE), "health data carries the tagline");
 }
+
+#[test]
+fn demo_banner_and_verify_failure_copy_are_scoped_not_overclaimed() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (code, page) = get(&addr, "/");
+    assert_eq!(code, 200);
+    assert!(page.contains(
+        "DEMO-ONLY window. Synthetic sample images. Runs on this computer; the window listens on 127.0.0.1 only."
+    ));
+    assert!(page.contains("verify-manifest only read the backup; your photos folder was not opened"));
+    let lower = page.to_lowercase();
+    for bad in [
+        "nothing leaves it",
+        "your originals were not touched",
+        "provably",
+        "guaranteed",
+        "never lose",
+        "protected",
+    ] {
+        assert!(!lower.contains(bad), "page overclaims: {bad}");
+    }
+    let (_, status) = get(&addr, "/api/status");
+    assert!(!status.contains("\"fresh\""), "status uses the CLI word ok");
+}
