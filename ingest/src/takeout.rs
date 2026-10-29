@@ -1729,6 +1729,10 @@ fn format_coord(value: f64) -> String {
     }
 }
 
+pub(crate) fn utc_text(secs: i64) -> Option<String> {
+    xmp_datetime(&secs.to_string())
+}
+
 fn xmp_datetime(timestamp: &str) -> Option<String> {
     let secs: i64 = timestamp.parse().ok()?;
     let days = secs.div_euclid(86_400);
@@ -2307,7 +2311,7 @@ pub(crate) fn dos_to_system_time(dt: &zip::DateTime) -> Option<SystemTime> {
 
 /// Days since the Unix epoch for a civil date. Public-domain civil-from-days
 /// conversion. Invalid month or day returns `None`.
-fn days_from_civil(mut year: i32, month: i32, day: i32) -> Option<i64> {
+pub(crate) fn days_from_civil(mut year: i32, month: i32, day: i32) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }

@@ -33,6 +33,7 @@ mod scan;
 mod source;
 mod store;
 mod takeout;
+mod takeout_fidelity;
 
 pub use checksum::{sha256_file, sha256_hex};
 pub use copy_profile::{
@@ -64,6 +65,7 @@ pub use store::{
     VerifiedObject,
 };
 pub use takeout::{import_takeout, import_takeout_with, plan_takeout, TakeoutPlan, TakeoutReport};
+pub use takeout_fidelity::{takeout_fidelity, FidelitySummary};
 
 #[cfg(test)]
 mod test_support {

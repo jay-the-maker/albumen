@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use albumen_ingest::takeout_fidelity;
 use albumen_ingest::{
     dest, export_tree, import_icloud, import_takeout_with, parse_manifest, plan_icloud,
     plan_takeout, platform_dirs, scan_tree, verify_scan_manifest, verify_tree, walk_sorted,
@@ -112,6 +113,25 @@ enum Command {
         /// Same as `--apply`.
         #[arg(long)]
         execute: bool,
+    },
+    /// Compare each Takeout original's JSON capture time and GPS with its EXIF.
+    ///
+    /// Reads an `import-takeout` report and the library it wrote, read-only.
+    /// Writes one JSONL line per original with both values, which one wins
+    /// (EXIF when present, else JSON; nothing is written into originals), and
+    /// flags: missing, or disagree by more than 1 minute or 100 metres. A
+    /// missing value is reported missing, never filled in. Refuses to
+    /// overwrite `--out`.
+    TakeoutFidelity {
+        /// JSONL report written by `import-takeout --apply`.
+        #[arg(long)]
+        report: PathBuf,
+        /// Library the import wrote to (its `--to`).
+        #[arg(long)]
+        library: PathBuf,
+        /// New JSONL fidelity report. Must not exist.
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Copy an iCloud Photos download, export, or Photos library.
     ///
@@ -245,6 +265,19 @@ fn run() -> Result<(), IngestError> {
                 stats.bytes,
                 manifest.display()
             );
+            Ok(())
+        }
+        Command::TakeoutFidelity {
+            report,
+            library,
+            out,
+        } => {
+            let summary = takeout_fidelity(&report, &library, &out)?;
+            println!("takeout-fidelity: {} originals compared", summary.originals);
+            for (flag, count) in &summary.flags {
+                println!("  {flag}: {count}");
+            }
+            println!("  report: {}", out.display());
             Ok(())
         }
         Command::ImportTakeout {
