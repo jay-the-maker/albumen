@@ -29,6 +29,7 @@ use albumen_ingest::tree_drift;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 
+mod backup;
 mod family;
 mod receive;
 mod status;
@@ -251,6 +252,25 @@ enum Command {
         #[arg(long)]
         proof: Option<PathBuf>,
     },
+    /// One repeatable backup run: scan, export, verify, then a dated proof.
+    ///
+    /// Incremental scan of FROM (state kept outside it), resumable export to
+    /// TO, a check of every item at TO, and a new proof pair in
+    /// TO/ALBUMEN-PROOFS. A second run with no changes copies nothing. A
+    /// killed run is finished by the next. Meant for cron, a systemd timer,
+    /// or launchd; see docs/scheduled-backup.md.
+    Backup {
+        /// Library to back up. Only read.
+        #[arg(long)]
+        from: PathBuf,
+        /// Backup folder (local or mounted).
+        #[arg(long)]
+        to: String,
+        /// Folder for the scan kept between runs. Default: this library's
+        /// ledger folder under ALBUMEN_HOME or the platform data directory.
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
     /// Say when each destination last had a good backup. Read-only.
     ///
     /// Re-reads every item an export recorded at DEST and prints one block per
@@ -317,6 +337,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("receive unhide", "albumen receive unhide --library ~/received --name IMG_0001.HEIC --apply"),
     ("ledger", "albumen ledger --library ~/Pictures/library"),
     ("verify-manifest", "albumen verify-manifest --manifest /Volumes/Backup/export/ALBUMEN-MANIFEST.txt --against /Volumes/Backup/export --proof ~/proof"),
+    ("backup", "albumen backup --from ~/Pictures --to /Volumes/PhotoBackup"),
     ("status", "albumen status /Volumes/PhotoBackup --max-age 7d"),
     ("completions", "albumen completions bash > ~/.local/share/bash-completion/completions/albumen"),
 ];
@@ -377,21 +398,7 @@ fn run() -> Result<(), IngestError> {
             if !(apply || execute) {
                 return print_export_plan(&from, &to, &manifest_path);
             }
-            if !is_remote(&to) {
-                let root = Path::new(&to);
-                let conflicts = local_conflicts(&from, root)?;
-                for relative in &conflicts {
-                    println!("  conflict: {relative}");
-                }
-                refuse_conflicts(root, &conflicts)?;
-            }
-            albumen_ingest::ledger::anchor(&from, "export");
-            let dest = open_target(&to)?;
-            let source = SourceRoot::open(&from)?;
-            let report = export_tree_counted(&source, dest.as_ref())?;
-            let entries = report.entries;
-            refuse_clobber(&manifest_path, &to, &entries)?;
-            write_manifest(&manifest_path, &entries)?;
+            let report = export_apply(&from, &to, &manifest_path)?;
             println!(
                 "exported {} new, {} already present and verified",
                 report.copied, report.already_present
@@ -627,6 +634,11 @@ fn run() -> Result<(), IngestError> {
             );
             Ok(())
         }
+        Command::Backup { from, to, state } => backup::run(&backup::BackupArgs {
+            from: &from,
+            to: &to,
+            state: state.as_deref(),
+        }),
         Command::Status { dest, max_age } => {
             let max_age_secs = status::parse_max_age(&max_age)
                 .map_err(|message| IngestError::Usage { message })?;
@@ -742,6 +754,30 @@ fn verify_with_proof(manifest: &Path, against: &str, proof_path: &Path) -> Resul
     } else {
         Err(IngestError::ManifestDrift { count })
     }
+}
+
+/// `export --apply`: refuse conflicts, copy and verify, write the manifest.
+fn export_apply(
+    from: &Path,
+    to: &str,
+    manifest_path: &Path,
+) -> Result<albumen_ingest::ExportReport, IngestError> {
+    refuse_export_targets(from, to, manifest_path)?;
+    if !is_remote(to) {
+        let root = Path::new(to);
+        let conflicts = local_conflicts(from, root)?;
+        for relative in &conflicts {
+            println!("  conflict: {relative}");
+        }
+        refuse_conflicts(root, &conflicts)?;
+    }
+    albumen_ingest::ledger::anchor(from, "export");
+    let dest = open_target(to)?;
+    let source = SourceRoot::open(from)?;
+    let report = export_tree_counted(&source, dest.as_ref())?;
+    refuse_clobber(manifest_path, to, &report.entries)?;
+    write_manifest(manifest_path, &report.entries)?;
+    Ok(report)
 }
 
 fn refuse_export_targets(from: &Path, to: &str, manifest: &Path) -> Result<(), IngestError> {
@@ -1039,18 +1075,19 @@ fn manifest_ignore(manifest: &Path, against: &str) -> Result<Vec<String>, Ingest
         return Ok(Vec::new());
     }
     let root = Path::new(against);
+    let proofs = vec![format!("{}/", backup::PROOF_DIR)];
     let Ok(relative) = manifest.strip_prefix(root) else {
-        return Ok(Vec::new());
+        return Ok(proofs);
     };
     if relative.as_os_str().is_empty() {
-        return Ok(Vec::new());
+        return Ok(proofs);
     }
     let text = relative
         .components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/");
-    Ok(vec![text])
+    Ok(vec![text, format!("{}/", backup::PROOF_DIR)])
 }
 
 #[cfg(test)]
