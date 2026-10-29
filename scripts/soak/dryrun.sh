@@ -36,14 +36,14 @@ age_stale() { # N: pretend the STALE Day 0 backup was N days ago
 }
 
 result=0
-"$here/day0.sh" || { echo "dryrun: day 0 failed, stopping" >&2; exit 1; }
+sh "$here/day0.sh" || { echo "dryrun: day 0 failed, stopping" >&2; exit 1; }
 for n in 1 2 3 4 5; do
   chmod u+w "$STALE/ALBUMEN-PROOFS" "$STALE"/ALBUMEN-PROOFS/*.json 2>/dev/null || true
   age_stale "$n"
   if [ "$n" = 5 ]; then
-    "$here/dayN.sh" "$n" --fault aae/IMG_0008.jpg || result=1
+    sh "$here/dayN.sh" "$n" --fault aae/IMG_0008.jpg || result=1
   else
-    "$here/dayN.sh" "$n" || result=1
+    sh "$here/dayN.sh" "$n" || result=1
   fi
 done
 after=$(cd "$CORPUS" && find . -type f -print0 | sort -z | xargs -0 sha256sum)

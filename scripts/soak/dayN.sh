@@ -85,7 +85,7 @@ echo "$rc" >"$E/verify.exit"
 check verify-manifest "$bad" "$rc"
 
 set +e
-"$here/audit.sh" "$DEST" "$E" "$LIB" >"$E/audit.out" 2>&1
+sh "$here/audit.sh" "$DEST" "$E" "$LIB" >"$E/audit.out" 2>&1
 rc=$?
 set -e
 check audit "$bad" "$rc"
@@ -106,7 +106,7 @@ if [ -n "$fault" ]; then
   rc=$(run_exit "$E/verify-repaired.out" "$E/verify-repaired.out" "$ALBUMEN" verify-manifest --manifest "$DEST/ALBUMEN-MANIFEST.txt" --against "$DEST" --proof "$E/verify-repaired")
   check "verify after repair" 0 "$rc"
   set +e
-  "$here/audit.sh" "$DEST" "$E/repaired" "$LIB" >"$E/audit-repaired.out" 2>&1
+  sh "$here/audit.sh" "$DEST" "$E/repaired" "$LIB" >"$E/audit-repaired.out" 2>&1
   rc=$?
   set -e
   check "audit after repair" 0 "$rc"
