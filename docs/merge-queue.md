@@ -1,6 +1,6 @@
-Tip: 85d17dc (audit-tree-hash-proof-path, step 28)
+Tip: 5a1e629 (backup-train, step 34)
 No GitHub CI run yet; CI runs first when PRs open.
-After merge, run the scale workflow once with write_baseline.
+After merge, run the scale workflow once with write_baseline. Until then the placeholder baseline is a warning only, never a red gate (no pre-merge baseline).
 
 # Merge queue
 
@@ -98,6 +98,12 @@ Each branch is one step on the one before it, all on the train3 tip. All green e
 | 26 | changelog-release-notes-train3 | 9e8e089 | no-network-audit-fidelity-proof-train3 | none | green except MinIO (41s); check-dest-writes pass | [no-network-audit-fidelity-proof-train3...changelog-release-notes-train3](https://github.com/jay-the-maker/albumen/compare/no-network-audit-fidelity-proof-train3...changelog-release-notes-train3) | 2: `CHANGELOG.md`, `docs/release-notes-draft.md` |
 | 27 | switch-from-apple-e2e | 513579a | changelog-release-notes-train3 | none (new test plus refusal exit-code fix) | green except MinIO (56s, 192 passed; the e2e test runs in about 2s); check-dest-writes pass | [changelog-release-notes-train3...switch-from-apple-e2e](https://github.com/jay-the-maker/albumen/compare/changelog-release-notes-train3...switch-from-apple-e2e) | 3: `cli/tests/switch_from_apple.rs`, `ingest/src/icloud.rs`, `ingest/src/takeout.rs` |
 | 28 | audit-tree-hash-proof-path | 85d17dc | switch-from-apple-e2e | none (audit script and its checker only) | green except MinIO (67s, 192 passed); check-dest-writes pass; checker self-test ok; end-to-end run with a stub strace ok, and a stray write and a tampered source both fail | [switch-from-apple-e2e...audit-tree-hash-proof-path](https://github.com/jay-the-maker/albumen/compare/switch-from-apple-e2e...audit-tree-hash-proof-path) | 3: `docs/compare.md`, `scripts/check-fidelity-proof-strace.py`, `scripts/fidelity-proof-no-network.sh` |
+| 29 | scale-matrix-train | d71237a | audit-tree-hash-proof-path | none (scale job and its script only) | 288 passed; only the allowed S3 tombstone failure; check-dest-writes pass (local 9f3bb24; remote SHA differs from local (pushed through the connector)) | [audit-tree-hash-proof-path...scale-matrix-train](https://github.com/jay-the-maker/albumen/compare/audit-tree-hash-proof-path...scale-matrix-train) | 3: `.github/workflows/scan-export-scale.yml`, `docs/performance-budgets.md`, `scripts/scan-export-scale.py` |
+| 30 | baseline-artifact-train | 5da7f01 | scale-matrix-train | none; placeholder baseline is a warning, not a red gate | 288 passed; only the allowed failure; check-dest-writes pass (local 4090107; remote SHA differs from local (pushed through the connector)) | [scale-matrix-train...baseline-artifact-train](https://github.com/jay-the-maker/albumen/compare/scale-matrix-train...baseline-artifact-train) | 3: `.github/workflows/scan-export-scale.yml`, `docs/performance-budgets.md`, `scripts/scan-export-scale.py` |
+| 31 | resumable-export-train | fa91165 | baseline-artifact-train | export resume path; no MinIO coverage for resume | 290 passed; only the allowed failure; check-dest-writes pass (local fba053a; remote SHA differs from local (pushed through the connector)) | [baseline-artifact-train...resumable-export-train](https://github.com/jay-the-maker/albumen/compare/baseline-artifact-train...resumable-export-train) | 3: `cli/tests/export_resume.rs`, `ingest/src/export.rs`, `ingest/src/local.rs` |
+| 32 | status-train | 706bed6 | resumable-export-train | new read-only command | 298 passed; only the allowed failure; check-dest-writes pass (local 1281001; remote SHA differs from local (pushed through the connector)) | [resumable-export-train...status-train](https://github.com/jay-the-maker/albumen/compare/resumable-export-train...status-train) | 4: `README.md`, `cli/src/main.rs`, `cli/src/status.rs`, `cli/tests/status.rs` |
+| 33 | incremental-scan-train | 9de4c5e | status-train | scan reuses hashes by path+size+mtime; `--rehash-all` escape; 2 remote commits (da60746, 9de4c5e) | 304 passed; only the allowed failure; check-dest-writes pass (local 0030c57; remote SHA differs from local (pushed through the connector)) | [status-train...incremental-scan-train](https://github.com/jay-the-maker/albumen/compare/status-train...incremental-scan-train) | 7: `README.md`, `cli/src/main.rs`, `cli/tests/scan_incremental.rs`, `docs/performance-budgets.md`, … |
+| 34 | backup-train | 5a1e629 | incremental-scan-train | new command writing proofs under DEST/ALBUMEN-PROOFS; status next: lines now name backup; 2 remote commits (336e113, 5a1e629) | 309 passed; only the allowed failure; check-dest-writes pass (local 263096e; remote SHA differs from local (pushed through the connector)) | [incremental-scan-train...backup-train](https://github.com/jay-the-maker/albumen/compare/incremental-scan-train...backup-train) | 8: `README.md`, `cli/src/backup.rs`, `cli/src/main.rs`, `cli/src/status.rs`, … |
 
 - Step 25's strace audit: first real run in CI. It has not run end to end yet, because the build box has no strace. Its first real run will be in CI. The parser self-test passes, and a fake strace shim was used to check the pipeline. The scripts are mode 100644 on the remote (the API cannot set the exec bit), so CI calls them with `bash`.
 - Step 26 adds no tag and no release.
@@ -107,6 +113,10 @@ Each branch is one step on the one before it, all on the train3 tip. All green e
 - Step 27 changes import exit codes 4→3 for overlap refusals: `import-icloud` and `import-takeout` now exit 3 (not 4) when the destination or report overlaps the source or library.
 - Step 27 also fixes a bug from #51 that its exit-code assertions found: `import-icloud` and `import-takeout` reported an overlapping destination or report as a storage failure (exit 4, with the hint "check the storage credentials and network"). They now return `Refused` (exit 3), as the README documents. An existing iCloud report is now `AlreadyExists` (exit 3), as takeout already did. The two `in_place_destination_is_refused` unit tests now assert `Refused` and exit 3.
 - mcp and receive suites (`cargo test --locked -p albumen-mcp -p albumen-receive --all-targets`), 2026-10-29 PDT: steps 24 ff3551e (21s), 25 2d7e15b (6s), 26 9e8e089, the train3 tip (7s), and 27 513579a (17s). 72 passed on each, no failures, so no fix branch was needed.
+
+- Steps 29–34 (2026-10-29 PDT, brief v5): each is stacked on the step before and was pushed through the GitHub connector, so every remote SHA differs from the local commit SHA; each remote tree was checked identical to the local tree with `git diff --quiet HEAD FETCH_HEAD`. Gate per step: fmt, clippy, tests, the mcp and receive suites, check-dest-writes; the only failure is the allowed `a_delete_or_tombstone_on_copy_a_never_reaches_the_s3_copy`.
+- The 1M-file scale run is CI-only; local runs use about 1k files. There is no pre-merge baseline.
+- Step 34 `albumen backup`: incremental scan, resumable export, verify, dated proof. A rerun copies 0 files and proves the same set; a run killed with SIGKILL is finished by the next one. A changed file at DEST is still refused as a conflict, so for `damaged` the backup `next:` line repairs missing items only.
 
 ## Do NOT merge
 
@@ -128,7 +138,9 @@ All of these are kept (nothing deleted). Merge only the 26 train steps above in 
 
 ## Superseded branches
 
-None. Proof, as of the snapshot:
+- `library-scale-380k-v2` (e0efbbd) is superseded by the scale train steps 29–30. It is kept, not deleted; do not merge it.
+
+Otherwise none. Proof, as of the snapshot:
 
 - `git cherry origin/main origin/<branch>` lists no commit already on `main` (no `-` lines) for any of the 22 branches.
 - Each branch is 0 behind its base. No queued branch is an ancestor of another queued branch except the stacks shown in "Depends on".
