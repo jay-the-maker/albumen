@@ -913,4 +913,85 @@ mod tests {
         assert_eq!(len, b"jpeg-bytes".len() as u64);
         assert_ne!(hash, crate::sha256_hex(&source).unwrap());
     }
+    /// Synthetic tree for the ignore-list tests: one manifest file plus `extras`.
+    fn ignore_tree(tmp: &Tmp, extras: &[&str]) -> (PathBuf, Vec<ManifestEntry>) {
+        let dest_root = tmp.path().join("dest");
+        fs::create_dir_all(&dest_root).unwrap();
+        fs::write(dest_root.join("keep.jpg"), b"synthetic keep").unwrap();
+        for extra in extras {
+            let path = dest_root.join(extra);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"synthetic extra").unwrap();
+        }
+        let (sha256, byte_len) = DirectoryTree::new(&dest_root)
+            .read_hash("keep.jpg")
+            .unwrap()
+            .unwrap();
+        let entries = vec![ManifestEntry {
+            relative_path: "keep.jpg".to_string(),
+            sha256,
+            byte_len,
+        }];
+        (dest_root, entries)
+    }
+
+    fn drift_paths(root: &Path, entries: &[ManifestEntry], ignore: &[String]) -> Vec<String> {
+        tree_drift(entries, &DirectoryTree::new(root), ignore)
+            .unwrap()
+            .into_iter()
+            .map(|item| {
+                assert_eq!(item.kind, "extra");
+                item.path
+            })
+            .collect()
+    }
+
+    fn verify_extra(root: &Path, entries: &[ManifestEntry], ignore: &[String]) -> Option<String> {
+        match verify_tree(entries, &DirectoryTree::new(root), ignore) {
+            Ok(()) => None,
+            Err(IngestError::ManifestExtra(path)) => Some(path),
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn folder_ignore_skips_everything_under_the_folder() {
+        let tmp = Tmp::new();
+        let (root, entries) = ignore_tree(&tmp, &["ALBUMEN-PROOFS/x"]);
+        let ignore = vec!["ALBUMEN-PROOFS/".to_string()];
+        assert_eq!(verify_extra(&root, &entries, &ignore), None);
+        assert!(drift_paths(&root, &entries, &ignore).is_empty());
+    }
+
+    #[test]
+    fn folder_ignore_does_not_match_a_sibling_with_the_same_prefix() {
+        let ignore = vec!["ALBUMEN-PROOFS/".to_string()];
+        for extra in ["ALBUMEN-PROOFS-old/x", "ALBUMEN-PROOFSx"] {
+            let tmp = Tmp::new();
+            let (root, entries) = ignore_tree(&tmp, &[extra]);
+            assert_eq!(
+                verify_extra(&root, &entries, &ignore),
+                Some(extra.to_string())
+            );
+            assert_eq!(drift_paths(&root, &entries, &ignore), vec![extra]);
+        }
+    }
+
+    #[test]
+    fn exact_ignore_matches_only_that_name() {
+        let ignore = vec!["name".to_string()];
+        let tmp = Tmp::new();
+        let (root, entries) = ignore_tree(&tmp, &["name"]);
+        assert_eq!(verify_extra(&root, &entries, &ignore), None);
+        assert!(drift_paths(&root, &entries, &ignore).is_empty());
+        for extra in ["name2", "dir/name"] {
+            let tmp = Tmp::new();
+            let (root, entries) = ignore_tree(&tmp, &[extra]);
+            assert_eq!(
+                verify_extra(&root, &entries, &ignore),
+                Some(extra.to_string())
+            );
+            assert_eq!(drift_paths(&root, &entries, &ignore), vec![extra]);
+        }
+    }
 }
