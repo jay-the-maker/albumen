@@ -1,4 +1,4 @@
-Tip: 9e8e089 (changelog-release-notes-train3, step 26)
+Tip: 513579a (switch-from-apple-e2e, step 27)
 No GitHub CI run yet; CI runs first when PRs open.
 After merge, run the scale workflow once with write_baseline.
 
@@ -101,6 +101,7 @@ Each branch is one step on the one before it, all on the train3 tip. All green e
 - Step 25's strace audit: first real run in CI. It has not run end to end yet, because the build box has no strace. Its first real run will be in CI. The parser self-test passes, and a fake strace shim was used to check the pipeline. The scripts are mode 100644 on the remote (the API cannot set the exec bit), so CI calls them with `bash`.
 - Step 26 adds no tag and no release.
 - Step 27 (item 6, switch from Apple): synthetic Photos library (generated Live Photo pair, a JPEG with an XMP sidecar, an edited render) through `import-icloud` dry run and `--apply`, content-id pairing in the report (`pair_basis` content_id 2), export, export re-run (0 new), `verify-manifest --proof` (exit 0), proof again (exit 3), tamper (exit 1, drift 1). It also asserts exit 2 for a missing `--from`, exit 3 for a library inside the source and for an existing report, bit-exact sources, and under 120 s.
+- Step 27 changes import exit codes 4→3 for overlap refusals: `import-icloud` and `import-takeout` now exit 3 (not 4) when the destination or report overlaps the source or library.
 - Step 27 also fixes a bug from #51 that its exit-code assertions found: `import-icloud` and `import-takeout` reported an overlapping destination or report as a storage failure (exit 4, with the hint "check the storage credentials and network"). They now return `Refused` (exit 3), as the README documents. An existing iCloud report is now `AlreadyExists` (exit 3), as takeout already did. The two `in_place_destination_is_refused` unit tests now assert `Refused` and exit 3.
 - mcp and receive suites (`cargo test --locked -p albumen-mcp -p albumen-receive --all-targets`), 2026-10-29 PDT: steps 24 ff3551e (21s), 25 2d7e15b (6s), 26 9e8e089, the train3 tip (7s), and 27 513579a (17s). 72 passed on each, no failures, so no fix branch was needed.
 
