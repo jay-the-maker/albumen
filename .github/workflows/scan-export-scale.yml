@@ -1,0 +1,55 @@
+name: scan export scale
+
+# Generates 100,000 synthetic text files on the runner, then times
+# `albumen scan` and `albumen export --apply` with scripts/scan-export-scale.py.
+# The job fails when either is more than 20 percent slower per 1,000 files
+# than the scan_export entry in bench/baseline.json. While that entry has
+# "placeholder": true the job warns and does not enforce. Nothing generated is
+# committed and no photo or media file is read.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/scan-export-scale.yml"
+      - "scripts/scan-export-scale.py"
+      - "bench/baseline.json"
+      - "ingest/**"
+      - "cli/**"
+      - "Cargo.lock"
+  workflow_dispatch:
+    inputs:
+      write_baseline:
+        description: "Print a new scan_export entry instead of checking"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan-export-scale:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Build albumen
+        run: cargo build --release --locked -p albumen
+
+      - name: Put exiftool on PATH
+        run: echo "$(scripts/install-exiftool.sh)" >> "$GITHUB_PATH"
+
+      - name: Scan and export 100,000 synthetic files
+        run: |
+          mode=--check
+          if [ "${{ inputs.write_baseline }}" = "true" ]; then mode=--write; fi
+          python3 scripts/scan-export-scale.py --albumen target/release/albumen \
+            --files 100000 --workdir "$RUNNER_TEMP/scan-export-scale" $mode \
+            | tee "$RUNNER_TEMP/scan-export.json"
+          { echo '```json'; cat "$RUNNER_TEMP/scan-export.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

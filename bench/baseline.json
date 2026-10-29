@@ -6,6 +6,13 @@
   "copy_verify_mb_s": 359.7877427617882,
   "copy_verify_vs_plain": 0.950206925298963,
   "mcp_browse_p50_ms": 0.392717,
+  "scan_export": {
+    "export_s_per_1k": 1.2855,
+    "files": 1000,
+    "placeholder": true,
+    "recorded": "provisional: debug build, 1,000-file smoke on a Linux dev box, 2026-10-29. Replace with the first ubuntu-24.04 run of scan-export-scale.yml (workflow_dispatch, write_baseline).",
+    "scan_s_per_1k": 2.0236
+  },
   "search_cold_ms": 525.226163,
   "search_cold_vs_exif": 0.9426622614085136,
   "search_items": 128,
