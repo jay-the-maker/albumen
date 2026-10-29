@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
-use albumen_ingest::{import_card, sha256_hex, BlobStore, IngestError, LocalStore, VerifiedObject};
+use albumen_ingest::{
+    import_card, import_card_local, sha256_hex, BlobStore, IngestError, LocalStore, VerifiedObject,
+};
 
 const FIXTURES: &[&str] = &[
     "raw-jpeg/IMG_0003.dng",
@@ -162,4 +164,46 @@ fn forced_checksum_failure_deletes_nothing_from_card() {
     // The first asset (two files) was rolled back by copy_verify.
     let left: Vec<_> = fs::read_dir(&library).unwrap().collect();
     assert!(left.is_empty(), "no partial asset may remain: {left:?}");
+}
+
+#[test]
+fn reimporting_the_same_card_dedupes_by_sha256() {
+    let tmp = tempfile::tempdir().unwrap();
+    let card = make_card(tmp.path());
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    let first = import_card_local(&card, &library).unwrap();
+    assert_eq!((first.assets, first.deduped), (3, 0));
+    let lib_before = snapshot(&library);
+    let card_before = snapshot(&card);
+
+    let second = import_card_local(&card, &library).unwrap();
+
+    assert_eq!((second.assets, second.deduped), (0, 3));
+    assert!(second.files.is_empty());
+    assert_eq!(snapshot(&library), lib_before);
+    assert_eq!(snapshot(&card), card_before);
+}
+
+#[test]
+fn different_bytes_under_a_taken_name_are_refused_not_overwritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let card = make_card(tmp.path());
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    fs::write(library.join("IMG_0004.jpg"), b"someone else's photo").unwrap();
+    let lib_before = snapshot(&library);
+    let card_before = snapshot(&card);
+
+    let err = import_card_local(&card, &library).unwrap_err();
+
+    assert!(err.to_string().contains("not overwritten"), "{err}");
+    assert_eq!(snapshot(&card), card_before);
+    let taken = lib_before.iter().find(|s| s.relative == "IMG_0004.jpg");
+    let now = snapshot(&library);
+    assert_eq!(now.iter().find(|s| s.relative == "IMG_0004.jpg"), taken);
+    assert!(
+        !now.iter().any(|s| s.relative == "IMG_0004.xmp"),
+        "no part of the colliding asset is copied"
+    );
 }
