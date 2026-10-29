@@ -2,9 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Prove `albumen takeout-fidelity` and `albumen verify-manifest --proof` open
 # no network sockets and never write under the library, the Takeout, or the
-# export they read. Each runs under strace -f, so the ExifTool child is
-# included. Their only outputs (the fidelity file and the proof) go to a
-# separate directory. Synthetic files only.
+# export they read. Each runs under strace -f -y, so the ExifTool child is
+# included and fd-based writes show the file they hit. Their only outputs (the
+# fidelity file and the proof) go to a separate directory. Around each command:
+#   - every file under the Takeout, library and export is hashed (path, size,
+#     sha256, mode) before and after, and any difference fails;
+#   - the whole work dir, ALBUMEN_HOME and a private TMPDIR are snapshotted,
+#     and the only new or changed files must be the expected outputs:
+#     fidelity.jsonl, then exactly the two files of a non-default --proof path.
+# Synthetic files only.
 #
 #   scripts/fidelity-proof-no-network.sh              run the audit (needs strace)
 #   scripts/fidelity-proof-no-network.sh --self-test  check the strace reader only
@@ -30,9 +36,10 @@ fi
 bin="$root/target/debug/albumen"
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+logs="$(mktemp -d)"
+trap 'rm -rf "$work" "$logs"' EXIT
 export ALBUMEN_HOME="$work/home"
-mkdir -p "$work/takeout" "$work/out"
+mkdir -p "$work/takeout" "$work/out/proofs" "$work/home" "$work/tmp"
 
 python3 - "$root/fixtures/jpeg-gps/IMG_0001.jpg" "$work/takeout/takeout-001.zip" <<'PY'
 import json, sys, zipfile
@@ -49,13 +56,36 @@ PY
 "$bin" import-takeout --apply --from "$work/takeout" --to "$work/library" --report "$work/out/report.jsonl" >/dev/null
 "$bin" export --apply --from "$work/library" --to "$work/export" --manifest "$work/out/manifest.txt" >/dev/null
 
-strace -f -o "$work/fidelity.strace" \
-  "$bin" takeout-fidelity --report "$work/out/report.jsonl" --library "$work/library" --out "$work/out/fidelity.jsonl"
-strace -f -o "$work/proof.strace" \
-  "$bin" verify-manifest --manifest "$work/out/manifest.txt" --against "$work/export" --proof "$work/out/proof"
-test -s "$work/out/fidelity.jsonl"
-test -s "$work/out/proof.json"
+sources=("$work/takeout" "$work/library" "$work/export")
+everything=("$work" "$ALBUMEN_HOME" "$work/tmp")
 
-python3 "$check" "$work/fidelity.strace" "$work/proof.strace" -- \
+# audit NAME EXPECTED_OUTPUT... -- COMMAND...
+audit() {
+  local name="$1"; shift
+  local expect=()
+  while [[ "$1" != "--" ]]; do expect+=("$1"); shift; done
+  shift
+  python3 "$check" snap "$logs/$name.src.before" "${sources[@]}"
+  python3 "$check" snap "$logs/$name.all.before" "${everything[@]}"
+  (cd "$work" && TMPDIR="$work/tmp" strace -f -y -o "$logs/$name.strace" "$@")
+  python3 "$check" snap "$logs/$name.src.after" "${sources[@]}"
+  python3 "$check" snap "$logs/$name.all.after" "${everything[@]}"
+  python3 "$check" compare "$name: source trees" "$logs/$name.src.before" "$logs/$name.src.after"
+  python3 "$check" compare "$name: work dir, ALBUMEN_HOME, TMPDIR" \
+    "$logs/$name.all.before" "$logs/$name.all.after" "${expect[@]}"
+}
+
+audit fidelity "$work/out/fidelity.jsonl" -- \
+  "$bin" takeout-fidelity --report "$work/out/report.jsonl" --library "$work/library" --out "$work/out/fidelity.jsonl"
+# A non-default --proof path: the proof must land at exactly <path>.md and
+# <path>.json, and nowhere else.
+proof="$work/out/proofs/audit-proof-custom"
+audit proof "$proof.md" "$proof.json" -- \
+  "$bin" verify-manifest --manifest "$work/out/manifest.txt" --against "$work/export" --proof "$proof"
+test -s "$work/out/fidelity.jsonl"
+test -s "$proof.json"
+test -s "$proof.md"
+
+python3 "$check" --cwd "$work" "$logs/fidelity.strace" "$logs/proof.strace" -- \
   "$work/takeout" "$work/library" "$work/export"
-echo "fidelity-proof-no-network: no sockets, no writes under the library, Takeout, or export"
+echo "fidelity-proof-no-network: no sockets, sources unchanged, only the expected outputs written"
