@@ -40,7 +40,7 @@ pub use copy_profile::{
     snapshot as copy_phases, CopyPhases, PHASE_NAMES as COPY_PHASE_NAMES, PREFLIGHT_STEP_NAMES,
 };
 pub use discover::{discover, Asset, AssetFile, Role};
-pub use error::IngestError;
+pub use error::{IngestError, EXIT_IO, EXIT_MISMATCH, EXIT_REFUSED, EXIT_USAGE};
 pub use exiftool::exiftool_command;
 pub use export::{
     export_tree, export_tree_counted, format_manifest, is_copy_local_tombstone, parse_manifest,
