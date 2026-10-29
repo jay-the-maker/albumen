@@ -34,6 +34,7 @@ mod scan;
 mod source;
 mod store;
 mod takeout;
+mod takeout_fidelity;
 
 pub use card::{
     import_card, import_card_local, plan_card, CardReport, Renamed, CARD_RECORD_SUFFIX,
@@ -69,6 +70,7 @@ pub use store::{
     VerifiedObject,
 };
 pub use takeout::{import_takeout, import_takeout_with, plan_takeout, TakeoutPlan, TakeoutReport};
+pub use takeout_fidelity::{takeout_fidelity, FidelitySummary};
 
 #[cfg(test)]
 mod test_support {
