@@ -93,6 +93,17 @@ fn synthetic_live_photo_survives_import_and_export() {
     assert_eq!(icloud.count_out, 2);
     assert_eq!(icloud.mismatched, 0);
     assert_report_stem(&icloud_report, "live_photo_stem");
+    for line in report_lines(&icloud_report) {
+        if line.get("summary").is_some() {
+            assert_eq!(line["pair_basis"]["content_id"], 2);
+            assert_eq!(line["pair_basis"]["stem_only"], 0);
+            assert_eq!(line["pair_basis"]["content_id_mismatch"], 0);
+        } else {
+            assert_eq!(line["pair_basis"], "content-id", "{line}");
+            assert_eq!(line["content_identifier"], CONTENT_ID);
+            assert!(line.get("pair_flag").is_none(), "{line}");
+        }
+    }
     assert_same(&heic, &icloud_lib.join("originals/0").join(HEIC_NAME));
     assert_same(&mov, &icloud_lib.join("originals/0").join(MOV_NAME));
     assert_discovered_pair(&icloud_lib.join("originals/0").join(HEIC_NAME));
@@ -121,6 +132,57 @@ fn synthetic_live_photo_survives_import_and_export() {
     assert_same(&mov, &read_back.path().join(MOV_NAME));
     assert_eq!(sha256_hex(&heic).unwrap(), heic_sha);
     assert_eq!(sha256_hex(&mov).unwrap(), mov_sha);
+}
+
+#[test]
+fn icloud_flags_a_live_pair_whose_content_identifiers_differ() {
+    let generated = tempfile::tempdir().unwrap();
+    generate(generated.path());
+    let staged = tempfile::tempdir().unwrap();
+    let from = staged.path().join("icloud");
+    let originals = from.join("originals").join("0");
+    fs::create_dir_all(&originals).unwrap();
+    copy_stamped(
+        &generated.path().join(HEIC_NAME),
+        &originals.join(HEIC_NAME),
+    );
+    let mov = originals.join(MOV_NAME);
+    copy_stamped(&generated.path().join(MOV_NAME), &mov);
+    let other = "FFFFFFFF-0000-4000-8000-000000000000";
+    let status = exiftool_command()
+        .args(["-q", "-overwrite_original"])
+        .arg(format!("-{MOV_TAG}={other}"))
+        .arg(&mov)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    stamp(&mov);
+    assert_identifier(&mov, MOV_TAG, other);
+
+    let library = staged.path().join("library");
+    let report = staged.path().join("icloud.jsonl");
+    import_icloud(&from, &library, &report).unwrap();
+    let lines = report_lines(&report);
+    let heic_line = lines
+        .iter()
+        .find(|line| line["member"] == format!("originals/0/{HEIC_NAME}"))
+        .unwrap();
+    assert_eq!(heic_line["pair_basis"], "stem");
+    assert_eq!(heic_line["pair_flag"], "content_id_mismatch");
+    assert_eq!(heic_line["content_identifier"], CONTENT_ID);
+    assert_eq!(heic_line["partner_content_identifier"], other);
+    let summary = lines.last().unwrap();
+    assert_eq!(summary["pair_basis"]["content_id"], 0);
+    assert_eq!(summary["pair_basis"]["stem"], 2);
+    assert_eq!(summary["pair_basis"]["content_id_mismatch"], 2);
+}
+
+fn report_lines(report: &Path) -> Vec<Value> {
+    fs::read_to_string(report)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
 }
 
 fn stamp(path: &Path) {
