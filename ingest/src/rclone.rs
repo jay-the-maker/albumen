@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! rclone transport for SFTP, WebDAV, and Backblaze B2.
+//! rclone transport for SFTP, WebDAV, SMB, and Backblaze B2.
 //!
 //! Albumen does not vendor rclone. The binary is a separate process. Each
 //! `put_verified` uploads through rclone, reads the object back, and checks
-//! SHA-256. SFTP, WebDAV, and B2 do not keep nanosecond mtimes, so the exact
+//! SHA-256. SFTP, WebDAV, SMB, and B2 do not keep nanosecond mtimes, so the exact
 //! source mtime and digest are stored in a sibling `.{name}.albumen-verify`
 //! object and restored on read. That sibling is transport metadata, not a
 //! camera sidecar. An existing object is not overwritten.
@@ -108,6 +108,56 @@ impl RcloneStore {
             contact: Some((host, port)),
             contact_logged: AtomicBool::new(false),
         })
+    }
+
+    /// An SMB share through rclone's `smb` backend. The password reaches
+    /// rclone only in `rclone obscure` form, as for SFTP and WebDAV.
+    pub fn smb(
+        bin: impl Into<PathBuf>,
+        host: &str,
+        port: u16,
+        user: &str,
+        password: &str,
+        share: &str,
+        prefix: &str,
+    ) -> Result<Self, IngestError> {
+        check_share(share)?;
+        let bin = bin.into();
+        let obscured = obscure(&bin, password)?;
+        Ok(Self::smb_with_obscured(
+            bin, host, port, user, password, &obscured, share, prefix,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn smb_with_obscured(
+        bin: PathBuf,
+        host: &str,
+        port: u16,
+        user: &str,
+        password: &str,
+        obscured: &str,
+        share: &str,
+        prefix: &str,
+    ) -> Self {
+        Self {
+            flags: vec![
+                "--smb-host".into(),
+                host.into(),
+                "--smb-port".into(),
+                port.to_string(),
+                "--smb-user".into(),
+                user.into(),
+                "--smb-pass".into(),
+                obscured.into(),
+            ],
+            secrets: vec![obscured.to_string(), password.to_string()],
+            root: format!(":smb:{}/{}", share, normalize_prefix(prefix)),
+            label: format!("smb://{user}@{host}:{port}/{share}/{prefix}"),
+            bin,
+            contact: Some((host.to_string(), port)),
+            contact_logged: AtomicBool::new(false),
+        }
     }
 
     /// Backblaze B2 through rclone's `b2` backend.
@@ -655,6 +705,17 @@ fn check_bucket(bucket: &str) -> Result<(), IngestError> {
     Ok(())
 }
 
+fn check_share(share: &str) -> Result<(), IngestError> {
+    if share.is_empty() || share.contains(['/', '\\', '\0']) {
+        return Err(IngestError::store(
+            "share",
+            share,
+            "SMB share name must be a single path segment",
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_prefix(prefix: &str) -> String {
     let prefix = prefix.trim_matches('/');
     if prefix.is_empty() {
@@ -765,5 +826,45 @@ mod tests {
         let shown = format!("{store:?}");
         assert!(!shown.contains("key"));
         assert!(!shown.contains("account"));
+    }
+
+    #[test]
+    fn smb_remote_flags_never_carry_the_plain_password() {
+        let store = RcloneStore::smb_with_obscured(
+            PathBuf::from("/bin/rclone"),
+            "nas.local",
+            445,
+            "jay",
+            "plain-smb-secret",
+            "OBSCUREDsmbVALUE",
+            "photos",
+            "/roll/",
+        );
+        assert_eq!(store.root, ":smb:photos/roll/");
+        assert_eq!(flag_after(&store.flags, "--smb-host"), "nas.local");
+        assert_eq!(flag_after(&store.flags, "--smb-port"), "445");
+        assert_eq!(flag_after(&store.flags, "--smb-user"), "jay");
+        assert_eq!(flag_after(&store.flags, "--smb-pass"), "OBSCUREDsmbVALUE");
+        assert!(store
+            .flags
+            .iter()
+            .all(|flag| !flag.contains("plain-smb-secret")));
+        assert!(!store.label.contains("plain-smb-secret"));
+        assert!(!store.label.contains("OBSCURED"));
+        assert!(store.secrets.iter().any(|s| s == "plain-smb-secret"));
+        assert!(store.secrets.iter().any(|s| s == "OBSCUREDsmbVALUE"));
+        let shown = format!("{store:?}");
+        assert!(!shown.contains("plain-smb-secret"));
+        assert!(!shown.contains("OBSCURED"));
+    }
+
+    #[test]
+    fn smb_share_must_be_one_segment() {
+        for bad in ["", "a/b", "a\\b"] {
+            assert!(
+                RcloneStore::smb("/nonexistent/rclone", "h", 445, "u", "p", bad, "").is_err(),
+                "{bad:?}"
+            );
+        }
     }
 }

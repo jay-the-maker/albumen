@@ -153,6 +153,51 @@ fn rclone_sftp_webdav_and_b2_round_trip() {
     round_trip_store(&b2);
 }
 
+const SMB_SKIP: &str = "skipping SMB round-trip: ALBUMEN_SMB_ENDPOINT is unset. \
+    Set it to host:port with ALBUMEN_SMB_USER, ALBUMEN_SMB_PASS, ALBUMEN_SMB_SHARE \
+    and optionally ALBUMEN_SMB_PREFIX. CI does not set it.";
+
+/// SMB through rclone. Runs only against a server the owner provides.
+#[test]
+fn rclone_smb_round_trip() {
+    let Ok(endpoint) = std::env::var("ALBUMEN_SMB_ENDPOINT") else {
+        println!("{SMB_SKIP}");
+        return;
+    };
+    let need = |name: &str| {
+        std::env::var(name)
+            .unwrap_or_else(|_| panic!("ALBUMEN_SMB_ENDPOINT is set, so {name} is required"))
+    };
+    let (host, port) = match endpoint.rsplit_once(':') {
+        Some((host, port)) => (
+            host.to_string(),
+            port.parse().expect("ALBUMEN_SMB_ENDPOINT port"),
+        ),
+        None => (endpoint.clone(), 445),
+    };
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let base = std::env::var("ALBUMEN_SMB_PREFIX").unwrap_or_default();
+    let prefix = format!(
+        "{}/roundtrip-smb-{}-{nanos}",
+        base.trim_matches('/'),
+        std::process::id()
+    );
+    let store = RcloneStore::smb(
+        rclone_bin(),
+        &host,
+        port,
+        &need("ALBUMEN_SMB_USER"),
+        &need("ALBUMEN_SMB_PASS"),
+        &need("ALBUMEN_SMB_SHARE"),
+        prefix.trim_start_matches('/'),
+    )
+    .expect("smb store");
+    round_trip_store(&store);
+}
+
 fn round_trip_store(store: &impl BlobStore) {
     let probe_dir = tempfile::tempdir().expect("probe");
     let probe = probe_dir.path().join("albumen-rclone-probe.bin");
