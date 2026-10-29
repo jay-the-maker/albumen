@@ -62,33 +62,27 @@ impl Client {
     }
 }
 
+// MCP stdio transport: one JSON-RPC message per line, no headers.
 fn write_message(out: &mut impl Write, message: &Value) {
-    let body = serde_json::to_vec(message).unwrap();
-    write!(out, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+    let mut body = serde_json::to_vec(message).unwrap();
+    body.push(b'\n');
     out.write_all(&body).unwrap();
     out.flush().unwrap();
 }
 
 fn read_message(input: &mut impl BufRead) -> Value {
-    let mut length = None;
-    loop {
-        let mut line = String::new();
-        let read = input.read_line(&mut line).unwrap();
-        assert!(read > 0, "server closed stdout");
-        if line == "\n" || line == "\r\n" {
-            break;
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if let Some((name, value)) = trimmed.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                length = Some(value.trim().parse::<usize>().unwrap());
-            }
-        }
-    }
-    let length = length.expect("Content-Length");
-    let mut body = vec![0u8; length];
-    input.read_exact(&mut body).unwrap();
-    serde_json::from_slice(&body).unwrap()
+    let mut line = String::new();
+    let read = input.read_line(&mut line).unwrap();
+    assert!(read > 0, "server closed stdout");
+    assert!(
+        line.ends_with('\n'),
+        "message not newline-terminated: {line}"
+    );
+    assert!(
+        !line.starts_with("Content-Length"),
+        "header framing: {line}"
+    );
+    serde_json::from_str(line.trim_end()).unwrap()
 }
 
 fn handshake(client: &mut Client) {
