@@ -34,7 +34,7 @@ mod source;
 mod store;
 mod takeout;
 
-pub use checksum::{sha256_file, sha256_hex};
+pub use checksum::{sha256_file, sha256_hex, sha256_reader};
 pub use copy_profile::{
     enable_thread as enable_copy_profile_thread, reset as reset_copy_profile,
     snapshot as copy_phases, CopyPhases, PHASE_NAMES as COPY_PHASE_NAMES, PREFLIGHT_STEP_NAMES,
