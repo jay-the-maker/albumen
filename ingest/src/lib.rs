@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+mod card;
 mod checksum;
 mod copy_profile;
 pub mod dest;
@@ -34,6 +35,7 @@ mod source;
 mod store;
 mod takeout;
 
+pub use card::{import_card, CardReport};
 pub use checksum::{sha256_file, sha256_hex};
 pub use copy_profile::{
     enable_thread as enable_copy_profile_thread, reset as reset_copy_profile,
