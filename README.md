@@ -153,6 +153,7 @@ The remaining steps take a few seconds. Run them from the repository root.
      ...
      files: 20
      bytes: 101153
+   would export 20 new, 0 already present and verified
    ```
 
 4. Run the export, then verify the copy against the manifest it wrote.
@@ -163,11 +164,14 @@ The remaining steps take a few seconds. Run them from the repository root.
    ```
 
    ```text
-   exported 20 files to /tmp/albumen-export
+   exported 20 new, 0 already present and verified
+   to /tmp/albumen-export
    manifest /tmp/albumen-export/ALBUMEN-MANIFEST.txt
    verified 20 files in /tmp/albumen-export
    {"summary":true,"count_in":20,"count_out":20,"mismatched":0}
    ```
+
+   Run the same `--apply` again and it prints `exported 0 new, 20 already present and verified`. Nothing is copied twice.
 
 5. Check that the source did not change: `(cd fixtures && sha256sum -c --quiet SHA256SUMS)` prints nothing and exits 0. To clean up, remove `/tmp/albumen-scan.jsonl` and `/tmp/albumen-export`.
 
