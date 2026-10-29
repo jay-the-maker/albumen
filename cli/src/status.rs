@@ -84,15 +84,14 @@ fn export_next(dest: &str) -> String {
 
 /// For damage that includes changed files: a rerun would refuse the changed
 /// copy as a conflict, so the next step is to move it aside (nothing is
-/// deleted). Names the first changed file; the rest are listed above.
+/// deleted). Names the first changed file and counts the others.
 fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
     let path = Path::new(dest).join(first_changed).display().to_string();
     let aside = format!("{path}.changed");
     let more = if changed > 1 {
-        format!(
-            " (and the other {} changed files listed above)",
-            changed - 1
-        )
+        let others = changed - 1;
+        let plural = if others == 1 { "" } else { "s" };
+        format!(" (and {others} other changed file{plural})")
     } else {
         String::new()
     };

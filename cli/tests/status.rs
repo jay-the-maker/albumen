@@ -305,7 +305,7 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
     assert_eq!(
         text.lines().last().unwrap(),
         format!(
-            "next: move the changed copy aside (and the other 1 changed files listed above), for example: mv {} {}",
+            "next: move the changed copy aside (and 1 other changed file), for example: mv {} {}",
             q(&first),
             q(&format!("{first}.changed"))
         )
