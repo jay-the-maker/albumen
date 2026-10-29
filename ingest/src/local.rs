@@ -94,6 +94,57 @@ pub fn copy_verify_file(source: &Path, dest_dir: &Path) -> Result<VerifiedObject
     )
 }
 
+/// [`copy_verify_file`], but written under a partial name and given its
+/// final name only after the read-back verifies. A copy killed part way
+/// leaves only `.{name}.albumen-partial`, never a short file under the final
+/// name; that stale partial is cleared before the next attempt.
+pub fn copy_verify_file_staged(
+    source: &Path,
+    dest_dir: &Path,
+) -> Result<VerifiedObject, IngestError> {
+    if !source.is_file() {
+        return Err(IngestError::NotAFile(source.to_path_buf()));
+    }
+    let filename = file_name_str(source)?;
+    check_filename(&filename)?;
+    clear_stale_partial(dest_dir, &filename)?;
+    let mtime = mtime_of(source)?;
+    let root = SourceRoot::open(parent_dir(source))?;
+    store_checked(
+        &root,
+        source,
+        &filename,
+        dest_dir,
+        mtime,
+        true,
+        |root, output, dest| {
+            let input = root.open_read(source)?;
+            copy_hashed(input, output, source, dest)
+        },
+    )
+}
+
+/// Remove a partial file an earlier, interrupted copy left for `filename`.
+/// Only the exact partial name is touched, and only when it is a plain file.
+pub fn clear_stale_partial(dest_dir: &Path, filename: &str) -> Result<bool, IngestError> {
+    let partial = dest_dir.join(partial_name(filename));
+    match fs::symlink_metadata(crate::platform::io_path(&partial)) {
+        Ok(meta) if meta.is_file() => {
+            dest::remove_file(&partial)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Whether a hard-link error means the filesystem has no hard links.
+fn link_unsupported(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+    ) || err.raw_os_error() == Some(18) // EXDEV
+}
+
 /// Files at or under this size are read into memory by [`prefetch_source`].
 /// Larger files are copied as a stream by [`copy_verify_file`].
 pub const PREFETCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -475,6 +526,23 @@ impl Pending {
                     return Err(IngestError::AlreadyExists {
                         filename: self.filename.clone(),
                         destination: self.final_dest.display().to_string(),
+                    });
+                }
+                Err(err) if link_unsupported(&err) => {
+                    // exFAT and some network shares have no hard links. The
+                    // final name is checked free first; the rename then moves
+                    // only verified bytes into place.
+                    if fs::symlink_metadata(crate::platform::io_path(&self.final_dest)).is_ok() {
+                        return Err(IngestError::AlreadyExists {
+                            filename: self.filename.clone(),
+                            destination: self.final_dest.display().to_string(),
+                        });
+                    }
+                    dest::rename(&self.dest, &self.final_dest)?;
+                    self.guard.path = self.final_dest.clone();
+                    return Ok(Verified {
+                        record,
+                        guard: self.guard,
                     });
                 }
                 Err(err) => return Err(IngestError::io(&self.final_dest, err)),
