@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `albumen export`, `albumen import-takeout`, `albumen import-icloud`,
+//! `albumen export`, `albumen import-takeout`, `albumen import-card`, `albumen import-icloud`,
 //! `albumen scan`, `albumen ledger`, `albumen verify-manifest`, and `albumen family`.
 //!
 //! Export is `copy_verify` across a library. It does not modify sources and
@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use albumen_ingest::{
-    dest, export_tree, import_icloud, import_takeout_with, parse_manifest, plan_icloud,
-    plan_takeout, platform_dirs, scan_tree, verify_scan_manifest, verify_tree, walk_sorted,
-    write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
-    SourceRoot, WalkControl,
+    dest, export_tree, import_card_local, import_icloud, import_takeout_with, parse_manifest,
+    plan_card, plan_icloud, plan_takeout, platform_dirs, scan_tree, verify_scan_manifest,
+    verify_tree, walk_sorted, write_manifest, DirectoryTree, ExportDest, IngestError,
+    ManifestEntry, S3Config, S3Store, SourceRoot, WalkControl,
 };
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -106,6 +106,27 @@ enum Command {
         /// Off by default. The original's bytes and mtime are not changed.
         #[arg(long)]
         derive_xmp: bool,
+        /// Copy the files. Without this or `--execute`, print the plan and write nothing.
+        #[arg(long)]
+        apply: bool,
+        /// Same as `--apply`.
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Copy a mounted camera card into a library directory.
+    ///
+    /// The card is opened read-only and is never formatted, ejected, or
+    /// emptied. Each original goes with its sidecars and pairs through
+    /// copy-verify. Identical SHA-256 is skipped; a camera name taken by other
+    /// bytes is stored as `{stem}~{sha8}{ext}` with a `.albumen-card.json`
+    /// record of the camera filename. Nothing in the library is overwritten.
+    ImportCard {
+        /// Mounted card, for example its DCIM folder's parent.
+        #[arg(long)]
+        from: PathBuf,
+        /// Destination library. Must not be on or inside the card.
+        #[arg(long)]
+        to: PathBuf,
         /// Copy the files. Without this or `--execute`, print the plan and write nothing.
         #[arg(long)]
         apply: bool,
@@ -285,6 +306,41 @@ fn run() -> Result<(), IngestError> {
                 to.display()
             );
             println!("report {}", report.display());
+            Ok(())
+        }
+        Command::ImportCard {
+            from,
+            to,
+            apply,
+            execute,
+        } => {
+            albumen_ingest::family::refuse_shared_write_root(&to)?;
+            SourceRoot::open(&from)?.refuse_inside(&to)?;
+            if !(apply || execute) {
+                let (assets, files) = plan_card(&from)?;
+                println!("dry-run: no files written. Pass --apply or --execute to copy.");
+                println!("import-card");
+                println!("  from: {}", from.display());
+                println!("  to: {}", to.display());
+                println!("  assets: {assets}");
+                println!("  files: {files}");
+                return Ok(());
+            }
+            dest::create_dir_all(&to)?;
+            let outcome = import_card_local(&from, &to)?;
+            println!(
+                "imported {} assets ({} files, {} already present) to {}",
+                outcome.assets,
+                outcome.files.len(),
+                outcome.deduped,
+                to.display()
+            );
+            for renamed in &outcome.renamed {
+                println!(
+                    "  renamed: {} -> {}",
+                    renamed.camera_filename, renamed.library_filename
+                );
+            }
             Ok(())
         }
         Command::ImportIcloud {
