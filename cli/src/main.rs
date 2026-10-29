@@ -21,6 +21,9 @@ use albumen_ingest::{
     write_manifest, DirectoryTree, ExportDest, IngestError, ManifestEntry, S3Config, S3Store,
     SourceRoot, WalkControl,
 };
+mod proof;
+
+use albumen_ingest::tree_drift;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -180,6 +183,14 @@ enum Command {
         /// are compared with a local directory.
         #[arg(long)]
         against: String,
+        /// Also write a proof you can keep: `<path>.md` and `<path>.json`.
+        ///
+        /// Records version and commit, start and end time (UTC), the
+        /// manifest's SHA-256, file and byte counts, the SHA-256 of the
+        /// sorted per-file hashes, every drift line, and the re-run command.
+        /// Refuses to overwrite either file. Drift still exits non-zero.
+        #[arg(long)]
+        proof: Option<PathBuf>,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -354,7 +365,16 @@ fn run() -> Result<(), IngestError> {
             println!("  creates: nothing");
             Ok(())
         }
-        Command::VerifyManifest { manifest, against } => {
+        Command::VerifyManifest {
+            manifest,
+            against,
+            proof: Some(proof_path),
+        } => verify_with_proof(&manifest, &against, &proof_path),
+        Command::VerifyManifest {
+            manifest,
+            against,
+            proof: None,
+        } => {
             if manifest_is_jsonl(&manifest)? {
                 if against.starts_with("s3://") {
                     return Err(IngestError::Store {
@@ -391,6 +411,91 @@ fn run() -> Result<(), IngestError> {
             clap_complete::generate(shell, &mut cmd, "albumen", &mut std::io::stdout());
             Ok(())
         }
+    }
+}
+
+fn verify_with_proof(manifest: &Path, against: &str, proof_path: &Path) -> Result<(), IngestError> {
+    let (md, json) = proof::proof_paths(proof_path);
+    for target in [&md, &json] {
+        if target.exists() {
+            return Err(IngestError::AlreadyExists {
+                filename: target.display().to_string(),
+                destination: target.display().to_string(),
+            });
+        }
+    }
+    let started = std::time::SystemTime::now();
+    let mut drift = Vec::new();
+    let mut files = Vec::new();
+    if manifest_is_jsonl(manifest)? {
+        if against.starts_with("s3://") {
+            return Err(IngestError::Store {
+                operation: "verify-manifest",
+                filename: against.to_string(),
+                message: "a scan manifest is verified against a local directory".to_string(),
+            });
+        }
+        let text = std::fs::read_to_string(manifest).map_err(|err| IngestError::Io {
+            path: manifest.to_path_buf(),
+            source: err,
+        })?;
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let (Some(path), Some(sha), Some(bytes)) = (
+                value["path"].as_str(),
+                value["sha256"].as_str(),
+                value["bytes"].as_u64(),
+            ) {
+                files.push((path.to_string(), sha.to_string(), bytes));
+            }
+        }
+        let source = SourceRoot::open(Path::new(against))?;
+        match verify_scan_manifest(manifest, &source, &mut |item| {
+            println!("{} {} {}", item.kind, item.path, item.detail);
+            drift.push((item.kind.clone(), item.path.clone(), item.detail.clone()));
+        }) {
+            Ok(()) | Err(IngestError::ManifestDrift { .. }) => {}
+            Err(err) => return Err(err),
+        }
+    } else {
+        let text = std::fs::read_to_string(manifest).map_err(|err| IngestError::Io {
+            path: manifest.to_path_buf(),
+            source: err,
+        })?;
+        let entries = parse_manifest(&text)?;
+        let dest = open_target(against)?;
+        let ignore = manifest_ignore(manifest, against)?;
+        for item in tree_drift(&entries, dest.as_ref(), &ignore)? {
+            println!("{} {} {}", item.kind, item.path, item.detail);
+            drift.push((item.kind.to_string(), item.path, item.detail));
+        }
+        files = entries
+            .into_iter()
+            .map(|entry| (entry.relative_path, entry.sha256, entry.byte_len))
+            .collect();
+    }
+    let finished = std::time::SystemTime::now();
+    let count = drift.len() as u64;
+    let (md, json) = proof::write_proof(
+        proof_path,
+        &proof::ProofInput {
+            manifest,
+            against,
+            started,
+            finished,
+            files,
+            drift,
+        },
+    )?;
+    println!("proof: {}", md.display());
+    println!("proof: {}", json.display());
+    if count == 0 {
+        println!("verified against {against}");
+        Ok(())
+    } else {
+        Err(IngestError::ManifestDrift { count })
     }
 }
 
