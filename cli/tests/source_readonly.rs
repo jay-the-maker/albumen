@@ -368,3 +368,159 @@ fn symlink_destination_into_the_source_is_refused() {
     assert_eq!(capture(&root), before);
     let _ = File::open(root.join("a.txt")).unwrap();
 }
+
+/// Every entry under `root` (root included): kind, size, SHA-256 of the
+/// bytes, mtime to the nanosecond, and full mode. Sorted, so a new or
+/// removed file shows up as a listing difference.
+fn digest(root: &Path) -> Vec<(String, bool, u64, String, i64, i64, u32)> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    capture(root)
+        .into_iter()
+        .map(|entry| {
+            let meta = fs::symlink_metadata(root.join(&entry.rel)).unwrap();
+            let sha = Sha256::digest(&entry.bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            (
+                entry.rel,
+                entry.is_dir,
+                meta.size() * u64::from(!entry.is_dir),
+                sha,
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.mode(),
+            )
+        })
+        .collect()
+}
+
+/// Gives write permission back to the user on drop, so a failed assert
+/// still lets the temp dir be cleaned up.
+struct Unlock(PathBuf);
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut stack = vec![self.0.clone()];
+        while let Some(path) = stack.pop() {
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let mut perms = meta.permissions();
+            perms.set_mode(meta.mode_bits() | 0o200);
+            let _ = fs::set_permissions(&path, perms);
+            if meta.is_dir() {
+                if let Ok(dir) = fs::read_dir(&path) {
+                    stack.extend(dir.flatten().map(|e| e.path()));
+                }
+            }
+        }
+    }
+}
+
+trait ModeBits {
+    fn mode_bits(&self) -> u32;
+}
+impl ModeBits for fs::Metadata {
+    fn mode_bits(&self) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        self.mode() & 0o7777
+    }
+}
+
+#[test]
+fn backup_twice_and_verify_never_write_the_source_even_when_locked() {
+    let (tmp, root) = prepare(false);
+    let _unlock = Unlock(root.clone());
+    let mtime = UNIX_EPOCH + Duration::new(1_500_000_000, 987_654_321);
+    // Extra shapes for backup: a hidden file, a read-only file, a deeper dir.
+    stamp(&root.join(".hidden-note"), b"hidden", mtime);
+    stamp(
+        &root.join("trip/day 2/deep/IMG_0002.jpg"),
+        b"deep-jpeg",
+        mtime,
+    );
+    stamp(&root.join("trip/locked.jpg"), b"locked-jpeg", mtime);
+    apply_mode(&root.join("trip/locked.jpg"), 0o444);
+    let home = tmp.path().join("home");
+    let dest = tmp.path().join("dest");
+    let backup = |label: &str| {
+        let out = albumen()
+            .env("ALBUMEN_HOME", &home)
+            .args(["backup", "--from"])
+            .arg(&root)
+            .arg("--to")
+            .arg(&dest)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{label}: {text}");
+        assert!(text.contains("backup ok:"), "{label}: {text}");
+        text
+    };
+    let before = digest(&root);
+    assert!(before.iter().any(|e| e.0 == ".hidden-note"));
+    assert!(before.iter().any(|e| e.0 == "trip/day 2/deep/IMG_0002.jpg"));
+
+    let first = backup("first backup");
+    assert!(dest.join("trip/IMG.jpg").is_file(), "{first}");
+    assert!(dest.join("trip/IMG.xmp").is_file(), "{first}");
+    assert_eq!(digest(&root), before, "first backup changed the source");
+
+    let second = backup("incremental backup");
+    assert!(second.contains(" 0 copied"), "{second}");
+    assert_eq!(
+        digest(&root),
+        before,
+        "incremental backup changed the source"
+    );
+
+    // Lock every entry (chmod a-w): any write into the source now errors.
+    lock_writes(&root);
+    let locked = digest(&root);
+    let third = backup("backup on a read-only source");
+    assert!(third.contains(" 0 copied"), "{third}");
+    let manifest = tmp.path().join("scan.jsonl");
+    let (ok, text) = run(&[
+        "scan",
+        root.to_str().unwrap(),
+        "--manifest",
+        manifest.to_str().unwrap(),
+    ]);
+    assert!(ok, "{text}");
+    let (ok, text) = run(&[
+        "verify-manifest",
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--against",
+        root.to_str().unwrap(),
+    ]);
+    assert!(ok, "verify: {text}");
+    let status = albumen()
+        .env("ALBUMEN_HOME", &home)
+        .arg("status")
+        .arg(&dest)
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    assert_eq!(
+        digest(&root),
+        locked,
+        "a locked-source run changed the source"
+    );
+    // Same bytes, sizes, mtimes and listing as before; only the w bits differ.
+    let strip = |v: Vec<(String, bool, u64, String, i64, i64, u32)>| {
+        v.into_iter()
+            .map(|mut e| {
+                e.6 &= !0o222;
+                e
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strip(locked), strip(before));
+}
