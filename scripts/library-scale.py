@@ -374,7 +374,10 @@ def main():
     hash_all_ms = (time.perf_counter() - began) * 1000.0
 
     # Warm metadata search over every item (a keyword that matches nothing).
-    warm_env = {"ALBUMEN_SEARCH_STATS": "1", "ALBUMEN_METADATA_CACHE_ITEMS": "0", "ALBUMEN_EXIFTOOL_BATCH": "4096"}
+    # Windows runs ExifTool through exiftool.cmd, and cmd.exe caps a command
+    # line at 8191 characters, so keep the default batch of 64 there.
+    batch = "64" if os.name == "nt" else "4096"
+    warm_env = {"ALBUMEN_SEARCH_STATS": "1", "ALBUMEN_METADATA_CACHE_ITEMS": "0", "ALBUMEN_EXIFTOOL_BATCH": batch}
     warm_server = Server(args.binary, library, index_dir, search_thumbnail_dir, warm_env)
     warm_server.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "library-scale", "version": "1"}})
     warm_server.send("tools/list", {})
