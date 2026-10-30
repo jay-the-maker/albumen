@@ -778,11 +778,34 @@ fn library_files(library: &Path) -> Vec<String> {
     without_hidden(library, out)
 }
 
+/// The last listing's hide problems as one quiet line (None when there were
+/// none). Shown on the page via `/api/found` "hide_note"; one gui per
+/// process, so one note.
+static HIDE_NOTE: Mutex<Option<String>> = Mutex::new(None);
+
+/// One quiet line for hide problems: the photo stays hidden (fail closed),
+/// and the user is told which file made that call.
+fn hide_note(errors: &[String]) -> Option<String> {
+    match errors {
+        [] => None,
+        [one] => Some(format!("Hidden because a hide file can't be read: {one}")),
+        [first, rest @ ..] => Some(format!(
+            "{} hide files can't be read, so their photos stay hidden. First: {first}",
+            rest.len() + 1
+        )),
+    }
+}
+
 /// `paths` minus what the hide files (receiver tombstones, the family log)
 /// say is hidden, read now on every listing (M7, A8). The index stays a
-/// plain path cache; the files are the only source of truth.
+/// plain path cache; the files are the only source of truth. Hide problems
+/// are logged one per line and kept as the page's quiet line, never a panic.
 fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
     let hidden = albumen_ingest::hides::hidden_paths(library, &paths, None);
+    for err in &hidden.errors {
+        eprintln!("albumen gui: hide: {err}");
+    }
+    *HIDE_NOTE.lock().unwrap() = hide_note(&hidden.errors);
     if !hidden.paths.is_empty() {
         paths.retain(|p| !hidden.paths.contains(p));
     }
@@ -813,6 +836,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "found": server.found.load(std::sync::atomic::Ordering::Relaxed),
         "paths": paths,
         "index_note": server.index_note.lock().unwrap().clone(),
+        "hide_note": HIDE_NOTE.lock().unwrap().clone(),
     })
 }
 
@@ -830,7 +854,21 @@ fn library_files_indexed_in(
     found_paths.lock().unwrap().clear();
     let opened =
         albumen_ingest::index::LibraryIndex::open_with_progress(library, dir, &mut |rel| {
+            // A first build streams tiles before the listing exists, so a
+            // photo whose tombstone says hidden (or can't be read: fail
+            // closed) is never counted or shown here either.
             if is_photo(rel) {
+                match albumen_ingest::hides::receiver_hidden(library, rel) {
+                    Ok(false) => {}
+                    Ok(true) => return,
+                    Err(err) => {
+                        HIDE_NOTE
+                            .lock()
+                            .unwrap()
+                            .get_or_insert_with(|| hide_note(std::slice::from_ref(&err)).unwrap());
+                        return;
+                    }
+                }
                 n += 1;
                 if n <= FOUND_SHOWN {
                     found_paths.lock().unwrap().push(rel.to_string());
@@ -845,7 +883,9 @@ fn library_files_indexed_in(
             paths.sort();
             let paths = without_hidden(library, paths);
             let photos = paths.iter().filter(|p| is_photo(p)).count();
-            found.fetch_max(photos, Ordering::Relaxed);
+            // The visible count, not the larger walk count: hidden photos
+            // never inflate the header.
+            found.store(photos, Ordering::Relaxed);
             paths
         }
         Err(_) => library_files(library),
@@ -1400,6 +1440,19 @@ mod tests {
     /// /api/found: a first walk (no saved index) records the photos it
     /// finds, at most one page, never other files; a second open from the
     /// saved index lists the same files.
+    #[test]
+    fn a_hide_problem_is_one_quiet_line_naming_the_file() {
+        assert_eq!(hide_note(&[]), None);
+        let one = hide_note(&["a.jpg.albumen-tombstone: not valid JSON (x); hiding it".into()]);
+        assert_eq!(
+            one.as_deref(),
+            Some("Hidden because a hide file can't be read: a.jpg.albumen-tombstone: not valid JSON (x); hiding it")
+        );
+        let two = hide_note(&["a.jpg.albumen-tombstone: e".into(), "b: e".into()]).unwrap();
+        assert!(two.starts_with("2 hide files can't be read"), "{two}");
+        assert!(two.contains("a.jpg.albumen-tombstone"), "{two}");
+    }
+
     #[test]
     fn api_found_lists_photos_found_by_a_first_walk() {
         let lib = tempfile::tempdir().unwrap();

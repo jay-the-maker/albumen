@@ -249,11 +249,18 @@ fn visible(library: &Path, index: &Path, viewer: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn a_family_hide_is_per_viewer_and_a_tombstone_is_for_everyone() {
-    let tmp = tempfile::tempdir().unwrap();
-    let key_a = tmp.path().join("a.key");
-    let key_b = tmp.path().join("b.key");
+/// A two-member family library (ada admits bea) made with the CLI.
+struct Family {
+    library: PathBuf,
+    key_a: PathBuf,
+    key_b: PathBuf,
+    member_a: String,
+    member_b: String,
+}
+
+fn family(tmp: &Path) -> Family {
+    let key_a = tmp.join("a.key");
+    let key_b = tmp.join("b.key");
     let s = |p: &Path| p.to_str().unwrap().to_string();
     let (ok, text) = albumen(&["family", "keygen", "--key", &s(&key_a), "--apply"]);
     assert!(ok, "{text}");
@@ -261,7 +268,7 @@ fn a_family_hide_is_per_viewer_and_a_tombstone_is_for_everyone() {
     let (ok, text) = albumen(&["family", "keygen", "--key", &s(&key_b), "--apply"]);
     assert!(ok, "{text}");
     let member_b = line(&text, "member ").to_string();
-    let parent = tmp.path().join("shared");
+    let parent = tmp.join("shared");
     fs::create_dir(&parent).unwrap();
     let (ok, text) = albumen(&[
         "family",
@@ -319,52 +326,69 @@ fn a_family_hide_is_per_viewer_and_a_tombstone_is_for_everyone() {
     ]);
     assert!(ok, "{text}");
 
+    Family {
+        library,
+        key_a,
+        key_b,
+        member_a,
+        member_b,
+    }
+}
+
+/// `family add` one synthetic file; returns its object path and sha256.
+fn family_add(f: &Family, src: &Path) -> (String, String) {
+    let (ok, text) = albumen(&[
+        "family",
+        "add",
+        "--library",
+        f.library.to_str().unwrap(),
+        "--key",
+        f.key_a.to_str().unwrap(),
+        "--from",
+        src.to_str().unwrap(),
+        "--apply",
+    ]);
+    assert!(ok, "{text}");
+    let sha = line(&text, "sha256 ").to_string();
+    let r = format!("members/{}/objects/sha256/{}/{sha}", f.member_a, &sha[..2]);
+    (r, sha)
+}
+
+/// `family hide` (as bea) or `family tombstone` (as ada) one object.
+fn family_mark(f: &Family, verb: &str, sha: &str) {
+    let key = if verb == "hide" { &f.key_b } else { &f.key_a };
+    let (ok, text) = albumen(&[
+        "family",
+        verb,
+        "--library",
+        f.library.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--sha256",
+        sha,
+        "--apply",
+    ]);
+    assert!(ok, "{text}");
+}
+
+#[test]
+fn a_family_hide_is_per_viewer_and_a_tombstone_is_for_everyone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = family(tmp.path());
+    let library = f.library.clone();
+    let member_a = f.member_a.clone();
+    let member_b = f.member_b.clone();
     let mut stored = Vec::new();
     let mut rel = Vec::new();
     for name in ["hidden-for-bea.jpg", "tombstoned.jpg", "plain.jpg"] {
         let src = tmp.path().join(name);
         fs::write(&src, format!("synthetic-m7-family-{name}")).unwrap();
-        let (ok, text) = albumen(&[
-            "family",
-            "add",
-            "--library",
-            &lib,
-            "--key",
-            &s(&key_a),
-            "--from",
-            &s(&src),
-            "--apply",
-        ]);
-        assert!(ok, "{text}");
-        let sha = line(&text, "sha256 ").to_string();
-        let r = format!("members/{member_a}/objects/sha256/{}/{sha}", &sha[..2]);
+        let (r, sha) = family_add(&f, &src);
         stored.push(library.join(&r));
         rel.push((r, sha));
     }
-    let (ok, text) = albumen(&[
-        "family",
-        "hide",
-        "--library",
-        &lib,
-        "--key",
-        &s(&key_b),
-        "--sha256",
-        &rel[0].1,
-        "--apply",
-    ]);
-    assert!(ok, "{text}");
-    let (ok, text) = albumen(&[
-        "family",
-        "tombstone",
-        "--library",
-        &lib,
-        "--key",
-        &s(&key_a),
-        "--sha256",
-        &rel[1].1,
-        "--apply",
-    ]);
-    assert!(ok, "{text}");
+    family_mark(&f, "hide", &rel[0].1);
+    family_mark(&f, "tombstone", &rel[1].1);
     let before = kept(&stored);
 
     let index_a = tempfile::tempdir().unwrap();
@@ -432,42 +456,73 @@ fn hidden_photos_stay_hidden_at_scale() {
         return;
     };
     let bars = std::env::var("ALBUMEN_M7_BARS").as_deref() == Ok("1");
-    let library = tempfile::tempdir().unwrap();
+    // The photos sit inside a family library (genesis.json, family hides
+    // and tombstones), so every listing pays the family-log replay too.
+    let tmp = tempfile::tempdir().unwrap();
+    let fam = family(tmp.path());
+    let marks = (files / 2000).max(2);
+    for k in 0..marks {
+        let src = tmp.path().join(format!("fam-{k}.jpg"));
+        fs::write(&src, format!("synthetic-m7-scale-family-{k}")).unwrap();
+        let (_, sha) = family_add(&fam, &src);
+        family_mark(&fam, if k % 2 == 0 { "hide" } else { "tombstone" }, &sha);
+    }
+    let library = fam.library.as_path();
     let work = tempfile::tempdir().unwrap();
     let index = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let mut hidden = Vec::new();
     for i in 0..files {
         let dir = format!("d{:02}", i % 50);
-        fs::create_dir_all(library.path().join(&dir)).unwrap();
+        fs::create_dir_all(library.join(&dir)).unwrap();
         let rel = format!("{dir}/IMG_{i:07}.jpg");
-        fs::write(library.path().join(&rel), b"").unwrap();
+        fs::write(library.join(&rel), b"").unwrap();
         if i % 1000 == 7 {
             fs::write(
-                library.path().join(format!("{rel}.albumen-tombstone")),
+                library.join(format!("{rel}.albumen-tombstone")),
                 format!("{{\"hidden\":true,\"reason\":\"hide\",\"stored_name\":\"{rel}\"}}\n"),
             )
             .unwrap();
             hidden.push(rel);
         }
     }
-    // A saved index, as after the first scan; the gui then rescans from it.
-    LibraryIndex::open(library.path(), Some(index.path())).unwrap();
+    let hidden_set: std::collections::HashSet<&str> = hidden.iter().map(String::as_str).collect();
 
+    // COLD: no saved index. The first tile is the first one the page can
+    // draw, streamed from /api/found during the first walk or from the
+    // finished listing, whichever comes first.
     let began = Instant::now();
-    let (_gui, addr, pid) = start_pid(library.path(), work.path(), index.path(), home.path());
+    let (_gui, addr, pid) = start_pid(library, work.path(), index.path(), home.path());
     let mut first_tile_ms = None;
-    for _ in 0..4000 {
+    let mut found_polls = 0usize;
+    let ready_ms = loop {
+        assert!(began.elapsed() < Duration::from_secs(1800), "never ready");
+        let f = found_page(&addr);
+        found_polls += 1;
+        let streamed = f["paths"].as_array().unwrap();
+        for p in streamed {
+            let p = p.as_str().unwrap();
+            assert!(!hidden_set.contains(p), "first build streamed hidden {p}");
+        }
+        assert!(
+            f["found"].as_u64().unwrap() as usize <= files - hidden.len(),
+            "found counts hidden photos: {f}"
+        );
+        if first_tile_ms.is_none() && !streamed.is_empty() {
+            first_tile_ms = Some(began.elapsed().as_secs_f64() * 1000.0);
+        }
         let (code, body) = get(&addr, "/api/library?offset=0&limit=1");
         assert_eq!(code, 200);
         let page: serde_json::Value = serde_json::from_str(&body).unwrap();
         if page["status"] == "ready" && !page["images"].as_array().unwrap().is_empty() {
-            first_tile_ms = Some(began.elapsed().as_secs_f64() * 1000.0);
-            break;
+            let ms = began.elapsed().as_secs_f64() * 1000.0;
+            first_tile_ms.get_or_insert(ms);
+            break ms;
         }
         std::thread::sleep(Duration::from_millis(5));
-    }
-    let first_tile_ms = first_tile_ms.expect("no first tile");
+    };
+    let first_tile_ms = first_tile_ms.unwrap();
+    let f = found_page(&addr);
     let (_, body) = get(&addr, "/api/library");
     let lib: serde_json::Value = serde_json::from_str(&body).unwrap();
     let shown: std::collections::HashSet<&str> = lib["images"]
@@ -480,7 +535,9 @@ fn hidden_photos_stay_hidden_at_scale() {
     let rss = peak_rss_kb(pid);
     println!(
         "M6 M7 RESULT files={files} hidden={} shown={} hidden_shown={hidden_shown} \
-         first_tile_ms={first_tile_ms:.1} gui_child_peak_rss_kb={} bars={bars}",
+         family_marks={marks} cold=1 found_polls={found_polls} \
+         first_tile_ms={first_tile_ms:.1} ready_ms={ready_ms:.1} \
+         gui_child_peak_rss_kb={} bars={bars}",
         hidden.len(),
         shown.len(),
         rss.map(|r| r.to_string())
@@ -488,6 +545,8 @@ fn hidden_photos_stay_hidden_at_scale() {
     );
     assert_eq!(hidden_shown, 0, "hidden photos shown at scale");
     assert_eq!(shown.len(), files - hidden.len());
+    assert_eq!(f["found"].as_u64(), Some((files - hidden.len()) as u64));
+    assert!(f["hide_note"].is_null(), "hide problem: {}", f["hide_note"]);
     if bars {
         assert!(
             first_tile_ms <= 2000.0,
@@ -496,4 +555,110 @@ fn hidden_photos_stay_hidden_at_scale() {
         let rss = rss.expect("peak RSS unmeasured on this OS");
         assert!(rss <= 339_968, "gui child peak RSS {rss} kB over 332 MiB");
     }
+}
+
+fn found_page(addr: &str) -> serde_json::Value {
+    let (code, body) = get(addr, "/api/found");
+    assert_eq!(code, 200);
+    serde_json::from_str(&body).unwrap()
+}
+
+#[test]
+fn a_hide_file_that_cant_be_read_hides_the_photo_and_says_so() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for name in ["IMG_0001.JPG", "IMG_0002.JPG"] {
+        fs::write(library.path().join(name), b"").unwrap();
+    }
+    fs::write(library.path().join("IMG_0002.JPG.albumen-tombstone"), b"{").unwrap();
+    for pass in ["first build", "rescan"] {
+        let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+        let began = Instant::now();
+        let lib = loop {
+            let (_, body) = get(&addr, "/api/library");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v["status"] == "ready" {
+                break v;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(60),
+                "{pass}: never ready"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let paths: Vec<&str> = lib["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["IMG_0001.JPG"], "{pass}");
+        let f = found_page(&addr);
+        let note = f["hide_note"].as_str().unwrap_or_default();
+        println!("M7 hide-note {pass}: {note}");
+        assert!(
+            note.contains("IMG_0002.JPG.albumen-tombstone"),
+            "{pass}: {f}"
+        );
+        assert_eq!(f["found"], 1, "{pass}: {f}");
+    }
+}
+
+#[test]
+fn a_first_build_never_streams_a_hidden_tile() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let files = 4000usize;
+    let mut hidden = std::collections::HashSet::new();
+    for i in 0..files {
+        let dir = format!("d{:02}", i % 20);
+        fs::create_dir_all(library.path().join(&dir)).unwrap();
+        let rel = format!("{dir}/IMG_{i:05}.jpg");
+        fs::write(library.path().join(&rel), b"").unwrap();
+        if i % 3 == 0 {
+            fs::write(
+                library.path().join(format!("{rel}.albumen-tombstone")),
+                br#"{"hidden":true,"reason":"hide"}"#,
+            )
+            .unwrap();
+            hidden.insert(rel);
+        }
+    }
+    let visible_n = files - hidden.len();
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    let began = Instant::now();
+    let mut polls = 0usize;
+    let mut streamed_seen = 0usize;
+    loop {
+        let f = found_page(&addr);
+        polls += 1;
+        let paths = f["paths"].as_array().unwrap();
+        streamed_seen = streamed_seen.max(paths.len());
+        for p in paths {
+            let p = p.as_str().unwrap();
+            assert!(!hidden.contains(p), "poll {polls}: streamed hidden {p}");
+        }
+        let found = f["found"].as_u64().unwrap() as usize;
+        assert!(
+            found <= visible_n,
+            "poll {polls}: found {found} > {visible_n}"
+        );
+        let (_, body) = get(&addr, "/api/library?offset=0&limit=600");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for i in v["images"].as_array().unwrap() {
+            let p = i["path"].as_str().unwrap();
+            assert!(!hidden.contains(p), "poll {polls}: listed hidden {p}");
+        }
+        if v["status"] == "ready" {
+            assert_eq!(v["total_images"].as_u64(), Some(visible_n as u64));
+            assert_eq!(found_page(&addr)["found"].as_u64(), Some(visible_n as u64));
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(120), "never ready");
+    }
+    println!("M7 first-build polls={polls} streamed_max={streamed_seen} visible={visible_n}");
 }

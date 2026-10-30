@@ -54,31 +54,41 @@ fn receiver_tombstones(library: &Path, paths: &[String], out: &mut Hidden) {
         if original.is_empty() {
             continue;
         }
-        let hidden = match std::fs::read(library.join(rel)) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(v) => match v.get("hidden").and_then(Value::as_bool) {
-                    Some(h) => h,
-                    None => {
-                        out.errors
-                            .push(format!("{rel}: no \"hidden\" true/false; hiding it"));
-                        true
-                    }
-                },
-                Err(err) => {
-                    out.errors
-                        .push(format!("{rel}: not valid JSON ({err}); hiding it"));
-                    true
-                }
-            },
+        let hidden = match read_tombstone(&library.join(rel)) {
+            Ok(h) => h,
             Err(err) => {
-                out.errors
-                    .push(format!("{rel}: could not read ({err}); hiding it"));
+                out.errors.push(format!("{rel}: {err}; hiding it"));
                 true
             }
         };
         if hidden {
             out.paths.insert(original.to_string());
         }
+    }
+}
+
+/// Whether a receiver tombstone file says hidden. Err (in plain words) when
+/// it cannot be read or parsed; callers fail closed and hide the photo.
+fn read_tombstone(path: &Path) -> Result<bool, String> {
+    let bytes = std::fs::read(path).map_err(|err| format!("could not read ({err})"))?;
+    let v: Value =
+        serde_json::from_slice(&bytes).map_err(|err| format!("not valid JSON ({err})"))?;
+    v.get("hidden")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "no \"hidden\" true/false".to_string())
+}
+
+/// One photo, as a walk finds it, before the full path list exists: is a
+/// receiver tombstone beside `rel` saying hidden? One stat per photo (plus
+/// a read when a tombstone exists). `Err` names the tombstone and the
+/// problem; the caller hides the photo (fail closed) and says so.
+pub fn receiver_hidden(library: &Path, rel: &str) -> Result<bool, String> {
+    let tomb = format!("{rel}{TOMBSTONE_SUFFIX}");
+    let path = library.join(&tomb);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => read_tombstone(&path).map_err(|err| format!("{tomb}: {err}; hiding it")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("{tomb}: could not check ({err}); hiding it")),
     }
 }
 
@@ -179,6 +189,20 @@ mod tests {
             .collect();
         assert_eq!(h.paths, want);
         assert_eq!(h.errors.len(), 2, "{:?}", h.errors);
+    }
+
+    #[test]
+    fn receiver_hidden_one_photo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path();
+        std::fs::write(lib.join("a.jpg.albumen-tombstone"), br#"{"hidden":true}"#).unwrap();
+        std::fs::write(lib.join("b.jpg.albumen-tombstone"), br#"{"hidden":false}"#).unwrap();
+        std::fs::write(lib.join("c.jpg.albumen-tombstone"), b"{").unwrap();
+        assert_eq!(receiver_hidden(lib, "a.jpg"), Ok(true));
+        assert_eq!(receiver_hidden(lib, "b.jpg"), Ok(false));
+        assert_eq!(receiver_hidden(lib, "x.jpg"), Ok(false));
+        let err = receiver_hidden(lib, "c.jpg").unwrap_err();
+        assert!(err.starts_with("c.jpg.albumen-tombstone: "), "{err}");
     }
 
     #[test]
