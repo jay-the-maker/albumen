@@ -1038,7 +1038,7 @@ fn required_f64(map: &serde_json::Map<String, Value>, key: &str) -> Result<f64, 
 fn search_def() -> Value {
     json!({
         "name": "search",
-        "description": "Find library files by path, capture date, camera, lens, GPS box, keyword, or caption. Metadata is read from the files and their XMP/AAE sidecars. Results are one page. Pass next_cursor to read the next page. Every answer carries freshness {state, checked_at, folders_not_rechecked, label, next}: label and next are the exact lines to show. Nothing is written.",
+        "description": "Find library files by path, capture date, camera, lens, GPS box, keyword, or caption. Metadata is read from the files and their XMP/AAE sidecars. Results are one page. Pass next_cursor to read the next page. Every answer carries freshness {state, checked_at, folders_not_rechecked, label, next}: label and next are the exact lines to show. Nothing is written. On Windows, an edit is picked up by the first search after the editing app closes the file. If an app still has a photo open, search may show its previous version until the app closes it.",
         "inputSchema": {
             "type": "object",
             "properties": {
