@@ -522,7 +522,12 @@ fn hidden_photos_stay_hidden_at_scale() {
         std::thread::sleep(Duration::from_millis(5));
     };
     let first_tile_ms = first_tile_ms.unwrap();
+    // One /api/found after the listing: the hide-line refresh the page runs
+    // every 10 s (tombstones + family replay). Diagnostic only, no bar.
+    let poll_began = Instant::now();
     let f = found_page(&addr);
+    let hide_poll_ms = poll_began.elapsed().as_secs_f64() * 1000.0;
+    println!("M7 HIDE_POLL_DIAG files={files} family_marks={marks} hide_poll_ms={hide_poll_ms:.1}");
     let (_, body) = get(&addr, "/api/library");
     let lib: serde_json::Value = serde_json::from_str(&body).unwrap();
     let shown: std::collections::HashSet<&str> = lib["images"]
@@ -536,7 +541,7 @@ fn hidden_photos_stay_hidden_at_scale() {
     println!(
         "M6 M7 RESULT files={files} hidden={} shown={} hidden_shown={hidden_shown} \
          family_marks={marks} cold=1 found_polls={found_polls} \
-         first_tile_ms={first_tile_ms:.1} ready_ms={ready_ms:.1} \
+         first_tile_ms={first_tile_ms:.1} ready_ms={ready_ms:.1} hide_poll_ms={hide_poll_ms:.1} \
          gui_child_peak_rss_kb={} bars={bars}",
         hidden.len(),
         shown.len(),
@@ -765,4 +770,64 @@ fn the_hide_note_follows_a_hide_file_on_the_next_poll() {
     let fixed = found_page(&addr);
     println!("M7 hide-note after fix: {}", fixed["hide_note"]);
     assert!(fixed["hide_note"].is_null(), "{fixed}");
+}
+
+#[test]
+fn a_bad_family_log_entry_before_a_later_hide_hides_every_family_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = family(tmp.path());
+    let mut objects = Vec::new();
+    let mut shas = Vec::new();
+    for name in ["one.jpg", "two.jpg", "three.jpg"] {
+        let src = tmp.path().join(name);
+        fs::write(&src, format!("synthetic-m7-badentry-{name}")).unwrap();
+        let (r, sha) = family_add(&f, &src);
+        objects.push(r);
+        shas.push(sha);
+    }
+    // bea: hide one, then hide two (the later hide).
+    family_mark(&f, "hide", &shas[0]);
+    family_mark(&f, "hide", &shas[1]);
+    let index = tempfile::tempdir().unwrap();
+    let v = visible(&f.library, index.path(), Some(&f.member_b));
+    assert!(
+        !v.contains(&objects[1]) && v.contains(&objects[2]),
+        "before: {v:?}"
+    );
+    // Corrupt bea's entry for "hide one" (synthetic temp fixture). The view
+    // drops it and the later "hide two" with it; hides must fail closed.
+    let mut files = Vec::new();
+    files_under(&f.library.join("members").join(&f.member_b), &mut files);
+    let mut logs: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|p| p.parent().is_some_and(|d| d.ends_with("log")))
+        .collect();
+    logs.sort_by_key(|p| {
+        p.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+    });
+    let bad = logs[logs.len() - 2].clone();
+    fs::write(&bad, b"{ not a signed entry").unwrap();
+    let want = format!(
+        "Family photos hidden: a family log entry can't be read: {}",
+        bad.display()
+    );
+    for viewer in [Some(f.member_a.as_str()), Some(f.member_b.as_str()), None] {
+        let h = hidden_paths(&f.library, &objects, viewer);
+        for o in &objects {
+            assert!(
+                h.paths.contains(o),
+                "{viewer:?} sees {o} with a bad log entry"
+            );
+        }
+        assert_eq!(h.errors, std::slice::from_ref(&want), "{viewer:?}");
+    }
+    let work = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let gui_index = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(&f.library, work.path(), gui_index.path(), home.path());
+    let found = ready_found(&addr);
+    println!("M7 bad-entry note: {}", found["hide_note"]);
+    assert_eq!(found["hide_note"].as_str(), Some(want.as_str()));
 }

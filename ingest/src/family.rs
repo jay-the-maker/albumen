@@ -1066,6 +1066,26 @@ fn manifest_value(view: &View) -> Value {
 }
 
 /// Merge every verified log into the shared manifest.
+/// Log entries that end a device's chain early because they can't be read
+/// or don't verify (bad JSON, bad signature, wrong member/device/seq/prev).
+/// The view silently drops such an entry and every later one from that
+/// device; sync and export keep that behaviour. Hide derivation calls this
+/// so it can fail closed instead (M7, A8). A missing seq (a gap) is not
+/// reported here.
+pub fn unreadable_log_entries(library: &Path) -> Result<Vec<PathBuf>, IngestError> {
+    let mut bad = Vec::new();
+    for member in member_dirs(library)? {
+        for device in device_dirs(library, &member)? {
+            let chain = read_device_chain(library, &member, &device)?;
+            let files = list_log_files(&log_dir(library, &member, &device))?;
+            if chain.gap.is_none() && chain.records.len() < files.len() {
+                bad.push(files[chain.records.len()].1.clone());
+            }
+        }
+    }
+    Ok(bad)
+}
+
 pub fn manifest_json(library: &Path) -> Result<String, IngestError> {
     let view = build_view(library)?;
     let value = manifest_value(&view);

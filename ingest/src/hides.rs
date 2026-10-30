@@ -117,27 +117,66 @@ fn family_object(rel: &str) -> Option<(&str, &str)> {
 /// read; the path follows, then a newline and the detail.
 pub const FAMILY_LOG_UNREADABLE: &str = "Family photos hidden: can't read the family log ";
 
+/// Start of the error (and the gui's line) when one family log entry can't
+/// be read or verified; `<path>/log/<seq>.json` follows.
+pub const FAMILY_ENTRY_UNREADABLE: &str =
+    "Family photos hidden: a family log entry can't be read: ";
+
+/// Every family fail-closed line starts with this; the gui shows the first
+/// line as is.
+pub const FAMILY_HIDDEN: &str = "Family photos hidden: ";
+
 fn family_state(library: &Path, paths: &[String], viewer: Option<&str>, out: &mut Hidden) {
+    let fail_closed = |out: &mut Hidden, msg: String| {
+        // Fail closed: every family object is hidden for everyone until the
+        // log reads again, and the message says exactly that.
+        out.errors.push(msg);
+        for rel in paths {
+            if family_object(rel).is_some() {
+                out.paths.insert(rel.clone());
+            }
+        }
+    };
     let value: Value = match crate::family::manifest_json(library)
         .map_err(|err| err.to_string())
         .and_then(|json| serde_json::from_str(&json).map_err(|err| err.to_string()))
     {
         Ok(v) => v,
         Err(err) => {
-            // Fail closed: every family object is hidden for everyone until
-            // the log reads again, and the message says exactly that.
-            out.errors.push(format!(
-                "{FAMILY_LOG_UNREADABLE}{}\n{err}",
-                library.join("members").display()
-            ));
-            for rel in paths {
-                if family_object(rel).is_some() {
-                    out.paths.insert(rel.clone());
-                }
-            }
+            let members = library.join("members");
+            fail_closed(
+                out,
+                format!("{FAMILY_LOG_UNREADABLE}{}\n{err}", members.display()),
+            );
             return;
         }
     };
+    // A bad entry would silently drop itself and every later entry from its
+    // device (possibly a hide), so the view would unhide: fail closed.
+    match crate::family::unreadable_log_entries(library) {
+        Ok(bad) if bad.is_empty() => {}
+        Ok(bad) => {
+            let first = format!("{FAMILY_ENTRY_UNREADABLE}{}", bad[0].display());
+            let more = bad.len() - 1;
+            fail_closed(
+                out,
+                if more == 0 {
+                    first
+                } else {
+                    format!("{first}\nand {more} more device log(s) end early")
+                },
+            );
+            return;
+        }
+        Err(err) => {
+            let members = library.join("members");
+            fail_closed(
+                out,
+                format!("{FAMILY_LOG_UNREADABLE}{}\n{err}", members.display()),
+            );
+            return;
+        }
+    }
     let list = |key: &str| {
         value
             .get(key)

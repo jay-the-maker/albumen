@@ -786,20 +786,17 @@ static HIDE_NOTE: Mutex<Option<String>> = Mutex::new(None);
 /// One quiet line for hide problems: the photo stays hidden (fail closed),
 /// and the user is told which file made that call.
 fn hide_note(errors: &[String]) -> Option<String> {
-    use albumen_ingest::hides::FAMILY_LOG_UNREADABLE;
-    // The family-log line is shown as is: "Family photos hidden: can't read
-    // the family log <path>" (the detail after the path goes to the log).
+    use albumen_ingest::hides::FAMILY_HIDDEN;
+    // A family line is shown as is, first line only: "Family photos hidden:
+    // can't read the family log <path>" or "... a family log entry can't be
+    // read: <path>/log/<seq>.json" (any detail goes to the log).
     let family = errors
         .iter()
-        .find(|e| e.starts_with(FAMILY_LOG_UNREADABLE))
-        .map(|e| {
-            let path = &e[FAMILY_LOG_UNREADABLE.len()..];
-            let path = path.split('\n').next().unwrap_or(path);
-            format!("{FAMILY_LOG_UNREADABLE}{path}")
-        });
+        .find(|e| e.starts_with(FAMILY_HIDDEN))
+        .map(|e| e.split('\n').next().unwrap_or(e).to_string());
     let rest: Vec<&String> = errors
         .iter()
-        .filter(|e| !e.starts_with(FAMILY_LOG_UNREADABLE))
+        .filter(|e| !e.starts_with(FAMILY_HIDDEN))
         .collect();
     let receiver = match rest.as_slice() {
         [] => None,
