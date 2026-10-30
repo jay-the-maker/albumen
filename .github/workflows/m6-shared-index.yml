@@ -9,7 +9,7 @@ name: m6 shared index
 
 on:
   push:
-    branches: [m6-shared-index, m7-hide-persist]
+    branches: [m6-shared-index, m7-hide-persist, m7-hide-persist-r]
   workflow_dispatch:
     inputs:
       files:
@@ -91,7 +91,19 @@ jobs:
             bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7
 
       - name: The rest of the M7 hide tests
-        run: cargo test --release --locked -p albumen --test m7_hide_persist
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
+          # 6 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
+          grep -Eq '^test result: ok\. 6 passed; 0 failed; 0 ignored' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 6 tests green"; exit 1; }
+
+      - name: S3 export against MinIO (scripts/with-minio.sh)
+        run: |
+          set -o pipefail
+          scripts/with-minio.sh bash -c 'test -n "${ALBUMEN_S3_ENDPOINT:-}" && test -z "${ALBUMEN_S3_UNAVAILABLE:-}" && cargo test --release --locked -p albumen-ingest --lib export::tests::s3_export_skips_identical_objects_and_verifies' 2>&1 | tee s3.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored' s3.log \
+            || { echo "::error::the S3 test did not run against MinIO"; exit 1; }
 
       - name: The rest of the index tests
         run: |
