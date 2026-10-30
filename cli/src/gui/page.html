@@ -182,9 +182,12 @@ let nearQ=false;$('photos').addEventListener('scroll',()=>{if(nearQ)return;nearQ
 // coming back must not rely on them: re-check the grid at once, refill what
 // is near view (the first 200 included when at the top) and keep growing.
 function regrid(){if(document.visibilityState==='hidden')return;sweep();nearEnd();}
+// Also sweep on a slow timer, so a browser that skips scroll or
+// intersection callbacks still empties far blocks and refills near ones.
+setInterval(()=>{if(document.visibilityState!=='hidden')sweep();},400);
 document.addEventListener('visibilitychange',regrid);window.addEventListener('focus',regrid);window.addEventListener('pageshow',regrid);
 // Blocks are in page order, so a binary search finds the ones near view.
-function sweep(){if(!gs||!gs.blocks||!gs.blocks.length)return;const P=$('photos'),top=P.scrollTop-4000,bot=P.scrollTop+P.clientHeight+4000,B=gs.blocks;
+function sweep(){if(!gs||!gs.blocks||!gs.blocks.length)return;window.__sweeps=(window.__sweeps||0)+1;const P=$('photos'),top=P.scrollTop-4000,bot=P.scrollTop+P.clientHeight+4000,B=gs.blocks;
  let lo=0,hi=B.length-1;while(lo<hi){const mid=(lo+hi)>>1;const g=B[mid];if(g.offsetTop+g.offsetHeight<top)lo=mid+1;else hi=mid;}
  const keep=new Set();for(let i=lo;i<B.length&&B[i].offsetTop<=bot;i++){keep.add(B[i]);if(B[i]._empty)fillBlock(B[i]);}
  for(const g of gs.live)if(!keep.has(g))emptyBlock(g,g.offsetHeight);gs.live=keep;}
