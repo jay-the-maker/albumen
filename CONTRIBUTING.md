@@ -105,14 +105,20 @@ ExifTool and MinIO are pinned by exact version and SHA-256 in those scripts. Do 
   (`iptc_core`, `synthetic_live_photo`, and the receiver's
   `synthetic_live_photo_survives_the_webdav_receiver`) need Git Bash from
   [Git for Windows](https://gitforwindows.org/) at
-  `C:\Program Files\Git`. Without it they print `skipped: needs bash` and
-  pass; they never fall back to `C:\Windows\System32\bash.exe`, which is the
-  WSL launcher. On Linux and macOS bash is required and they always run.
+  `C:\Program Files\Git`. On Windows they are marked `#[ignore]` with a
+  reason, so a plain `cargo test` lists them as `ignored, needs Git Bash ...`;
+  they are not run and do not count as passing. With Git Bash installed, run
+  them with `cargo test --workspace -- --include-ignored`; without it they
+  fail with `needs bash`. They never fall back to
+  `C:\Windows\System32\bash.exe`, which is the WSL launcher. On Linux and
+  macOS bash is required and they always run.
 - **Symlinks.** `icloud::tests::symlink_is_not_followed` must create a
   symlink. Windows allows that only with Developer Mode on (Settings >
   System > For developers > Developer Mode) or from an elevated shell.
-  Without it the test prints `skipped: needs symlink privilege` (OS error
-  1314) and passes.
+  On Windows the test is marked `#[ignore]` with that reason, so a plain
+  `cargo test` lists it as ignored, not passed. Run it with
+  `--include-ignored` once Developer Mode is on; without the privilege it
+  fails with `needs symlink privilege` (OS error 1314).
 - **MinIO and rclone.** The S3 and rclone round trips need MinIO
   (`scripts/with-minio.sh`) and rclone, as on every platform; without them
   they fail with a message saying so.
