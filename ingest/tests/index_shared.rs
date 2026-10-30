@@ -10,7 +10,8 @@
 //!
 //! Sizes and counts come from the environment so the same tests give the
 //! acceptance runs: `ALBUMEN_M6_FILES` (default 2000), `ALBUMEN_M6_ITERS`
-//! (default 200), `ALBUMEN_M6_KILLS` (default 40), `ALBUMEN_M6_SEED`.
+//! (default 200), `ALBUMEN_M6_KILLS` (default 40), `ALBUMEN_M6_SEED`,
+//! `ALBUMEN_M6_READ_BARS=1` (fail X2 unless read p95 <= 20 ms and max <= 100 ms).
 //! Every randomized test prints its seed.
 
 use std::collections::BTreeSet;
@@ -137,9 +138,13 @@ fn gui_and_search_tool_share_one_index() {
     let reads = Arc::new(AtomicU64::new(0));
     let failures = Arc::new(AtomicU64::new(0));
     let max_read_us = Arc::new(AtomicU64::new(0));
+    // Reads over 100 ms. Readers take no lock, so any slow read is the
+    // reader's own parse and hash under CPU contention, not a writer.
+    let slow_reads = Arc::new(AtomicU64::new(0));
     let first_failure = Arc::new(std::sync::Mutex::new(None::<String>));
     let reader = {
         let first_failure = first_failure.clone();
+        let slow_reads = slow_reads.clone();
         let (stop, reads, failures, max_read_us, file) = (
             stop.clone(),
             reads.clone(),
@@ -148,16 +153,23 @@ fn gui_and_search_tool_share_one_index() {
             file.clone(),
         );
         std::thread::spawn(move || {
+            let mut times_us = Vec::new();
             while !stop.load(Ordering::Relaxed) {
                 let t = Instant::now();
                 let checked = check_saved_file(&file);
-                max_read_us.fetch_max(t.elapsed().as_micros() as u64, Ordering::Relaxed);
+                let us = t.elapsed().as_micros() as u64;
+                times_us.push(us);
+                max_read_us.fetch_max(us, Ordering::Relaxed);
+                if us > 100_000 {
+                    slow_reads.fetch_add(1, Ordering::Relaxed);
+                }
                 reads.fetch_add(1, Ordering::Relaxed);
                 if let Err(err) = checked {
                     failures.fetch_add(1, Ordering::Relaxed);
                     first_failure.lock().unwrap().get_or_insert(err);
                 }
             }
+            times_us
         })
     };
 
@@ -202,18 +214,32 @@ fn gui_and_search_tool_share_one_index() {
     }
     merges += search.merges;
     stop.store(true, Ordering::Relaxed);
-    reader.join().unwrap();
+    let mut times_us = reader.join().unwrap();
+    times_us.sort_unstable();
+    let pct = |q: f64| {
+        times_us
+            .get(((times_us.len() as f64 * q) as usize).min(times_us.len().saturating_sub(1)))
+            .map_or(0.0, |&us| us as f64 / 1000.0)
+    };
+    let (p50, p95) = (pct(0.50), pct(0.95));
     let fresh = LibraryIndex::open(library.path(), None).unwrap();
     let (_, saved) = read_saved_file(&file).unwrap();
     let byte_identical = saved == fresh.paths();
     let left = partials(index_dir.path());
+    let max_ms = max_read_us.load(Ordering::Relaxed) as f64 / 1000.0;
+    let slow = slow_reads.load(Ordering::Relaxed);
+    // M6 read bars: p95 <= 20 ms and max <= 100 ms. Always printed; enforced
+    // when ALBUMEN_M6_READ_BARS=1 (evidence runs), since shared CI runners
+    // are not a latency benchmark.
+    let bars_met = p95 <= 20.0 && max_ms <= 100.0;
     println!(
-        "M6 X2 RESULT seed={seed} iters={iters} reads={} parse_failures={} max_read_ms={:.2} \
+        "M6 X2 RESULT seed={seed} iters={iters} files={files} reads={} parse_failures={} \
+         read_p50_ms={p50:.2} read_p95_ms={p95:.2} max_read_ms={max_ms:.2} \
+         slow_reads_over_100ms={slow} read_bars_met={bars_met} \
          regressions={regressions} merges={merges} final_generation={last_generation} \
          equals_fresh_walk={byte_identical} stale_partials={} first_failure={:?}",
         reads.load(Ordering::Relaxed),
         failures.load(Ordering::Relaxed),
-        max_read_us.load(Ordering::Relaxed) as f64 / 1000.0,
         left.len(),
         first_failure.lock().unwrap()
     );
@@ -221,6 +247,12 @@ fn gui_and_search_tool_share_one_index() {
     assert_eq!(regressions, 0);
     assert!(byte_identical);
     assert!(left.is_empty(), "{left:?}");
+    if std::env::var("ALBUMEN_M6_READ_BARS").as_deref() == Ok("1") {
+        assert!(
+            bars_met,
+            "read bars missed: p95={p95:.2} ms max={max_ms:.2} ms"
+        );
+    }
 }
 
 /// D1: a writer that loaded the index before another saved merges that save
