@@ -154,10 +154,14 @@ fn gui_and_search_tool_share_one_index() {
         );
         std::thread::spawn(move || {
             let mut times_us = Vec::new();
-            // (start offset ms from the reader's start, UTC epoch ms, duration us)
             let mut slow_at = Vec::new();
             let start = Instant::now();
+            let slots = slot_files(&file);
             while !stop.load(Ordering::Relaxed) {
+                // Diagnostics around (not inside) the timed read: this
+                // thread's scheduler counters and both slots' mtimes.
+                let sched0 = thread_schedstat();
+                let mtimes0 = slot_mtimes(&slots);
                 let t = Instant::now();
                 let wall = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -168,7 +172,22 @@ fn gui_and_search_tool_share_one_index() {
                 max_read_us.fetch_max(us, Ordering::Relaxed);
                 if us > 100_000 {
                     slow_reads.fetch_add(1, Ordering::Relaxed);
-                    slow_at.push(((t - start).as_millis(), wall, us));
+                    let sched1 = thread_schedstat();
+                    let mtimes1 = slot_mtimes(&slots);
+                    slow_at.push(SlowRead {
+                        offset_ms: (t - start).as_millis(),
+                        wall_ms: wall,
+                        us,
+                        sched: sched0.zip(sched1).map(|(a, b)| {
+                            (
+                                b.0.saturating_sub(a.0),
+                                b.1.saturating_sub(a.1),
+                                b.2.saturating_sub(a.2),
+                            )
+                        }),
+                        slot_renamed: mtimes0 != mtimes1,
+                        generation: checked.as_ref().ok().copied(),
+                    });
                 }
                 reads.fetch_add(1, Ordering::Relaxed);
                 if let Err(err) = checked {
@@ -244,10 +263,31 @@ fn gui_and_search_tool_share_one_index() {
         .map(|(k, n)| format!("{k}:{n}"))
         .collect();
     println!("M6 X2 HISTOGRAM seed={seed} {}", histogram.join(" "));
-    for (offset_ms, wall_ms, us) in &slow_at {
+    for r in &slow_at {
+        // on_cpu + runqueue_wait + blocked = read_ms (blocked = sleeping in
+        // the kernel: I/O, page fault, lock). NA where schedstat is missing.
+        let read_ms = r.us as f64 / 1000.0;
+        let (cpu, wait, blocked, switches) = match r.sched {
+            Some((run_ns, wait_ns, n)) if run_ns + wait_ns > 0 => {
+                let (c, w) = (run_ns as f64 / 1e6, wait_ns as f64 / 1e6);
+                (
+                    format!("{c:.2}"),
+                    format!("{w:.2}"),
+                    format!("{:.2}", (read_ms - c - w).max(0.0)),
+                    n.to_string(),
+                )
+            }
+            _ => ("NA".into(), "NA".into(), "NA".into(), "NA".into()),
+        };
         println!(
-            "M6 X2 SLOW_READ seed={seed} at_ms={offset_ms} utc_epoch_ms={wall_ms} read_ms={:.2}",
-            *us as f64 / 1000.0
+            "M6 X2 SLOW_READ seed={seed} at_ms={} utc_epoch_ms={} end_utc_epoch_ms={} read_ms={read_ms:.2} \
+             on_cpu_ms={cpu} runqueue_wait_ms={wait} blocked_ms={blocked} timeslices={switches} \
+             slot_renamed_during_read={} generation={:?}",
+            r.offset_ms,
+            r.wall_ms,
+            r.wall_ms + (r.us / 1000) as u128,
+            r.slot_renamed,
+            r.generation
         );
     }
     let fresh = LibraryIndex::open(library.path(), None).unwrap();
@@ -281,6 +321,31 @@ fn gui_and_search_tool_share_one_index() {
             "read bars missed: p95={p95:.2} ms max={max_ms:.2} ms"
         );
     }
+}
+
+/// One X2 read over 100 ms, with what it was waiting on.
+struct SlowRead {
+    offset_ms: u128,
+    wall_ms: u128,
+    us: u64,
+    /// Deltas of this thread's (on-CPU ns, runqueue-wait ns, timeslices).
+    sched: Option<(u64, u64, u64)>,
+    /// A slot's mtime changed between just before and just after the read,
+    /// i.e. a writer's save landed while it ran.
+    slot_renamed: bool,
+    generation: Option<u64>,
+}
+
+/// `/proc/thread-self/schedstat` (Linux): on-CPU ns, runqueue-wait ns,
+/// timeslices. None elsewhere.
+fn thread_schedstat() -> Option<(u64, u64, u64)> {
+    let text = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let mut it = text.split_whitespace().map(|v| v.parse::<u64>().ok());
+    Some((it.next()??, it.next()??, it.next()??))
+}
+
+fn slot_mtimes(slots: &[std::path::PathBuf; 2]) -> [Option<std::time::SystemTime>; 2] {
+    [0, 1].map(|i| std::fs::metadata(&slots[i]).and_then(|m| m.modified()).ok())
 }
 
 /// D1: a writer that loaded the index before another saved merges that save

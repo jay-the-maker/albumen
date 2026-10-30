@@ -59,6 +59,9 @@ kill "$ticker" 2>/dev/null || true
 wait "$ticker" 2>/dev/null || true
 read -r gap skew < <(awk 'NR==1{w0=$1;u0=$2} NR>1{g=($1-pw)*1000; if(g>mg)mg=g} {pw=$1; s=(($1-w0)-($2-u0))*1000; if(s<0)s=-s; if(s>ms)ms=s} END{printf "%.1f %.1f\n", mg+0, ms+0}' "$ticks")
 echo "M6 $tag FREEZE_TICKER max_gap_ms=$gap wall_vs_uptime_skew_ms=$skew"
+# Diagnostic: every tick gap over 300 ms with its UTC epoch ms span, so a
+# SLOW_READ's utc_epoch_ms..end_utc_epoch_ms can be matched to a runner stall.
+awk 'NR>1{g=($1-pw)*1000; if(g>300) printf "M6 '"$tag"' FREEZE_TICKER_GAP from_utc_epoch_ms=%.0f to_utc_epoch_ms=%.0f gap_ms=%.1f\n", pw*1000, $1*1000, g} {pw=$1}' "$ticks"
 # A freeze voids timing only: if the test failed and did not get past its
 # correctness asserts (no "M6 <tag> CORRECTNESS_OK"), that is a real FAIL.
 froze=0
