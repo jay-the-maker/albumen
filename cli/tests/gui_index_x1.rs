@@ -137,10 +137,6 @@ fn readers_keep_answering_while_one_writer_saves() {
     assert_eq!(first["images"].as_array().unwrap().len() as u64, files);
     println!("M6 X1 first_listing_ms={first_ms:.1} (saved index, gui start to ready)");
 
-    let mut base = gui_pages(&addr, 300);
-    let base_p50 = pct(&mut base, 0.50);
-    let base_p95 = pct(&mut base, 0.95);
-
     // The writer's own count for each generation it saved.
     let counts: Arc<Mutex<HashMap<u64, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     {
@@ -199,6 +195,12 @@ fn readers_keep_answering_while_one_writer_saves() {
             })
         })
         .collect();
+
+    // Baseline with the same two index readers running, so the only
+    // difference between the two samples is the writer saving.
+    let mut base = gui_pages(&addr, 300);
+    let base_p50 = pct(&mut base, 0.50);
+    let base_p95 = pct(&mut base, 0.95);
 
     let mut during = Vec::new();
     let mut serial = 0u64;
