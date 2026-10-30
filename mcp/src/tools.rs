@@ -319,6 +319,7 @@ impl Library {
                 eprintln!("albumen-mcp: search tree kept in memory only: {err}");
             }
         }
+        let index_note = index.save_error.clone();
         drop(index_slot);
         let mut value = page_value(&page);
         // Every answer carries freshness; nothing is returned unlabeled.
@@ -326,6 +327,14 @@ impl Library {
         // an uncounted total: the label says so.
         let paginated = page.truncated || after.is_some();
         value["freshness"] = freshness(page.hits.len(), paginated, &unchecked, &tree_status);
+        // A failed index save is not hidden in stderr: the answer is still
+        // right (the index answers from memory), and the next search saves
+        // again.
+        if let Some(err) = index_note {
+            value["index_note"] = json!(format!(
+                "The search index could not be saved this time ({err}); answers are unaffected and the next search saves again."
+            ));
+        }
         if std::env::var("ALBUMEN_SEARCH_STATS").is_ok_and(|v| v == "1") {
             // Diagnostics for library-scale.py and tests.
             value["stats"] = json!({

@@ -220,8 +220,25 @@ fn the_index_lives_outside_the_library() {
     let library = open(root, index_dir.path());
     assert_matches_walk(&library, root);
     assert_eq!(walk(root), before, "the library gained or lost a file");
-    let saved: Vec<_> = fs::read_dir(index_dir.path()).unwrap().collect();
-    assert_eq!(saved.len(), 1, "one saved index file");
+    // One index: its slot (`<key>.idx.a`, and `.idx.b` once saved twice)
+    // and the writers' lock `<key>.idx.lock`, all under one key.
+    let mut saved: Vec<String> = fs::read_dir(index_dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    saved.sort();
+    let key = saved[0].split('.').next().unwrap().to_string();
+    assert!(
+        saved.iter().all(|n| n.starts_with(&format!("{key}.idx"))),
+        "{saved:?}"
+    );
+    assert!(saved.iter().any(|n| n.ends_with(".idx.lock")), "{saved:?}");
+    assert!(
+        saved
+            .iter()
+            .any(|n| n.ends_with(".idx.a") || n.ends_with(".idx.b")),
+        "{saved:?}"
+    );
 
     let inside = root.join("2020").join("index");
     let refused = open(root, &inside);
@@ -242,4 +259,45 @@ fn an_index_dir_that_cannot_be_written_still_answers() {
     // A regular file where the index directory should be: the save fails.
     let library = open(root, &blocker.path().join("index"));
     assert_matches_walk(&library, root);
+}
+
+/// A failed index save is surfaced in the answer (not only on stderr), the
+/// answer is still complete, and the next search saves and drops the note.
+#[test]
+fn a_failed_index_save_is_noted_in_the_answer() {
+    let root_dir = tempfile::tempdir().unwrap();
+    let root = root_dir.path();
+    library_fixture(root);
+    let index_dir = tempfile::tempdir().unwrap();
+    let library = open(root, index_dir.path());
+    let first = library.call("search", &json!({"query": "jpg"})).unwrap();
+    assert!(first.get("index_note").is_none(), "{first}");
+    let lock = fs::read_dir(index_dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".idx.lock"))
+        .expect("the writers' lock file");
+    let other = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock)
+        .unwrap();
+    other.lock().unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    write(root, "2020/02/IMG_noted.jpg");
+    let noted = library
+        .call("search", &json!({"query": "IMG_noted"}))
+        .unwrap();
+    assert!(
+        noted["index_note"]
+            .as_str()
+            .is_some_and(|n| n.contains("could not be saved")),
+        "{noted}"
+    );
+    assert_eq!(noted["files"].as_array().map(Vec::len), Some(1), "{noted}");
+    other.unlock().unwrap();
+    let saved = library
+        .call("search", &json!({"query": "IMG_noted"}))
+        .unwrap();
+    assert!(saved.get("index_note").is_none(), "{saved}");
 }

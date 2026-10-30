@@ -552,3 +552,42 @@ fn held_handle_delays_but_never_loses_a_save() {
         }
     }
 }
+
+/// A save that fails (here: another writer keeps the writers' lock past
+/// every retry) is reported in `save_error`, the index still answers from
+/// memory, and the next refresh saves it even though nothing changed since.
+#[test]
+fn pending_save_lands_on_next_refresh() {
+    let library = tempfile::tempdir().unwrap();
+    let index_dir = tempfile::tempdir().unwrap();
+    let mut all = make_library(library.path(), 300);
+    let mut index = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    let file = index_file(&index);
+    let mut lock_name = file.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(PathBuf::from(lock_name))
+        .unwrap();
+    other.lock().unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    std::fs::write(library.path().join("d03/pending.jpg"), b"").unwrap();
+    all.insert("d03/pending.jpg".into());
+    index.refresh().unwrap();
+    assert!(
+        index.save_error.is_some(),
+        "a kept lock did not fail the save"
+    );
+    assert!(index.paths().iter().any(|p| p == "d03/pending.jpg"));
+    let (_, saved) = read_saved_file(&file).unwrap();
+    assert!(!saved.iter().any(|p| p == "d03/pending.jpg"));
+    other.unlock().unwrap();
+    // Nothing changed since: the pending save still goes out.
+    index.refresh().unwrap();
+    assert_eq!(index.save_error, None);
+    let (_, saved) = read_saved_file(&file).unwrap();
+    assert_eq!(sorted(saved), all, "a pending save was lost");
+}

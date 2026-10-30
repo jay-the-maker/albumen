@@ -104,6 +104,8 @@ struct Server {
     /// The first photos a first-ever walk finds, in the order found (at most
     /// [`FOUND_SHOWN`]), so the grid has tiles before the listing is ready.
     found_paths: Mutex<Vec<String>>,
+    /// Why the last index save failed, if it did; shown as one quiet line.
+    index_note: Mutex<Option<String>>,
 }
 
 /// How many walk-order photos the page may show while a first walk runs.
@@ -363,7 +365,7 @@ fn refresh_thumbs(server: &Arc<Server>) {
         let files = if s.config.demo {
             library_files(lib)
         } else {
-            library_files_indexed(lib, &s.found, &s.found_paths)
+            library_files_indexed(lib, &s.found, &s.found_paths, &s.index_note)
         };
         let Some(cache) = live::cache_dir(lib) else {
             publish_library(&s, gen, files, &Default::default());
@@ -500,6 +502,7 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
         library: Mutex::new(None),
         found: Default::default(),
         found_paths: Default::default(),
+        index_note: Default::default(),
     });
     if server.config.demo {
         // The demo library is tiny: have it ready before the first request.
@@ -742,9 +745,10 @@ fn library_files_indexed(
     library: &Path,
     found: &std::sync::atomic::AtomicUsize,
     found_paths: &Mutex<Vec<String>>,
+    note: &Mutex<Option<String>>,
 ) -> Vec<String> {
     let dir = albumen_ingest::index::default_index_dir();
-    library_files_indexed_in(library, dir.as_deref(), found, found_paths)
+    library_files_indexed_in(library, dir.as_deref(), found, found_paths, note)
 }
 
 /// The `/api/found` answer: the running count and the photos found so far.
@@ -753,6 +757,7 @@ fn found_json(server: &Server) -> serde_json::Value {
     serde_json::json!({
         "found": server.found.load(std::sync::atomic::Ordering::Relaxed),
         "paths": paths,
+        "index_note": server.index_note.lock().unwrap().clone(),
     })
 }
 
@@ -762,6 +767,7 @@ fn library_files_indexed_in(
     dir: Option<&Path>,
     found: &std::sync::atomic::AtomicUsize,
     found_paths: &Mutex<Vec<String>>,
+    note: &Mutex<Option<String>>,
 ) -> Vec<String> {
     use std::sync::atomic::Ordering;
     let mut n = 0usize;
@@ -779,6 +785,7 @@ fn library_files_indexed_in(
         });
     match opened {
         Ok(index) => {
+            *note.lock().unwrap() = index.save_error.clone();
             let mut paths = index.into_paths();
             paths.sort();
             let photos = paths.iter().filter(|p| is_photo(p)).count();
@@ -1349,7 +1356,13 @@ mod tests {
         std::fs::write(lib.path().join("notes.txt"), b"not a photo").unwrap();
         let found = std::sync::atomic::AtomicUsize::default();
         let found_paths = Mutex::new(Vec::new());
-        let files = library_files_indexed_in(lib.path(), Some(idx.path()), &found, &found_paths);
+        let files = library_files_indexed_in(
+            lib.path(),
+            Some(idx.path()),
+            &found,
+            &found_paths,
+            &Default::default(),
+        );
         let server = Server {
             config: Config {
                 library: lib.path().to_path_buf(),
@@ -1366,6 +1379,7 @@ mod tests {
             library: Mutex::new(None),
             found,
             found_paths,
+            index_note: Default::default(),
         };
         let v = found_json(&server);
         assert_eq!(v["found"], FOUND_SHOWN + 5);
@@ -1388,6 +1402,7 @@ mod tests {
             Some(idx.path()),
             &Default::default(),
             &Mutex::new(Vec::new()),
+            &Default::default(),
         );
         assert_eq!(again, files);
     }
@@ -1412,6 +1427,7 @@ mod tests {
             library: Mutex::new(None),
             found: Default::default(),
             found_paths: Default::default(),
+            index_note: Default::default(),
         };
         let mut early = 0;
         let files = library_files(&built.library);

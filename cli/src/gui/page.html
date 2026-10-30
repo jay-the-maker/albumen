@@ -125,7 +125,7 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 <div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p><p id="i-raw" hidden></p><p id="i-note" hidden></p><div id="i-live" hidden><p id="i-live-file"></p><button id="i-play" type="button">Play Live Photo</button><p id="i-live-note" hidden></p></div></div>
 <h3>Library</h3>
 <p>Albumen only reads this folder. Nothing in it is changed, moved or deleted.</p>
-<p><span class="lock">&#128274; read-only</span> <span id="lib-count"></span></p>
+<p><span class="lock">&#128274; read-only</span> <span id="lib-count"></span></p><p id="index-note" style="opacity:.7;font-size:.9em" hidden></p>
 <div class="row"><button class="primary" id="go-scan">Check photos</button><span class="count" id="scan-count"></span></div>
 <div class="bar" id="scan-bar" hidden><i></i></div>
 <div class="out" id="scan-out"></div>
@@ -384,6 +384,7 @@ async function init(){
   $('lib-count').textContent=lib.total_images>0?'Sorting… '+n+' photos':'Reading the folder… '+n+' photos so far';try{await earlyTiles();}catch(e){}await new Promise(r=>setTimeout(r,200));lib=await j('/api/library');}
  $('lib').textContent='Folder: '+lib.library;
  $('lib-count').textContent=countText(lib.images.map(i=>i.path));
+ try{const f=await j('/api/found');$('index-note').hidden=!f.index_note;$('index-note').textContent=f.index_note?'Index not saved this time; the next refresh saves again.':'';$('index-note').title=f.index_note||'';}catch(e){}
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);sideDests(st);
  for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=base(d);o.title=d;$(sel).append(o);}}
  $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';

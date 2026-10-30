@@ -16,23 +16,26 @@
 //! directory inside the library is refused. Writes go through [`crate::dest`].
 //!
 //! More than one process may keep the same index (the GUI and the search
-//! tool both open `<sha256(root)>.idx`). A save never blocks a reader and
-//! takes no lock:
+//! tool both keep `<sha256(root)>`). A save never blocks a reader; writers
+//! take turns:
 //!
-//! - The file carries a generation. A save reads the generation on disk; if
-//!   another writer moved it on, the two indexes are merged directory by
-//!   directory (the later listing of each directory wins) before writing, and
-//!   the generation is checked again just before the rename, so an older
-//!   snapshot never replaces a newer one.
-//! - The new file is written beside the old one, `sync_all`ed, renamed over
-//!   it, and the directory is synced, so a kill at any point leaves the old
-//!   index or the new one.
+//! - Writers hold `<key>.lock` (an OS file lock, dropped when the process
+//!   dies) for the whole save. Under it a save reads the newest saved
+//!   generation; if another writer moved it on, the two indexes are merged
+//!   directory by directory (the later listing of each directory wins), so an
+//!   older snapshot never replaces a newer one.
+//! - The index is saved in two slots, `<key>.idx.a` and `<key>.idx.b`, and a
+//!   save replaces the older slot: written beside it, `sync_all`ed, renamed
+//!   over it, and the directory synced. A reader takes no lock; the newest
+//!   slot is never the one being replaced, so a kill at any point leaves the
+//!   old index or the new one.
 //! - The file ends with its length and SHA-256, so a short or damaged file is
 //!   refused (and rebuilt) rather than read as a smaller library.
-//! - A rename refused because another program holds the file is retried with
-//!   backoff; a save that still fails is kept pending and retried by the next
-//!   refresh. Leftover temp files from a killed writer are removed by the next
-//!   save.
+//! - A rename refused because another program holds the file, or a lock
+//!   another writer keeps, is retried with backoff; a save that still fails
+//!   is kept pending in [`LibraryIndex::save_error`] and retried by the next
+//!   refresh, even if nothing changed. Leftover temp files from a killed
+//!   writer are removed by the next save.
 
 use std::collections::BTreeMap;
 use std::io::Write;
