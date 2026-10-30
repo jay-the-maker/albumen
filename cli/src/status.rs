@@ -74,19 +74,12 @@ pub struct Report {
 }
 
 /// Quote a path for the `next:` line so it pastes into the user's shell:
-/// POSIX single quotes elsewhere, PowerShell single quotes (`''` for a quote)
-/// with native backslashes on Windows. Plain paths stay unquoted.
+/// POSIX single quotes elsewhere (plain paths stay unquoted). On Windows
+/// every path is in PowerShell single quotes, `''` for a quote, with native
+/// backslashes, so spaces, apostrophes and brackets stay literal.
 fn cmd_quote(text: &str) -> String {
     if cfg!(windows) {
-        if !text.is_empty()
-            && text
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "\\/._-:=+@".contains(c))
-        {
-            text.to_string()
-        } else {
-            format!("'{}'", text.replace('\'', "''"))
-        }
+        format!("'{}'", text.replace('\'', "''"))
     } else {
         crate::proof::shell_quote(text)
     }
@@ -116,11 +109,20 @@ fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
     } else {
         String::new()
     };
-    format!(
-        "next: move the changed copy aside{more}, for example: mv {} {}",
-        cmd_quote(&path),
-        cmd_quote(&aside)
-    )
+    if cfg!(windows) {
+        // -LiteralPath so PowerShell does not read [ ] as a wildcard.
+        format!(
+            "next: move the changed copy aside{more}, for example: Move-Item -LiteralPath {} -Destination {}",
+            cmd_quote(&path),
+            cmd_quote(&aside)
+        )
+    } else {
+        format!(
+            "next: move the changed copy aside{more}, for example: mv {} {}",
+            cmd_quote(&path),
+            cmd_quote(&aside)
+        )
+    }
 }
 
 /// Folder of `albumen backup` proofs at a destination.

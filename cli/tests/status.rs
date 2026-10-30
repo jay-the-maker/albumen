@@ -167,7 +167,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
         l[3],
         format!(
             "next: albumen backup --from <your photos folder> --to {}",
-            p(&stale)
+            w(p(&stale))
         )
     );
     assert_eq!(l.len(), 4);
@@ -192,10 +192,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "status only read the backup; your photos folder was not opened",
             "  changed: roll/IMG_0001.jpg",
             "  missing: roll/IMG_0004.jpg",
-            &format!(
-                "next: move the changed copy aside, for example: mv {0} {0}.changed",
-                p(&damaged.join("roll").join("IMG_0001.jpg"))
-            ),
+            &move_line("", p(&damaged.join("roll").join("IMG_0001.jpg")), w),
         ]
     );
     assert_plain_words(&text);
@@ -213,7 +210,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             p(&never),
             &format!(
                 "next: albumen backup --from <your photos folder> --to {}",
-                p(&never)
+                w(p(&never))
             ),
         ]
     );
@@ -263,6 +260,35 @@ fn several_destinations_report_each_and_exit_with_the_worst() {
     assert_next_rules(code, &text);
 }
 
+/// A plain path as status prints it in next: lines: bare on POSIX, in
+/// PowerShell single quotes on Windows (every path is quoted there).
+fn w(text: &str) -> String {
+    if cfg!(windows) {
+        q(text)
+    } else {
+        text.to_string()
+    }
+}
+
+/// The move-aside next: line for `path`: `mv` on POSIX, `Move-Item
+/// -LiteralPath ... -Destination ...` on Windows.
+fn move_line(more: &str, path: &str, quote: fn(&str) -> String) -> String {
+    let aside = format!("{path}.changed");
+    if cfg!(windows) {
+        format!(
+            "next: move the changed copy aside{more}, for example: Move-Item -LiteralPath {} -Destination {}",
+            quote(path),
+            quote(&aside)
+        )
+    } else {
+        format!(
+            "next: move the changed copy aside{more}, for example: mv {} {}",
+            quote(path),
+            quote(&aside)
+        )
+    }
+}
+
 /// Quoted as status prints destinations in next: lines: POSIX single
 /// quotes, or PowerShell single quotes on Windows.
 fn q(text: &str) -> String {
@@ -306,11 +332,7 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
     let first = p(&dest.join("roll").join("IMG_0000.jpg")).to_string();
     assert_eq!(
         text.lines().last().unwrap(),
-        format!(
-            "next: move the changed copy aside (and 1 other changed file), for example: mv {} {}",
-            q(&first),
-            q(&format!("{first}.changed"))
-        )
+        move_line(" (and 1 other changed file)", &first, q)
     );
     assert!(!text.lines().last().unwrap().contains("albumen"), "{text}");
     assert_plain_words(&text);
@@ -342,4 +364,44 @@ fn bad_max_age_is_a_usage_error() {
     }
     let (code, _) = status(&[]);
     assert_eq!(code, 2);
+}
+
+/// The printed Move-Item line really moves a changed copy whose path has a
+/// space, an apostrophe and brackets, run as-is through PowerShell.
+#[cfg(windows)]
+#[test]
+fn printed_move_item_line_moves_the_changed_copy_in_powershell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = backup(tmp.path(), "Jay's [2026] backup", 2);
+    let original = dest.join("roll").join("IMG_0001.jpg");
+    let mut bytes = fs::read(&original).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&original, &bytes).unwrap();
+
+    let (code, text) = status(&[p(&dest)]);
+    assert_eq!(code, 1, "{text}");
+    let last = text.lines().last().unwrap();
+    let command = last
+        .split_once("for example: ")
+        .map(|(_, c)| c)
+        .unwrap_or_else(|| panic!("no command in {last:?}"));
+    assert!(command.starts_with("Move-Item -LiteralPath '"), "{last}");
+    assert!(command.contains("''s [2026] backup"), "{last}");
+    println!("next line: {last}");
+
+    let run = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run powershell");
+    assert!(
+        run.status.success(),
+        "powershell failed: {}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let aside = dest.join("roll").join("IMG_0001.jpg.changed");
+    assert!(!original.exists(), "changed copy still in place");
+    assert_eq!(fs::read(&aside).unwrap(), bytes, "moved copy differs");
+    println!("moved: {} -> {}", original.display(), aside.display());
 }
