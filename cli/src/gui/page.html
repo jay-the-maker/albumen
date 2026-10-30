@@ -196,12 +196,19 @@ function figure(p,cap,sub){const f=document.createElement('figure');let i;
 // page of tiles is its own block that the browser skips drawing while it is
 // off screen, so a 380k library scrolls without stalls.
 let gs=null;
+// One click handler for the whole grid instead of one per tile (380k
+// closures), and selecting only moves the highlight: redrawing would
+// rebuild every tile already scrolled past in a single frame.
+$('grid').addEventListener('click',e=>{const f=e.target.closest('figure[data-p]');if(!f||!$('grid').contains(f))return;
+ const o=$('grid').querySelector('figure.sel');if(o)o.classList.remove('sel');selected=f.dataset.p;f.classList.add('sel');infoPhoto();});
+// Tiles go in a few hundred per frame so no single frame does a whole page.
+const GRID_STEP=200;
 function addTiles(n){const more=$('grid-more');
  while(n>0&&gs.gi<gs.evs.length){const {e,ps}=gs.evs[gs.gi];
   if(gs.gj==0&&!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;more?more.before(h):$('grid').append(h);}
   const g=document.createElement('div');g.className='grid';g.style.contentVisibility='auto';g.style.containIntrinsicSize='auto 1200px';
   const k=Math.min(n,ps.length-gs.gj);
-  for(const p of ps.slice(gs.gj,gs.gj+k)){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
+  for(const p of ps.slice(gs.gj,gs.gj+k)){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.dataset.p=p;g.append(f);}
   more?more.before(g):$('grid').append(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
@@ -209,7 +216,9 @@ function draw(){
  let total=0;for(const x of evs)total+=x.ps.length;
  gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
  if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
-  const more=()=>{if(!b.isConnected)return;gridLimit+=GRID_PAGE;addTiles(GRID_PAGE);if(gs.done>=total){moreObs&&moreObs.disconnect();clearInterval(moreTimer);moreTimer=null;gridMore=null;b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';if(moreObs){moreObs.unobserve(b);moreObs.observe(b);}}};
+  let busy=false;const more=()=>{if(busy||!b.isConnected)return;busy=true;gridLimit+=GRID_PAGE;let left=GRID_PAGE;
+   const step=()=>{if(!b.isConnected){busy=false;return;}addTiles(Math.min(GRID_STEP,left));left-=GRID_STEP;if(left>0&&gs.done<total){requestAnimationFrame(step);return;}busy=false;done();};step();};
+  const done=()=>{if(gs.done>=total){moreObs&&moreObs.disconnect();clearInterval(moreTimer);moreTimer=null;gridMore=null;b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';if(moreObs){moreObs.unobserve(b);moreObs.observe(b);}}};
   b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;$('grid').append(b);
   if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}
   gridMore=more;moreTimer=setInterval(nearEnd,400);}
