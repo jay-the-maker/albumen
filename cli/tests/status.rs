@@ -238,8 +238,9 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "  changed: roll/IMG_0001.jpg",
             "  missing: roll/IMG_0004.jpg",
             &format!(
-                "next: move the changed copy aside, for example: mv {0}/roll/IMG_0001.jpg {0}/roll/IMG_0001.jpg.changed",
-                p(&damaged)
+                "next: move the changed copy aside, for example: mv {} {}",
+                sq(&format!("{}/roll/IMG_0001.jpg", p(&damaged))),
+                sq(&format!("{}/roll/IMG_0001.jpg.changed", p(&damaged)))
             ),
         ]
     );
@@ -367,7 +368,10 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
             q(&format!("{first}.changed"))
         )
     );
-    assert!(!text.lines().last().unwrap().contains("albumen"), "{text}");
+    // The temp path itself may contain "albumen" (e.g. a checkout under
+    // sl-albumen), so look only at the words around the quoted paths.
+    let words = text.lines().last().unwrap().replace(&q(&first), "");
+    assert!(!words.contains("albumen"), "{text}");
     assert_plain_words(&text);
     assert_next_rules(code, &text);
     assert_eq!(before, snapshot(&dest), "status changed the destination");
