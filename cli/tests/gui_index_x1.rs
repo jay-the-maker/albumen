@@ -3,12 +3,16 @@
 //! saves it over and over. Counters: parse failures, fallback walks (no
 //! complete saved index), partial results (a saved listing shorter or
 //! longer than the writer's own count for that generation). GUI page
-//! latency during writes is compared with a same-run, spaced, no-writer
+//! latency during writes is compared with a same-run, matched-activity
 //! control (Product Lead X1 ruling, 20:31Z): p50 within 10% of it, and
 //! /api/library max under write <= 16.7 ms. XO 20:58Z: the base and
 //! under-write windows are interleaved in rounds in the same run
 //! (ALBUMEN_M6_ROUNDS, ALBUMEN_M6_SEED), and peak RSS <= 332 MiB is asserted
 //! on the gui child process by its own pid (not the harness or rustc).
+//! XO 22:06Z: the control is a no-op writer (same edits and walks, never
+//! saves); index read max <= 100 ms; an independent 0.2 s freeze ticker
+//! marks the run INVALID (exit 75, rerun) on a tick gap or a wall vs
+//! monotonic drift over 1 s.
 //! Synthetic files only.
 //!
 //! Env: ALBUMEN_M6_FILES (default 2000), ALBUMEN_M6_CYCLES (save/read
@@ -117,6 +121,51 @@ fn peak_rss_kb(pid: u32) -> Option<u64> {
 /// Peak RSS bar for the gui child: 332 MiB.
 const MAX_CHILD_RSS_KB: u64 = 339_968;
 
+/// Independent 0.2 s ticker (XO 22:06Z). It records the largest gap
+/// between ticks and how far wall-clock time drifted from monotonic time.
+struct FreezeTicker {
+    stop: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<f64>,
+    mono0: Instant,
+    wall0: std::time::SystemTime,
+}
+
+impl FreezeTicker {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let mut last = Instant::now();
+            let mut max_gap = 0.0f64;
+            while !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(200));
+                let now = Instant::now();
+                max_gap = max_gap.max((now - last).as_secs_f64() * 1000.0);
+                last = now;
+            }
+            max_gap
+        });
+        Self {
+            stop,
+            handle,
+            mono0: Instant::now(),
+            wall0: std::time::SystemTime::now(),
+        }
+    }
+
+    /// (largest tick gap ms, wall minus monotonic elapsed ms)
+    fn stop(self) -> (f64, f64) {
+        self.stop.store(true, Ordering::Relaxed);
+        let gap = self.handle.join().unwrap();
+        let mono = self.mono0.elapsed().as_secs_f64() * 1000.0;
+        let wall = self
+            .wall0
+            .elapsed()
+            .map_or(f64::NAN, |d| d.as_secs_f64() * 1000.0);
+        (gap, wall - mono)
+    }
+}
+
 fn env_num(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -158,6 +207,15 @@ fn readers_keep_answering_while_one_writer_saves() {
         all.insert(rel);
     }
     let mut writer = LibraryIndex::open(library.path(), Some(index.path())).unwrap();
+    // XO 22:06Z matched control: a no-op writer on the same cadence. It
+    // makes the same library edits and walks with refresh(), but its index
+    // is memory-only (no index dir), so it never saves. The only difference
+    // between the control and the under-write windows is the save.
+    let mut noop = LibraryIndex::open(library.path(), None).unwrap();
+    assert!(
+        noop.file().is_none(),
+        "the no-op writer must not have a file to save"
+    );
     let file = writer.file().unwrap().to_path_buf();
 
     let began = Instant::now();
@@ -184,6 +242,7 @@ fn readers_keep_answering_while_one_writer_saves() {
     // Diagnostics only (no bar): when each slow read started, and when each
     // writer refresh (walk + save) ran, on one clock.
     let t0 = Instant::now();
+    let freeze = FreezeTicker::start();
     let slow_reads: Arc<Mutex<Vec<(f64, f64)>>> = Arc::new(Mutex::new(Vec::new()));
     let readers: Vec<_> = (0..2)
         .map(|_| {
@@ -237,14 +296,13 @@ fn readers_keep_answering_while_one_writer_saves() {
     // running and no writer.
     let mut warm = gui_pages(&addr, 300);
     let (warm_p50, warm_max) = (pct(&mut warm, 0.50), pct(&mut warm, 1.0));
-    // The X1 base (the bar) is the same-run, spaced, no-writer control
-    // (59a96c4). XO 20:58Z: interleave it with the under-write windows so
-    // drift and noise land on both sides. The run is split into `rounds`;
-    // each round has one write window (cycles/rounds writer refreshes, a
-    // GUI sample every 4th) and one base window (as many single samples,
-    // spaced like that round's write samples, the same readers running, no
-    // writer). ALBUMEN_M6_SEED picks which window goes first in each round
-    // and where the writer's edits start.
+    // The X1 base (the bar): XO 22:06Z, a same-run control with matched
+    // activity. The run is split into `rounds`; each round has one write
+    // window (cycles/rounds real writer refreshes that save, a GUI sample
+    // every 4th) and one control window (the same number of cycles of the
+    // same edits walked by the no-op writer, which never saves, sampled the
+    // same way). ALBUMEN_M6_SEED picks which window goes first per round and
+    // where the edits start. The warm back-to-back loop above is DIAG only.
     let rounds = env_num("ALBUMEN_M6_ROUNDS", 20).clamp(1, cycles.max(1));
     let seed = env_num("ALBUMEN_M6_SEED", 1);
     let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -255,28 +313,36 @@ fn readers_keep_answering_while_one_writer_saves() {
         rng & 1 == 1
     };
     println!("M6 X1 seed={seed} rounds={rounds}");
-    let mut spaced: Vec<f64> = Vec::new();
+    let mut control_ms: Vec<f64> = Vec::new();
     let mut windows: Vec<(f64, f64)> = Vec::new();
     let mut during = Vec::new();
     let mut serial = seed % 50;
     let mut save_errors = 0u64;
     let mut cycle = 0u64;
-    let mut base_gap = Duration::from_millis(5);
     for round in 0..rounds {
         let round_cycles = cycles / rounds + u64::from(round < cycles % rounds);
         let base_first = next_bit();
         for phase in 0..2 {
-            if (phase == 0) == base_first {
-                let n = round_cycles.div_ceil(4).max(1);
-                for _ in 0..n {
-                    std::thread::sleep(base_gap);
-                    spaced.extend(gui_pages(&addr, 1));
-                }
-                continue;
-            }
-            let w_began = Instant::now();
-            let mut samples = 0u32;
+            let control = (phase == 0) == base_first;
             for _ in 0..round_cycles {
+                if control {
+                    serial += 1;
+                    let dir = format!("d{:02}", serial % 50);
+                    if cycle.is_multiple_of(2) {
+                        let rel = format!("{dir}/new{serial:07}.jpg");
+                        std::fs::write(library.path().join(&rel), b"").unwrap();
+                        all.insert(rel);
+                    } else if let Some(rel) = all.iter().find(|r| r.starts_with(&dir)).cloned() {
+                        std::fs::remove_file(library.path().join(&rel)).unwrap();
+                        all.remove(&rel);
+                    }
+                    noop.refresh().unwrap();
+                    if cycle.is_multiple_of(4) {
+                        control_ms.extend(gui_pages(&addr, 1));
+                    }
+                    cycle += 1;
+                    continue;
+                }
                 serial += 1;
                 let dir = format!("d{:02}", serial % 50);
                 if cycle.is_multiple_of(2) {
@@ -297,21 +363,18 @@ fn readers_keep_answering_while_one_writer_saves() {
                 counts.lock().unwrap().insert(g, writer.paths().len());
                 if cycle.is_multiple_of(4) {
                     during.extend(gui_pages(&addr, 1));
-                    samples += 1;
                 }
                 cycle += 1;
-            }
-            if samples > 0 {
-                base_gap = (w_began.elapsed() / samples).min(Duration::from_millis(100));
             }
         }
     }
     let (base_p50, base_p95, base_max) = (
-        pct(&mut spaced, 0.50),
-        pct(&mut spaced, 0.95),
-        pct(&mut spaced, 1.0),
+        pct(&mut control_ms, 0.50),
+        pct(&mut control_ms, 0.95),
+        pct(&mut control_ms, 1.0),
     );
     stop.store(true, Ordering::Relaxed);
+    let (max_gap_ms, clock_skew_ms) = freeze.stop();
     for r in readers {
         r.join().unwrap();
     }
@@ -331,10 +394,12 @@ fn readers_keep_answering_while_one_writer_saves() {
     println!(
         "M6 X1 DIAG gui_warm_p50_ms={warm_p50:.2} gui_warm_max_ms={warm_max:.2} gui_base_max_ms={base_max:.2} \
          gui_write_samples={} gui_base_samples={} writer_refresh_p50_ms={rf50:.2} writer_refresh_max_ms={rfmax:.2} \
-         slow_reads_over_50ms={} slow_reads_overlapping_a_writer_refresh={overlapping}",
+         slow_reads_over_50ms={} slow_reads_overlapping_a_writer_refresh={overlapping} \
+         gui_warm_p50_ratio={:.3} freeze_max_gap_ms={max_gap_ms:.1} wall_vs_mono_skew_ms={clock_skew_ms:.1}",
         during.len(),
-        spaced.len(),
-        slow.len()
+        control_ms.len(),
+        slow.len(),
+        pct(&mut during.clone(), 0.50) / warm_p50
     );
     let mut rm = read_ms.lock().unwrap().clone();
     let (r50, r95, rmax) = (pct(&mut rm, 0.50), pct(&mut rm, 0.95), pct(&mut rm, 1.0));
@@ -353,7 +418,7 @@ fn readers_keep_answering_while_one_writer_saves() {
         "M6 X1 RESULT files={files} cycles={cycles} saves_failed={save_errors} reads={reads} checked_against_writer={} \
          parse_failures={parse_failures} fallback_walks={fallbacks} partial_results={partials} \
          index_read_p50_ms={r50:.2} index_read_p95_ms={r95:.2} index_read_max_ms={rmax:.2} \
-         gui_base_p50_ms={base_p50:.2} gui_base_p95_ms={base_p95:.2} \
+         gui_base_kind=matched_noop_writer gui_base_p50_ms={base_p50:.2} gui_base_p95_ms={base_p95:.2} \
          gui_write_p50_ms={p50:.2} gui_write_p95_ms={p95:.2} gui_write_max_ms={write_max:.2} gui_p50_ratio={:.3} \
          first_listing_ms={first_ms:.1} final_equals_walk={equals_walk} \
          gui_child_peak_rss_kb={child_peak_txt} gui_child_pid={}",
@@ -361,6 +426,15 @@ fn readers_keep_answering_while_one_writer_saves() {
         p50 / base_p50,
         gui.0.id()
     );
+    // A frozen box (a tick gap over 1 s, or wall and monotonic clocks
+    // drifting apart by over 1 s) makes every timing meaningless: INVALID,
+    // exit 75, rerun. Not a pass and not a product FAIL.
+    if max_gap_ms > 1000.0 || clock_skew_ms.abs() > 1000.0 {
+        println!(
+            "M6 X1 INVALID freeze_max_gap_ms={max_gap_ms:.1} wall_vs_mono_skew_ms={clock_skew_ms:.1} (rerun; timings not evidence)"
+        );
+        std::process::exit(75);
+    }
     assert_eq!(parse_failures, 0);
     assert_eq!(fallbacks, 0);
     assert_eq!(partials, 0);
@@ -373,12 +447,13 @@ fn readers_keep_answering_while_one_writer_saves() {
     assert!(p50 <= 500.0, "/api/library p50 {p50:.2} ms over 500 ms");
     assert!(
         p50 <= base_p50 * 1.10,
-        "/api/library p50 {p50:.2} ms more than 10% over the spaced no-writer control {base_p50:.2} ms"
+        "/api/library p50 {p50:.2} ms more than 10% over the matched no-op-writer control {base_p50:.2} ms"
     );
     assert!(
         write_max <= 16.7,
         "/api/library max under write {write_max:.2} ms over 16.7 ms"
     );
+    assert!(rmax <= 100.0, "index read max {rmax:.2} ms over 100 ms");
     if let Some(kb) = child_peak {
         assert!(
             kb <= MAX_CHILD_RSS_KB,
