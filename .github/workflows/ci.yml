@@ -679,10 +679,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y strace
 
-      - name: Prove scan, index, and search make no connections
+      - name: Prove every local command and MCP tool makes no connections
         if: runner.os != 'Windows'
         shell: bash
         run: scripts/zero-network.sh
+
+      - name: Every command and MCP tool has a network proof
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 scripts/check-network-coverage.py --self-test
+          python3 scripts/check-network-coverage.py --albumen target/debug/albumen --mcp target/debug/albumen-mcp
 
       - name: Prove scan, index, and search make no connections
         if: runner.os == 'Windows'

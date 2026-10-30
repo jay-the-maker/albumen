@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Prove default-config scan, index, and search make no network connection.
+# Prove default-config scan, index, and search make no network connection,
+# and every local subcommand and albumen-mcp tool after them
+# (scripts/zero-network-cases.sh; coverage checked by
+# scripts/check-network-coverage.py).
 #
 # Index is the process-local metadata cache. There is no on-disk catalog and
 # no index subcommand. The index run is albumen-mcp, with export and upload
@@ -18,6 +21,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 checker="$root/scripts/check-zero-network.py"
+# shellcheck source=scripts/zero-network-cases.sh
+source "$root/scripts/zero-network-cases.sh"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "zero-network: need python3" >&2
@@ -50,6 +55,9 @@ cat >"$work/library/IMG_0001.jpg.xmp" <<'EOF'
  </rdf:RDF>
 </x:xmpmeta>
 EOF
+# A synthetic JPEG from the fixture corpus, so the thumbnail tool decodes one.
+cp "$root/fixtures/xmp/IMG_0004.jpg" "$work/library/IMG_0006.jpg"
+zn_fixtures
 hash_before="$(python3 - "$work/library/IMG_0001.jpg" <<'PY'
 import hashlib, sys
 print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
@@ -61,7 +69,7 @@ print(os.stat(sys.argv[1]).st_mtime_ns)
 PY
 )"
 
-python3 - "$work/index.bin" "$work/search.bin" <<'PY'
+python3 - "$work/index.bin" "$work/search.bin" "$work/mcp-browse.bin" "$work/mcp-ledger.bin" "$work/mcp-thumbnail.bin" <<'PY'
 import json, sys
 
 def frame(message):
@@ -75,9 +83,12 @@ def write(path, call):
     ]
     open(path, "wb").write(b"".join(frame(message) for message in messages))
 
-index_path, search_path = sys.argv[1:]
+index_path, search_path, browse_path, ledger_path, thumbnail_path = sys.argv[1:]
 write(index_path, {"name": "search", "arguments": {"camera": "synthetic-index"}})
 write(search_path, {"name": "search", "arguments": {"query": "IMG_0001"}})
+write(browse_path, {"name": "browse", "arguments": {}})
+write(ledger_path, {"name": "ledger", "arguments": {}})
+write(thumbnail_path, {"name": "thumbnail", "arguments": {"path": "IMG_0006.jpg", "size": 16}})
 PY
 
 base_env=(
@@ -196,8 +207,23 @@ PY
   check_mcp search "$work/search.stdout" "IMG_0001.jpg"
   python3 "$checker" --expect-clean "$work/search.strace"
 
+  for tool in browse ledger thumbnail; do
+    trace_cmd "mcp-$tool" "$mcp" --library "$work/library" <"$work/mcp-$tool.bin"
+    check_mcp "mcp-$tool" "$work/mcp-$tool.stdout"
+    python3 "$checker" --expect-clean "$work/mcp-$tool.strace"
+  done
+
+  zn_case() {
+    local name="$1"
+    shift
+    trace_cmd "$name" "$@"
+    python3 "$checker" --expect-clean "$work/$name.strace"
+    echo "zero-network: $name made no network connection"
+  }
+  zn_cases "$albumen"
+
   assert_source_unchanged
-  echo "zero-network: linux strace -f -e trace=network saw no AF_INET or AF_INET6 socket, connect, send, or bind from scan, index, or search"
+  echo "zero-network: linux strace -f -e trace=network saw no AF_INET or AF_INET6 socket, connect, send, or bind from scan, index, search, every MCP tool, or any case in zero-network-cases.sh"
 }
 
 sandbox_canary() {
@@ -280,6 +306,17 @@ PY
   check_mcp index "$work/index.stdout"
   run_boxed search "$mcp" --library "$work/library" <"$work/search.bin"
   check_mcp search "$work/search.stdout" "IMG_0001.jpg"
+  for tool in browse ledger thumbnail; do
+    run_boxed "mcp-$tool" "$mcp" --library "$work/library" <"$work/mcp-$tool.bin"
+    check_mcp "mcp-$tool" "$work/mcp-$tool.stdout"
+  done
+  zn_case() {
+    local name="$1"
+    shift
+    run_boxed "$name" "$@"
+    echo "zero-network: $name exited 0 inside the sandbox"
+  }
+  zn_cases "$albumen"
   assert_source_unchanged
   echo "zero-network: macOS sandbox-exec deny network* (SIGKILL) and mDNSResponder mach-lookup; scan, index, and search exited 0"
 }
