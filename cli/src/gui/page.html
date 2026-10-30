@@ -205,14 +205,17 @@ function local(d){const p=n=>String(n).padStart(2,'0');
 // Capture times: only a time that carries an offset is a real moment, shown
 // in this computer's zone. A camera clock reading has no zone, so it is shown
 // as written and says so; no zone is invented for it.
+// R9: "Taken 2015-09-03 18:45 (camera clock, no time zone)".
+function zoned(t){return /(Z|[+-]\d\d:?\d\d)$/.test(t)&&!isNaN(new Date(t));}
 function when(t){if(t.length<16)return t;
- if(/(Z|[+-]\d\d:?\d\d)$/.test(t)){const d=new Date(t);if(!isNaN(d))return local(d);}
- return t.slice(0,10)+' '+t.slice(11,16)+' camera time, no time zone recorded';}
+ if(zoned(t))return local(new Date(t));
+ return t.slice(0,10)+' '+t.slice(11,16)+' (camera clock, no time zone)';}
 // CLI status text says "2026-10-18 05:01 UTC"; the page shows local time.
 const localStamps=s=>s.replace(/(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d) UTC/g,(_,y,mo,d,h,mi)=>local(new Date(Date.UTC(+y,mo-1,+d,+h,+mi))));
 function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=!im;if(!im)return;
  $('i-name').textContent=base(im.path);
- $('i-taken').textContent=im.taken?'Taken '+when(im.taken)+' (from '+im.taken_from+')':'Date taken: not known';
+ $('i-taken').textContent=!im.taken?'Date taken: not known':'Taken '+when(im.taken)+(im.taken.length<16||zoned(im.taken)?' (from '+im.taken_from+')':'');
+ $('i-taken').title=im.taken?'From '+im.taken_from:'';
  $('i-size').textContent=human(im.bytes)+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false?' \u00b7 '+im.format+', preview not available yet':'');
  $('i-raw').hidden=!im.raw;$('i-raw').textContent=im.raw?'RAW file: '+base(im.raw)+' ('+human(im.raw_bytes||0)+')':'';}
 // Info is a fixed pane beside the grid, never over it.

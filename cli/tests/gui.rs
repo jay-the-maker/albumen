@@ -317,15 +317,15 @@ fn demo_photos_group_into_four_events_by_capture_date() {
         })
         .collect();
     // One shared fixture for every screen (R5): the IMG_0003 RAW + JPEG
-    // pair (2015, plus "pier.jpg", a copy of that JPEG whose camera time
-    // wins over its file name), HEIC only (2018), Oct 3 with a lone RAW, and
+    // pair (2015), HEIC only (2018), Oct 3 with a dateless JPEG ("pier",
+    // dated by its file name) and a lone RAW, and
     // the undated CR3 and NEF last.
     assert_eq!(
         events,
         [
-            ("Sep 3, 2015".to_string(), 2),
+            ("Sep 3, 2015".to_string(), 1),
             ("Apr 1, 2018".to_string(), 1),
-            ("Oct 3, 2026".to_string(), 4),
+            ("Oct 3, 2026".to_string(), 5),
             ("Oct 4, 2026".to_string(), 2),
             ("Oct 11, 2026".to_string(), 4),
             ("Oct 18, 2026".to_string(), 3),
@@ -515,7 +515,8 @@ fn times_are_labelled_honestly_and_health_is_dark() {
     let work = tempfile::tempdir().unwrap();
     let (_gui, addr) = start(work.path());
     let (_, page) = get(&addr, "/");
-    assert!(page.contains("camera time, no time zone recorded"));
+    assert!(page.contains("(camera clock, no time zone)"));
+    assert!(!page.contains("camera time, no time zone recorded"));
     assert!(page.contains("const DARK_VIEWS=[...LIB_VIEWS,'health'];"));
     assert!(page.contains(".dark .card{"));
     assert!(page.contains("#info{overflow:auto;min-height:0;background:#2f3136;"));

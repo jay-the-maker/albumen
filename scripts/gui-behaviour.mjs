@@ -79,7 +79,7 @@ try {
   check('ask 1: inside the event the sidebar lights Events only', eq(await sideLit(), ['Events']), await sideLit());
   check('ask 1: photos view shows the event', await ev(`$('photos-title').textContent`) == 'Oct 3, 2026', await ev(`$('photos-title').textContent`));
   const inside = await ev(`$('photos-count').textContent`);
-  check('R5: tile count and inside count agree (4 photos)', inside == tileCount && inside == '4 photos', [tileCount, inside]);
+  check('R5: tile count and inside count agree (5 photos)', inside == tileCount && inside == '5 photos', [tileCount, inside]);
   await click('#to-events');
   check('ask 1: back to Events keeps Events lit', eq(await sideLit(), ['Events']), await sideLit());
   await click('aside button[data-s="photos"]');
@@ -119,7 +119,7 @@ try {
   const taken = await ev(`$('i-taken').textContent`);
   const infoBg = await ev(`getComputedStyle($('info')).backgroundColor`);
   check('Info pane is dark like the grid', infoBg != 'rgb(255, 255, 255)', infoBg);
-  check('R1: camera time says it has no zone', taken == 'Taken 2015-09-03 18:45 camera time, no time zone recorded (from RAW photo metadata)', taken);
+  check('R1: camera time says it has no zone', taken == 'Taken 2015-09-03 18:45 (camera clock, no time zone)', taken);
   await ev(`(()=>{const s=$('search');s.value='';s.dispatchEvent(new Event('input'));})()`);
 
   // R2: Backup health is dark and shows local time with a zone, never UTC.
