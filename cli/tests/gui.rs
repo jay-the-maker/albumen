@@ -416,3 +416,34 @@ fn places_and_faces_are_disabled_not_built_yet_rows() {
     let backups = page.find("<h2>BACKUPS</h2>").unwrap();
     assert!(lib < photos && photos < places && places < faces && faces < backups);
 }
+
+#[test]
+fn product_lead_asks_after_fix_7_are_in_the_page() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, page) = get(&addr, "/");
+    // 1. Inside an Event the sidebar lights Events.
+    assert!(page.contains("const lit=s=>s=='photos'&&curEvent?'events':s;"));
+    assert!(page.contains("b.dataset.s==lit(s)"));
+    // 2. Info is a pane in the layout grid, not a floating overlay.
+    assert!(page.contains(".app.with-info{grid-template-columns:200px 1fr 300px}"));
+    assert!(!page.contains("#info{position:fixed"));
+    let app = page.find("<div class=\"app\">").unwrap();
+    let info = page.find("<div id=\"info\"").unwrap();
+    let show = page.find("<div id=\"show\"").unwrap();
+    assert!(app < info && info < show);
+    assert!(page.contains("timeZoneName:'short'"), "times carry a zone");
+    assert!(page.contains("' KB'") && page.contains("' MB'"));
+    assert!(!page.contains("im.bytes+' bytes'"));
+    assert!(page.contains("'RAW file: '+base(im.raw)"));
+    // 4. Same banner words, no yellow.
+    assert!(page.contains("DEMO-ONLY window. Synthetic sample images."));
+    assert!(!page.contains("#fff4d6") && !page.contains("#6b5100"));
+    // 5. Captions are stems.
+    assert!(page.contains("figure(p,stem(p))"));
+    // 6. Smallest zoom: no captions, placeholder shows only the format.
+    assert!(page.contains(".mini #grid figcaption{display:none}"));
+    assert!(page.contains(".mini .ph .more{display:none}"));
+    // 7. Search matches a pair's RAW name.
+    assert!(page.contains("[p,m&&m.raw]"));
+}

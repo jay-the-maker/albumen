@@ -5,8 +5,8 @@
 <style>
 :root{--ink:#1d1f23;--mute:#6b7078;--line:#e4e6ea;--bg:#fafaf8;--ok:#1f7a3f;--stale:#b26a00;--bad:#b3261e;--none:#6b7078;--accent:#2b5fd9;--thumb:200px;--canvas:#3a3c41;--side:#e3e6eb}
 *{box-sizing:border-box}html,body{height:100%}body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg);display:flex;flex-direction:column}
-.demo{background:#fff4d6;border-bottom:1px solid #ecd9a0;padding:3px 16px;font-size:12px;color:#6b5100}
-.app{flex:1;display:grid;grid-template-columns:200px 1fr;min-height:0}
+.demo{background:var(--side);border-bottom:1px solid #cfd3da;padding:3px 16px;font-size:12px;color:var(--mute)}
+.app{flex:1;display:grid;grid-template-columns:200px 1fr;min-height:0}.app.with-info{grid-template-columns:200px 1fr 300px}
 aside{background:var(--side);border-right:1px solid #cfd3da;overflow:auto;padding:10px 0 20px;font-size:13px}
 aside h2{font-size:11px;font-weight:700;color:#7d838c;letter-spacing:.6px;margin:14px 14px 4px}
 aside button{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 14px 4px 22px;font:inherit;color:var(--ink);cursor:pointer;text-align:left}
@@ -23,7 +23,7 @@ h1{font-size:20px;font-weight:600;margin:0}.sub{color:var(--mute);margin:0 0 16p
 .grid .ph{width:100%;aspect-ratio:4/3;border-radius:3px;background:#4a4c52;color:#ccc;display:flex;align-items:center;justify-content:center;text-align:center;font-size:12px;padding:6px;box-sizing:border-box}.grid figure.sel .ph{outline:3px solid #f2c94c;outline-offset:2px}
 .grid figure.sel img{outline:3px solid #f2c94c;outline-offset:2px}
 .grid figcaption{font-size:12px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;opacity:.85}
-.grid figcaption small{display:block;opacity:.7}
+.grid figcaption small{display:block;opacity:.7}.mini #grid figcaption{display:none}.mini .ph .more{display:none}.mini .ph{font-weight:600}.grid .ph{flex-wrap:wrap}
 .ev-h{font-size:13px;font-weight:600;margin:4px 0 8px;opacity:.85}
 .events{grid-template-columns:repeat(auto-fill,minmax(calc(var(--thumb) * 1.2),1fr))}
 .primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 18px;font:inherit;font-weight:600;cursor:pointer}
@@ -49,7 +49,7 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 .tools{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#d9dce1;border-top:1px solid #bfc4cc;font-size:13px}
 .tools input[type=search]{width:180px;padding:4px 10px;border:1px solid #b9bec6;border-radius:14px;font:inherit}
 .tools .grow{flex:1}.tools input[type=range]{width:160px}
-#info{position:fixed;right:16px;bottom:58px;width:300px;max-height:70vh;overflow:auto;background:#fff;color:var(--ink);border:1px solid #c9cdd4;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.25);padding:12px 14px;font-size:13px}
+#info{overflow:auto;min-height:0;background:#fff;color:var(--ink);border-left:1px solid #cfd3da;padding:14px 16px;font-size:13px}
 #info h3{margin:0 0 6px;font-size:14px}#info p{margin:4px 0}
 #show{position:fixed;inset:0;background:#000;display:flex;align-items:center;justify-content:center;z-index:9}
 #show img{max-width:96vw;max-height:92vh}#show p{position:fixed;bottom:12px;color:#aaa;font-size:13px;margin:0}
@@ -116,9 +116,8 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 <button class="plain" id="b-check">Check backup</button>
 </div>
 </div>
-</div>
 <div id="info" hidden>
-<div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p></div>
+<div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p><p id="i-raw" hidden></p></div>
 <h3>Library</h3>
 <p>Albumen only reads this folder. Nothing in it is changed, moved or deleted.</p>
 <p><span class="lock">&#128274; read-only</span> <span id="lib-count"></span></p>
@@ -126,6 +125,7 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 <div class="bar" id="scan-bar" hidden><i></i></div>
 <div class="out" id="scan-out"></div>
 <details class="more"><summary>Show details</summary><pre id="lib"></pre><p class="runs" id="runs-photos">runs: albumen scan</p><pre id="scan-raw"></pre></details>
+</div>
 </div>
 <div id="show" hidden><img id="show-img" alt=""><p>Click or press Esc to stop.</p></div>
 <script>
@@ -136,8 +136,10 @@ const LIB_VIEWS=['events','photos'];
 let dests=[],lib={images:[],events:[]},curEvent=null,selected=null,cur='photos';
 const base=p=>p.replace(/\/+$/,'').split('/').pop()||p;
 const img=p=>'/img?p='+enc(p);
-document.querySelectorAll('aside button[data-s]').forEach(b=>b.onclick=()=>show(b.dataset.s));
-function show(s){cur=s;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('on',b.dataset.s==s));
+document.querySelectorAll('aside button[data-s]').forEach(b=>b.onclick=()=>{if(b.dataset.s=='photos')curEvent=null;show(b.dataset.s);});
+// Inside an Event the source list lights Events: that is where the user is.
+const lit=s=>s=='photos'&&curEvent?'events':s;
+function show(s){cur=s;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('on',b.dataset.s==lit(s)));
  document.querySelectorAll('.main section').forEach(x=>x.hidden=x.id!=s);
  const libv=LIB_VIEWS.includes(s);$('main').classList.toggle('dark',libv);
  for(const id of ['search','zoom','b-show'])$(id).disabled=!libv;
@@ -152,7 +154,11 @@ function sq(s){return s&&/^[A-Za-z0-9\/._\-:=+@]+$/.test(s)?s:"'"+s.replace(/'/g
 function q(s){return /[\s"'$`\\]/.test(s)?'"'+s.replace(/(["\\$`])/g,'\\$1')+'"':s}
 // Library: Photos grouped under their Event, Events as skimmable tiles.
 const byPath=p=>lib.images.find(i=>i.path==p);
-function match(p){const t=$('search').value.trim().toLowerCase();return !t||base(p).toLowerCase().includes(t);}
+// Search matches the shown file and, for a RAW + JPEG pair, the RAW's name.
+function match(p){const t=$('search').value.trim().toLowerCase();if(!t)return true;const m=byPath(p);
+ return [p,m&&m.raw].filter(Boolean).some(x=>base(x).toLowerCase().includes(t));}
+// Captions are titles: the file name without its extension.
+const stem=p=>base(p).replace(/\.[^.]+$/,'')||base(p);
 function visible(){const evs=curEvent?[curEvent]:lib.events;return evs.flatMap(e=>e.photos).filter(match);}
 // HEIC and RAW are listed and counted like any photo; the browser cannot
 // show them yet, so they get a calm placeholder tile instead of an image.
@@ -160,14 +166,14 @@ const canShow=p=>{const m=byPath(p);return !m||m.preview!==false;};
 const fmt=p=>{const m=byPath(p);return (m&&m.format)||'';};
 function figure(p,cap,sub){const f=document.createElement('figure');let i;
  if(canShow(p)){i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);}
- else{i=document.createElement('div');i.className='ph';i.textContent=fmt(p)+' \u2014 preview not available yet';}
+ else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent='\u00a0\u2014 preview not available yet';i.append(b,m);}
  const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
  $('grid').innerHTML='';
  for(const {e,ps} of evs){if(!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;$('grid').append(h);}
   const g=document.createElement('div');g.className='grid';
-  for(const p of ps){const f=figure(p,base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
+  for(const p of ps){const f=figure(p,stem(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
   $('grid').append(g);}
  const n=evs.reduce((a,x)=>a+x.ps.length,0);
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
@@ -183,19 +189,28 @@ function draw(){
  $('events-count').textContent=lib.events.length+(lib.events.length==1?' event':' events');}
 $('to-events').onclick=()=>show('events');
 $('search').oninput=draw;
-function zoom(v){document.documentElement.style.setProperty('--thumb',v+'px');try{localStorage.setItem('albumen-zoom',v);}catch(e){}}
+// At the smallest sizes captions hide and placeholders say only the format.
+function zoom(v){document.documentElement.style.setProperty('--thumb',v+'px');document.documentElement.classList.toggle('mini',Number(v)<130);try{localStorage.setItem('albumen-zoom',v);}catch(e){}}
 $('zoom').oninput=()=>zoom($('zoom').value);
 try{const z=localStorage.getItem('albumen-zoom');if(z){$('zoom').value=z;zoom(z);}}catch(e){}
+// Sizes in KB/MB; capture times as local time with this computer's zone.
+function human(n){return n<1024?n+' bytes':n<1048576?Math.round(n/1024)+' KB':(n/1048576).toFixed(1)+' MB';}
+function when(t){if(t.length<16)return t;const d=new Date(t);
+ const z=(new Intl.DateTimeFormat('en-US',{timeZoneName:'short'}).formatToParts(isNaN(d)?new Date():d).find(x=>x.type=='timeZoneName')||{}).value||'';
+ return t.slice(0,10)+' '+t.slice(11,16)+(z?' '+z:'');}
 function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=!im;if(!im)return;
  $('i-name').textContent=base(im.path);
- $('i-taken').textContent=im.taken?'Taken '+im.taken.replace('T',' ')+' (from '+im.taken_from+')':'Date taken: not known';
- $('i-size').textContent=im.bytes+' bytes'+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false?' \u00b7 '+im.format+', preview not available yet':'');}
-$('b-info').onclick=()=>{$('info').hidden=!$('info').hidden;infoPhoto();};
+ $('i-taken').textContent=im.taken?'Taken '+when(im.taken)+' (from '+im.taken_from+')':'Date taken: not known';
+ $('i-size').textContent=human(im.bytes)+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false?' \u00b7 '+im.format+', preview not available yet':'');
+ $('i-raw').hidden=!im.raw;$('i-raw').textContent=im.raw?'RAW file: '+base(im.raw)+' ('+human(im.raw_bytes||0)+')':'';}
+// Info is a fixed pane beside the grid, never over it.
+function setInfo(on){$('info').hidden=!on;document.querySelector('.app').classList.toggle('with-info',on);infoPhoto();}
+$('b-info').onclick=()=>setInfo($('info').hidden);
 let timer=null;
 function stopShow(){clearInterval(timer);timer=null;$('show').hidden=true;}
 $('b-show').onclick=()=>{const ps=visible();if(!ps.length)return;let k=Math.max(0,ps.indexOf(selected));
  $('show-img').src=img(ps[k]);$('show').hidden=false;timer=setInterval(()=>{k=(k+1)%ps.length;$('show-img').src=img(ps[k]);},3000);};
-$('show').onclick=stopShow;document.addEventListener('keydown',e=>{if(e.key=='Escape'){stopShow();$('info').hidden=true;}});
+$('show').onclick=stopShow;document.addEventListener('keydown',e=>{if(e.key=='Escape'){stopShow();setInfo(false);}});
 $('b-backup').onclick=()=>show('backup');$('b-check').onclick=()=>show('proof');$('to-health').onclick=()=>show('health');
 function pick(d){const i=dests.indexOf(d);if(i>=0){$('dest-b').selectedIndex=i;$('dest-v').selectedIndex=i;runsB();runsV();}}
 function cls(state){return {ok:'s-ok',stale:'s-stale',damaged:'s-damaged'}[state]||'s-none';}
@@ -268,6 +283,6 @@ $('go-verify').onclick=async()=>{const b=$('go-verify');b.disabled=true;$('verif
 init().then(()=>{const [s,r,arg,dn]=location.hash.slice(1).split(':');if(!s)return;
  if(r=='job')attach=Number(arg);
  const i=dests.findIndex(d=>d.endsWith('/'+decodeURIComponent((r=='job'?dn:arg)||'')));if(i>=0)pick(dests[i]);
- if(s=='photos'&&(r=='run'||r=='job'))$('info').hidden=false;
+ if(s=='photos'&&(r=='run'||r=='job'))setInfo(true);
  show(s);if(r=='run'||r=='job')({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]&&$({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]).click());});
 </script></body></html>

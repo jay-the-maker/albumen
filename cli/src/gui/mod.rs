@@ -35,10 +35,12 @@ const PLACEHOLDER_EXT: &[&str] = &[
 /// Camera RAW types that pair with a same-stem JPEG in the same folder.
 const RAW_EXT: &[&str] = &["dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf"];
 
-/// Folder plus lowercase stem, the key a RAW + JPEG pair shares.
+/// The key a RAW + JPEG pair shares: the folder exactly as it is on disk,
+/// plus the file stem compared case-insensitively.
 fn pair_key(rel: &str) -> Option<String> {
     let (stem, _) = rel.rsplit_once('.')?;
-    Some(stem.to_lowercase())
+    let (folder, name) = stem.rsplit_once('/').unwrap_or(("", stem));
+    Some(format!("{folder}/{}", name.to_lowercase()))
 }
 
 fn is_raw(rel: &str) -> bool {
@@ -340,10 +342,25 @@ pub fn library_json(library: &Path) -> serde_json::Value {
         .map(|rel| {
             let len = size(rel);
             bytes += len;
-            let when = taken::taken(library, rel);
+            let mut when = taken::taken(library, rel);
             let raw = is_jpeg(rel)
                 .then(|| pair_key(rel).and_then(|k| raw_of.get(&k)))
                 .flatten();
+            // A pair's date: the JPEG's metadata, else the RAW's metadata,
+            // then a date in the file name. Never a made-up date.
+            if let Some(raw) = raw {
+                let jpeg_meta = when.as_ref().is_some_and(|t| t.source == "photo metadata");
+                if !jpeg_meta {
+                    if let Some(t) =
+                        taken::taken(library, raw).filter(|t| t.source == "photo metadata")
+                    {
+                        when = Some(taken::Taken {
+                            when: t.when,
+                            source: "RAW photo metadata",
+                        });
+                    }
+                }
+            }
             let mut item = serde_json::json!({
                 "path": rel,
                 "bytes": len,
@@ -353,7 +370,9 @@ pub fn library_json(library: &Path) -> serde_json::Value {
                 "format": ext(rel).unwrap_or_default().to_ascii_uppercase(),
             });
             if let Some(raw) = raw {
-                bytes += size(raw);
+                let raw_len = size(raw);
+                bytes += raw_len;
+                item["raw_bytes"] = raw_len.into();
                 item["format"] = "RAW + JPEG".into();
                 item["raw"] = raw.as_str().into();
             }
@@ -375,6 +394,20 @@ pub fn events(images: &[serde_json::Value]) -> Vec<serde_json::Value> {
     let mut by_day: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
     let mut undated = Vec::new();
+    let viewable: std::collections::HashSet<&str> = images
+        .iter()
+        .filter(|i| i["preview"] != false)
+        .filter_map(|i| i["path"].as_str())
+        .collect();
+    // The cover is the first photo a browser can show; a placeholder only
+    // when the event has none.
+    let cover = |paths: &[String]| {
+        paths
+            .iter()
+            .find(|p| viewable.contains(p.as_str()))
+            .unwrap_or(&paths[0])
+            .clone()
+    };
     for img in images {
         let path = img["path"].as_str().unwrap_or_default().to_string();
         match img["taken"].as_str() {
@@ -394,7 +427,7 @@ pub fn events(images: &[serde_json::Value]) -> Vec<serde_json::Value> {
                 "title": taken::day_title(&day),
                 "day": day,
                 "count": paths.len(),
-                "key": paths[0],
+                "key": cover(&paths),
                 "photos": paths,
             })
         })
@@ -405,7 +438,7 @@ pub fn events(images: &[serde_json::Value]) -> Vec<serde_json::Value> {
             "title": "No date",
             "day": null,
             "count": undated.len(),
-            "key": undated[0],
+            "key": cover(&undated),
             "photos": undated,
         }));
     }
@@ -810,5 +843,54 @@ mod tests {
             .unwrap();
         assert_eq!(lone["format"], "DNG");
         assert!(PAGE.contains("im.raw?' \\u00b7 RAW + JPEG'"));
+    }
+
+    #[test]
+    fn pairs_need_the_exact_folder_and_take_jpeg_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+        let copy = |from: &str, to: &str| {
+            let bytes = std::fs::read(fixtures.join(from)).unwrap();
+            let mut f = albumen_ingest::dest::create_file(&lib.join(to)).unwrap();
+            f.write_all(&bytes).unwrap();
+        };
+        for sub in ["a", "Roll", "roll"] {
+            std::fs::create_dir(lib.join(sub)).unwrap();
+        }
+        // .jpeg pairs; the JPEG has no date, so the RAW's metadata dates it.
+        copy("raw-jpeg/IMG_0003.dng", "a/IMG_0003.DNG");
+        let mut f = albumen_ingest::dest::create_file(&lib.join("a/img_0003.jpeg")).unwrap();
+        f.write_all(b"no exif here").unwrap();
+        // Folder names differ only in case: two folders, no pair.
+        copy("raw-jpeg/IMG_0003.dng", "Roll/IMG_1.dng");
+        copy("raw-jpeg/IMG_0003.jpg", "roll/IMG_1.jpg");
+        let v = library_json(lib);
+        let images = v["images"].as_array().unwrap();
+        let paths: Vec<&str> = images.iter().map(|i| i["path"].as_str().unwrap()).collect();
+        assert_eq!(
+            paths,
+            ["Roll/IMG_1.dng", "a/img_0003.jpeg", "roll/IMG_1.jpg"],
+            "{v}"
+        );
+        let pair = &images[1];
+        assert_eq!(pair["format"], "RAW + JPEG");
+        assert_eq!(pair["raw"], "a/IMG_0003.DNG");
+        assert_eq!(pair["taken"], "2015-09-03T18:45:12");
+        assert_eq!(pair["taken_from"], "RAW photo metadata");
+        assert!(pair["raw_bytes"].as_u64().unwrap() > 0);
+        assert!(images[2].get("raw").is_none());
+    }
+
+    #[test]
+    fn event_cover_is_a_viewable_photo_when_one_exists() {
+        let ev = events(&[
+            serde_json::json!({"path": "a.dng", "taken": "2015-09-03T10:00:00", "preview": false}),
+            serde_json::json!({"path": "b.jpg", "taken": "2015-09-03T11:00:00", "preview": true}),
+            serde_json::json!({"path": "c.nef", "taken": null, "preview": false}),
+        ]);
+        assert_eq!(ev[0]["key"], "b.jpg");
+        assert_eq!(ev[0]["photos"][0], "a.dng");
+        assert_eq!(ev[1]["key"], "c.nef", "placeholder only when none can show");
     }
 }
