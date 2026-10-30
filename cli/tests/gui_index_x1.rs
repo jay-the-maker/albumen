@@ -426,15 +426,8 @@ fn readers_keep_answering_while_one_writer_saves() {
         p50 / base_p50,
         gui.0.id()
     );
-    // A frozen box (a tick gap over 1 s, or wall and monotonic clocks
-    // drifting apart by over 1 s) makes every timing meaningless: INVALID,
-    // exit 75, rerun. Not a pass and not a product FAIL.
-    if max_gap_ms > 1000.0 || clock_skew_ms.abs() > 1000.0 {
-        println!(
-            "M6 X1 INVALID freeze_max_gap_ms={max_gap_ms:.1} wall_vs_mono_skew_ms={clock_skew_ms:.1} (rerun; timings not evidence)"
-        );
-        std::process::exit(75);
-    }
+    // Correctness first (XO 22:03Z): a freeze voids only the timing bars,
+    // so a real correctness bug still FAILs even on a frozen box.
     assert_eq!(parse_failures, 0);
     assert_eq!(fallbacks, 0);
     assert_eq!(partials, 0);
@@ -444,6 +437,16 @@ fn readers_keep_answering_while_one_writer_saves() {
     );
     assert_eq!(save_errors, 0);
     assert!(equals_walk, "the last save is not the library");
+    println!("M6 X1 CORRECTNESS_OK");
+    // A frozen box (a tick gap over 1 s, or wall and monotonic clocks
+    // drifting apart by over 1 s) makes every timing meaningless: INVALID,
+    // exit 75, rerun (m6-one.sh allows one; two in a row FAIL). Not a pass.
+    if max_gap_ms > 1000.0 || clock_skew_ms.abs() > 1000.0 {
+        println!(
+            "M6 X1 INVALID freeze_max_gap_ms={max_gap_ms:.1} wall_vs_mono_skew_ms={clock_skew_ms:.1} (rerun; timings not evidence)"
+        );
+        std::process::exit(75);
+    }
     assert!(p50 <= 500.0, "/api/library p50 {p50:.2} ms over 500 ms");
     assert!(
         p50 <= base_p50 * 1.10,

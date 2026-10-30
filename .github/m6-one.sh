@@ -7,6 +7,23 @@
 # line in the output.  Usage: m6-one.sh <test name> <tag>  (env passes through)
 set -euo pipefail
 name=$1 tag=$2
+# At most one rerun after INVALID (XO 22:03Z): the outer call runs the
+# attempt itself twice at most; two INVALID runs in a row are a FAIL.
+if [ -z "${M6_ATTEMPT:-}" ]; then
+  arc=0
+  M6_ATTEMPT=1 bash "$0" "$@" || arc=$?
+  if [ "$arc" -eq 75 ]; then
+    echo "M6 $tag attempt 1 INVALID; one rerun allowed"
+    arc=0
+    M6_ATTEMPT=2 bash "$0" "$@" || arc=$?
+    if [ "$arc" -eq 75 ]; then
+      echo "M6 $tag FAIL: two INVALID runs in a row"
+      echo "::error::$name FAIL: INVALID twice in a row (box froze on both runs)"
+      exit 1
+    fi
+  fi
+  exit "$arc"
+fi
 log=$(mktemp)
 # Peak RSS bar (M6, XO 20:12Z): 332 MiB = 339968 kB, measured by GNU time -v.
 # Linux reports the largest process in cargo's tree (the test binary).
@@ -27,8 +44,18 @@ kill "$ticker" 2>/dev/null || true
 wait "$ticker" 2>/dev/null || true
 read -r gap skew < <(awk 'NR==1{w0=$1;u0=$2} NR>1{g=($1-pw)*1000; if(g>mg)mg=g} {pw=$1; s=(($1-w0)-($2-u0))*1000; if(s<0)s=-s; if(s>ms)ms=s} END{printf "%.1f %.1f\n", mg+0, ms+0}' "$ticks")
 echo "M6 $tag FREEZE_TICKER max_gap_ms=$gap wall_vs_uptime_skew_ms=$skew"
+# A freeze voids timing only: if the test failed and did not get past its
+# correctness asserts (no "M6 <tag> CORRECTNESS_OK"), that is a real FAIL.
+froze=0
 if grep -q "M6 $tag INVALID" "$log" || awk -v g="$gap" -v s="$skew" 'BEGIN{exit !(g>1000 || s>1000)}'; then
-  echo "M6 $tag INVALID (box froze: max_gap_ms=$gap skew_ms=$skew); timings are not evidence, rerun"
+  froze=1
+fi
+if [ "$froze" -eq 1 ] && [ "$rc" -ne 0 ] && ! grep -q "M6 $tag CORRECTNESS_OK" "$log"; then
+  echo "::error::$name FAIL during a freeze: correctness failed before INVALID could apply (exit $rc)"
+  exit "$rc"
+fi
+if [ "$froze" -eq 1 ]; then
+  echo "M6 $tag INVALID attempt=$M6_ATTEMPT (box froze: max_gap_ms=$gap skew_ms=$skew); timings are not evidence, rerun"
   echo "::error::$name INVALID run (freeze); rerun, not a pass"
   exit 75
 fi
