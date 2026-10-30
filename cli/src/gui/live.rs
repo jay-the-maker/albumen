@@ -2,7 +2,8 @@
 
 //! Live Photos in `albumen gui`: pair a still with its movie by the shared
 //! ContentIdentifier, keep a disposable preview cache under ALBUMEN_HOME,
-//! and serve the movie bytes as they are on disk (no transcode).
+//! and serve the movie bytes as they are on disk (no transcode), with HTTP
+//! Range support so the player can seek.
 //!
 //! Everything here reads the library. The only writes go to the cache
 //! folder, which is never inside the library.
@@ -235,11 +236,10 @@ pub fn identifiers(
     out
 }
 
-/// A library movie by its relative path, as its bytes on disk. `..`,
-/// absolute paths and anything resolving outside the library are refused.
-/// The MIME type is video/mp4: QuickTime H.264 plays under it in browsers,
-/// and the bytes are not changed.
-pub fn read_video(library: &Path, rel: &str) -> Option<(Vec<u8>, &'static str)> {
+/// A library movie by its relative path, opened read-only, with its length.
+/// `..`, absolute paths and anything resolving outside the library are
+/// refused.
+pub fn open_video(library: &Path, rel: &str) -> Option<(std::fs::File, u64)> {
     let rel_path = Path::new(rel);
     if rel.is_empty()
         || rel_path.is_absolute()
@@ -255,12 +255,166 @@ pub fn read_video(library: &Path, rel: &str) -> Option<(Vec<u8>, &'static str)> 
     if !full.starts_with(&root) {
         return None;
     }
+    let f = std::fs::File::open(full).ok()?;
+    let len = f.metadata().ok()?.len();
+    Some((f, len))
+}
+
+/// The MIME type for a served movie. video/quicktime is the registered type
+/// for .mov; scripts/gui-live-behaviour.mjs shows headless Chrome plays it.
+pub const VIDEO_MIME: &str = "video/quicktime";
+
+/// What a `Range` header asks for, against a file of `len` bytes.
+#[derive(Debug, PartialEq)]
+pub enum Range {
+    /// No usable range: send everything (200).
+    Full,
+    /// Inclusive byte range (206).
+    Part(u64, u64),
+    /// Outside the file (416).
+    Unsatisfiable,
+}
+
+/// Parse a single `bytes=` range. Multiple ranges and other units fall back
+/// to the whole file, which RFC 9110 allows.
+pub fn parse_range(header: Option<&str>, len: u64) -> Range {
+    let Some(spec) = header.and_then(|h| h.trim().strip_prefix("bytes=")) else {
+        return Range::Full;
+    };
+    if spec.contains(',') {
+        return Range::Full;
+    }
+    let Some((a, b)) = spec.trim().split_once('-') else {
+        return Range::Full;
+    };
+    let (a, b) = (a.trim(), b.trim());
+    let (start, end) = match (a.is_empty(), b.is_empty()) {
+        (false, _) => {
+            let Ok(start) = a.parse::<u64>() else {
+                return Range::Full;
+            };
+            let end = if b.is_empty() {
+                len.saturating_sub(1)
+            } else {
+                match b.parse::<u64>() {
+                    Ok(e) if e >= start => e.min(len.saturating_sub(1)),
+                    _ => return Range::Full,
+                }
+            };
+            (start, end)
+        }
+        (true, false) => {
+            let Ok(n) = b.parse::<u64>() else {
+                return Range::Full;
+            };
+            if n == 0 {
+                return Range::Unsatisfiable;
+            }
+            (len.saturating_sub(n), len.saturating_sub(1))
+        }
+        (true, true) => return Range::Full,
+    };
+    if len == 0 || start >= len {
+        return Range::Unsatisfiable;
+    }
+    Range::Part(start, end)
+}
+
+/// Write an HTTP response for a movie: 200 with the whole file, 206 with
+/// one range, or 416. The body is streamed from the file in small chunks,
+/// so memory stays flat however large the movie is. Never writes the file.
+pub fn write_video<W: std::io::Write>(
+    out: &mut W,
+    file: &mut std::fs::File,
+    len: u64,
+    range: Option<&str>,
+) -> std::io::Result<()> {
+    let common = format!(
+        "Content-Type: {VIDEO_MIME}\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n"
+    );
+    let (status, extra, start, count) = match parse_range(range, len) {
+        Range::Full => ("200 OK", String::new(), 0, len),
+        Range::Part(a, b) => (
+            "206 Partial Content",
+            format!("Content-Range: bytes {a}-{b}/{len}\r\n"),
+            a,
+            b - a + 1,
+        ),
+        Range::Unsatisfiable => {
+            let head = format!(
+                "HTTP/1.1 416 Range Not Satisfiable\r\n{common}Content-Range: bytes */{len}\r\nContent-Length: 0\r\n\r\n"
+            );
+            out.write_all(head.as_bytes())?;
+            return out.flush();
+        }
+    };
+    let head = format!("HTTP/1.1 {status}\r\n{common}{extra}Content-Length: {count}\r\n\r\n");
+    out.write_all(head.as_bytes())?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut body = std::io::BufReader::with_capacity(64 * 1024, file.take(count));
+    std::io::copy(&mut body, out)?;
+    out.flush()
+}
+
+/// Sample-entry codes from a movie's `stsd` boxes (e.g. `avc1`, `mp4a`,
+/// `hvc1`), read from the first and last MiB.
+pub fn sample_entries(path: &Path) -> Vec<String> {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut windows = Vec::new();
+    let mut head = Vec::new();
+    if (&mut f).take(WINDOW).read_to_end(&mut head).is_ok() {
+        windows.push(head);
+    }
+    if len > WINDOW
+        && f.seek(SeekFrom::Start(len.saturating_sub(WINDOW).max(WINDOW)))
+            .is_ok()
+    {
+        let mut tail = Vec::new();
+        if f.read_to_end(&mut tail).is_ok() {
+            windows.push(tail);
+        }
+    }
+    let mut out = Vec::new();
+    for w in &windows {
+        let mut from = 0;
+        while let Some(at) = find(&w[from..], b"stsd").map(|i| i + from) {
+            // 'stsd' version/flags(4) entry_count(4) entry_size(4) entry_type(4)
+            if let Some(code) = w.get(at + 16..at + 20) {
+                if code.iter().all(|c| c.is_ascii_alphanumeric()) {
+                    out.push(String::from_utf8_lossy(code).into_owned());
+                }
+            }
+            from = at + 4;
+        }
+    }
+    out
+}
+
+/// Whether a browser can play this Live Photo movie: H.264 (`avc1`/`avc3`)
+/// only. HEVC (`hvc1`/`hev1`) or an unknown codec gets the can't-preview
+/// copy instead of a broken player.
+pub fn playable(path: &Path) -> (bool, Option<&'static str>) {
+    let codes = sample_entries(path);
+    let has = |c: &[&str]| codes.iter().any(|x| c.contains(&x.as_str()));
+    if has(&["hvc1", "hev1"]) {
+        (false, Some("HEVC"))
+    } else if has(&["avc1", "avc3"]) {
+        (true, Some("H.264"))
+    } else {
+        (false, None)
+    }
+}
+
+/// Test helper: the whole movie as bytes.
+#[cfg(test)]
+pub fn read_video(library: &Path, rel: &str) -> Option<(Vec<u8>, &'static str)> {
+    let (mut f, _) = open_video(library, rel)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(full)
-        .ok()?
-        .read_to_end(&mut bytes)
-        .ok()?;
-    Some((bytes, "video/mp4"))
+    f.read_to_end(&mut bytes).ok()?;
+    Some((bytes, VIDEO_MIME))
 }
 
 #[cfg(test)]
@@ -309,5 +463,112 @@ mod tests {
         assert!(read_video(dir.path(), "../x.mov").is_none());
         assert!(read_video(dir.path(), "a.jpg").is_none());
         assert!(read_video(dir.path(), "").is_none());
+    }
+    #[test]
+    fn range_header_parsing() {
+        assert_eq!(parse_range(None, 100), Range::Full);
+        assert_eq!(parse_range(Some("bytes=0-9"), 100), Range::Part(0, 9));
+        assert_eq!(parse_range(Some("bytes=90-"), 100), Range::Part(90, 99));
+        assert_eq!(parse_range(Some("bytes=90-500"), 100), Range::Part(90, 99));
+        assert_eq!(parse_range(Some("bytes=-10"), 100), Range::Part(90, 99));
+        assert_eq!(parse_range(Some("bytes=-500"), 100), Range::Part(0, 99));
+        assert_eq!(parse_range(Some("bytes=100-"), 100), Range::Unsatisfiable);
+        assert_eq!(parse_range(Some("bytes=-0"), 100), Range::Unsatisfiable);
+        assert_eq!(parse_range(Some("bytes=0-1,5-6"), 100), Range::Full);
+        assert_eq!(parse_range(Some("bytes=9-3"), 100), Range::Full);
+        assert_eq!(parse_range(Some("items=0-1"), 100), Range::Full);
+        assert_eq!(parse_range(Some("bytes=x-1"), 100), Range::Full);
+    }
+
+    fn response(rel_lib: &Path, range: Option<&str>) -> (String, Vec<u8>) {
+        let (mut f, len) = open_video(rel_lib, "IMG_0005.mov").unwrap();
+        let mut out = Vec::new();
+        write_video(&mut out, &mut f, len, range).unwrap();
+        let at = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        (
+            String::from_utf8_lossy(&out[..at]).into_owned(),
+            out[at + 4..].to_vec(),
+        )
+    }
+
+    #[test]
+    fn video_responses_stream_whole_ranges_and_416() {
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/live-photo");
+        let want = std::fs::read(fx.join("IMG_0005.mov")).unwrap();
+        let (head, body) = response(&fx, None);
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert!(head.contains("Accept-Ranges: bytes\r\n"));
+        assert!(head.contains("Content-Type: video/quicktime\r\n"));
+        assert!(head.ends_with(&format!("Content-Length: {}", want.len())));
+        assert_eq!(body, want);
+        let (head, body) = response(&fx, Some("bytes=100-199"));
+        assert!(
+            head.starts_with("HTTP/1.1 206 Partial Content\r\n"),
+            "{head}"
+        );
+        assert!(head.contains(&format!("Content-Range: bytes 100-199/{}\r\n", want.len())));
+        assert!(head.ends_with("Content-Length: 100"));
+        assert_eq!(body, want[100..200]);
+        let (head, body) = response(&fx, Some("bytes=-16"));
+        assert_eq!(body, want[want.len() - 16..]);
+        assert!(head.contains("206"));
+        let (head, body) = response(&fx, Some("bytes=999999-"));
+        assert!(head.starts_with("HTTP/1.1 416 "), "{head}");
+        assert!(head.contains(&format!("Content-Range: bytes */{}\r\n", want.len())));
+        assert!(body.is_empty());
+    }
+
+    /// Streaming: a large sparse movie is served through a fixed buffer.
+    /// The response is counted, not kept, so the test itself stays small.
+    #[test]
+    fn large_video_streams_without_loading_it() {
+        struct Count(u64);
+        impl std::io::Write for Count {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0 += b.len() as u64;
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let size: u64 = 256 << 20;
+        let f = albumen_ingest::dest::create_file(&dir.path().join("big.mov")).unwrap();
+        f.set_len(size).unwrap();
+        drop(f);
+        let (mut f, len) = open_video(dir.path(), "big.mov").unwrap();
+        assert_eq!(len, size);
+        let mut out = Count(0);
+        write_video(&mut out, &mut f, len, None).unwrap();
+        assert!(out.0 > size && out.0 < size + 512);
+        let mut out = Count(0);
+        write_video(&mut out, &mut f, len, Some("bytes=134217728-")).unwrap();
+        assert!(out.0 > size / 2 && out.0 < size / 2 + 512);
+    }
+
+    #[test]
+    fn codec_is_read_from_the_sample_entry() {
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/live-photo");
+        let codes = sample_entries(&fx.join("IMG_0005.mov"));
+        assert!(codes.contains(&"avc1".to_string()), "{codes:?}");
+        assert_eq!(playable(&fx.join("IMG_0005.mov")), (true, Some("H.264")));
+        // Synthetic HEVC stub: the same file with the video sample entry
+        // code changed to hvc1 (and hev1). Not decodable, only labelled.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = std::fs::read(fx.join("IMG_0005.mov")).unwrap();
+        for code in [b"hvc1", b"hev1"] {
+            let mut stub = bytes.clone();
+            let at = stub.windows(4).position(|w| w == b"avc1").unwrap();
+            stub[at..at + 4].copy_from_slice(code);
+            let p = dir
+                .path()
+                .join(format!("{}.mov", String::from_utf8_lossy(code)));
+            std::fs::write(&p, &stub).unwrap();
+            assert_eq!(playable(&p), (false, Some("HEVC")));
+        }
+        let junk = dir.path().join("junk.mov");
+        std::fs::write(&junk, b"not a movie").unwrap();
+        assert_eq!(playable(&junk), (false, None));
     }
 }

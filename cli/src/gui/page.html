@@ -119,7 +119,7 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 </div>
 </div>
 <div id="info" hidden>
-<div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p><p id="i-raw" hidden></p><p id="i-note" hidden></p><div id="i-live" hidden><p id="i-live-file"></p><button id="i-play" type="button">Play Live Photo</button></div></div>
+<div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p><p id="i-raw" hidden></p><p id="i-note" hidden></p><div id="i-live" hidden><p id="i-live-file"></p><button id="i-play" type="button">Play Live Photo</button><p id="i-live-note" hidden></p></div></div>
 <h3>Library</h3>
 <p>Albumen only reads this folder. Nothing in it is changed, moved or deleted.</p>
 <p><span class="lock">&#128274; read-only</span> <span id="lib-count"></span></p>
@@ -233,11 +233,15 @@ function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=
  $('i-raw').hidden=!im.raw;$('i-raw').textContent=im.raw?'RAW file: '+base(im.raw)+' ('+human(im.raw_bytes||0)+')':'';
  $('i-note').hidden=!im.info;$('i-note').textContent=im.info||'';
  $('i-live').hidden=!im.live;$('i-live').querySelectorAll('video').forEach(v=>v.remove());
- $('i-live-file').textContent=im.live?'Live Photo movie: '+base(im.live)+' ('+human(im.live_bytes||0)+')':'';}
+ $('i-live-file').textContent=im.live?'Live Photo movie: '+base(im.live)+' ('+human(im.live_bytes||0)+')':'';
+ const cant=im.live&&im.live_playable===false;$('i-play').hidden=cant;$('i-live-note').hidden=!cant;
+ $('i-live-note').textContent=cant?base(im.live)+' ('+(im.live_codec||'unknown')+' video). '+CANT:'';}
 // Live Photo: the movie plays only when asked, muted, from /video (the
 // original bytes; nothing is converted or written).
 function playLive(){const im=selected&&byPath(selected);if(!im||!im.live)return;
  const box=$('i-live');box.querySelectorAll('video').forEach(v=>v.remove());
+ // HEVC (or an unknown codec) would be a broken player: say so plainly.
+ if(im.live_playable===false){$('i-live-note').hidden=false;return;}
  const v=document.createElement('video');v.muted=true;v.controls=true;v.playsInline=true;v.src='/video?p='+encodeURIComponent(im.live);
  box.append(v);const pr=v.play();if(pr&&pr.catch)pr.catch(()=>{});}
 $('i-play').onclick=playLive;

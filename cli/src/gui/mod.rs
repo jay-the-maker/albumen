@@ -212,10 +212,13 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/video") => {
-            // A Live Photo's movie, bytes as on disk. No transcode.
+            // A Live Photo's movie, bytes as on disk, streamed with Range
+            // support so the player can seek. No transcode.
             let rel = http::query_param(&req.target, "p").unwrap_or_default();
-            match live::read_video(&server.config.library, &rel) {
-                Some((bytes, mime)) => http::respond(&mut stream, 200, mime, &bytes),
+            match live::open_video(&server.config.library, &rel) {
+                Some((mut file, len)) => {
+                    live::write_video(&mut stream, &mut file, len, req.header("range"))
+                }
                 None => http::respond(&mut stream, 404, "text/plain", b"not found"),
             }
         }
@@ -481,6 +484,10 @@ pub fn library_json_with(library: &Path, cache: Option<&Path>) -> serde_json::Va
                 bytes += mov_len;
                 item["live"] = mov.as_str().into();
                 item["live_bytes"] = mov_len.into();
+                // Only H.264 plays in the browser; HEVC gets the AC3 copy.
+                let (ok, codec) = live::playable(&library.join(mov));
+                item["live_playable"] = ok.into();
+                item["live_codec"] = codec.into();
             }
             if let Some(line) = info.get(rel.as_str()) {
                 item["info"] = line.as_str().into();
@@ -1248,7 +1255,7 @@ mod tests {
         .unwrap();
         let (bytes, mime) = live::read_video(dir.path(), "roll/IMG_0005.MOV").unwrap();
         assert_eq!(bytes, want, "no transcode");
-        assert_eq!(mime, "video/mp4");
+        assert_eq!(mime, "video/quicktime");
         assert!(live::read_video(dir.path(), "roll/IMG_0005.HEIC").is_none());
         assert!(live::read_video(dir.path(), "roll/../roll/IMG_0005.MOV").is_none());
         assert!(PAGE.contains("'/video?p='"));
@@ -1267,5 +1274,47 @@ mod tests {
         assert!(PAGE.contains("'\\u00a0\\u2014 '+base(p)+'. '+CANT"));
         assert!(PAGE.contains("im.format+'. '+CANT"));
         assert!(!PAGE.contains("preview not available yet"));
+    }
+    /// Gate ask 3: an HEVC Live Photo movie is flagged not playable, so the
+    /// page shows the can't-preview copy instead of a player.
+    #[test]
+    fn hevc_live_movie_is_not_offered_a_player() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/live-photo");
+        let still = std::fs::read(fx.join("IMG_0005.heic")).unwrap();
+        let mut stub = std::fs::read(fx.join("IMG_0005.mov")).unwrap();
+        let at = stub.windows(4).position(|w| w == b"avc1").unwrap();
+        stub[at..at + 4].copy_from_slice(b"hvc1");
+        for (name, bytes) in [
+            ("IMG_0005.heic", &still),
+            (
+                "IMG_0005.mov",
+                &std::fs::read(fx.join("IMG_0005.mov")).unwrap(),
+            ),
+            ("IMG_0010.heic", &still),
+            ("IMG_0010.mov", &stub),
+        ] {
+            let mut f = albumen_ingest::dest::create_file(&lib.join(name)).unwrap();
+            f.write_all(bytes).unwrap();
+        }
+        let v = library_json_with(lib, None);
+        let find = |p: &str| {
+            v["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["path"] == p)
+                .unwrap()
+                .clone()
+        };
+        let h264 = find("IMG_0005.heic");
+        assert_eq!(h264["live_playable"], true);
+        assert_eq!(h264["live_codec"], "H.264");
+        let hevc = find("IMG_0010.heic");
+        assert_eq!(hevc["live"], "IMG_0010.mov");
+        assert_eq!(hevc["live_playable"], false);
+        assert_eq!(hevc["live_codec"], "HEVC");
+        assert!(PAGE.contains("if(im.live_playable===false){"));
     }
 }
