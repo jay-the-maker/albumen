@@ -87,17 +87,6 @@ fn wait_ready(addr: &str) -> serde_json::Value {
     panic!("library never ready");
 }
 
-fn paths(lib: &serde_json::Value) -> Vec<String> {
-    let mut p: Vec<String> = lib["images"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| i["path"].as_str().unwrap().to_string())
-        .collect();
-    p.sort();
-    p
-}
-
 fn env_num(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -191,14 +180,12 @@ fn readers_keep_answering_while_one_writer_saves() {
                             let want = counts.lock().unwrap().get(&generation).copied();
                             if let Some(want) = want {
                                 checked.fetch_add(1, Ordering::Relaxed);
-                                if want != paths.len() {
-                                    if partials.fetch_add(1, Ordering::Relaxed) < 5 {
+                                if want != paths.len() && partials.fetch_add(1, Ordering::Relaxed) < 5 {
                                         println!(
                                             "M6 X1 PARTIAL generation={generation} writer_count={want} read_count={}",
                                             paths.len()
                                         );
                                     }
-                                }
                             }
                         }
                         Err(e) if e.contains("no complete saved index") => {
@@ -237,7 +224,7 @@ fn readers_keep_answering_while_one_writer_saves() {
             during.extend(gui_pages(&addr, 1));
         }
     }
-    let more = gui_pages(&addr, 300usize.saturating_sub(during.len()).max(0));
+    let more = gui_pages(&addr, 300usize.saturating_sub(during.len()));
     during.extend(more);
     stop.store(true, Ordering::Relaxed);
     for r in readers {
