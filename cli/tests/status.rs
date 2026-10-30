@@ -212,7 +212,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
         l[3],
         format!(
             "next: albumen backup --from <your photos folder> --to {}",
-            p(&stale)
+            sq(p(&stale))
         )
     );
     assert_eq!(l.len(), 4);
@@ -309,6 +309,21 @@ fn several_destinations_report_each_and_exit_with_the_worst() {
 }
 
 /// Single-quoted for a shell, as status prints destinations in next: lines.
+/// What the CLI's shell quoting gives `text`: bare when it is only safe
+/// characters, else single-quoted. Windows temp paths carry backslashes, so they
+/// are quoted there and bare on Unix.
+fn sq(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-:=+@".contains(c))
+    {
+        text.to_string()
+    } else {
+        q(text)
+    }
+}
+
 fn q(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -417,11 +432,7 @@ fn receive_libraries_get_the_neutral_hint_and_stay_unchanged() {
         let before = snapshot(dir);
         let (code, text) = status(&[p(dir)]);
         assert_eq!(code, 3, "{text}");
-        let quoted = if p(dir).contains(' ') {
-            format!("'{}'", p(dir))
-        } else {
-            p(dir).to_string()
-        };
+        let quoted = sq(p(dir));
         assert_eq!(
             lines(&text),
             vec![

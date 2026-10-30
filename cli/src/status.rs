@@ -97,7 +97,13 @@ fn no_record_next(dest: &str) -> String {
 }
 
 fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
-    let path = Path::new(dest).join(first_changed).display().to_string();
+    // `first_changed` is a manifest path ('/' separated); keep it that way
+    // so the suggested mv line has one separator style on every platform.
+    let path = if dest.ends_with('/') || dest.ends_with('\\') {
+        format!("{dest}{first_changed}")
+    } else {
+        format!("{dest}/{first_changed}")
+    };
     let aside = format!("{path}.changed");
     let more = if changed > 1 {
         let others = changed - 1;
