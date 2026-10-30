@@ -318,6 +318,9 @@ enum Command {
         /// Oldest a good backup may be and still count as ok: Nd or Nh.
         #[arg(long, default_value = status::DEFAULT_MAX_AGE)]
         max_age: String,
+        /// A family library to show read-only under Family. `--demo` builds one.
+        #[arg(long)]
+        family: Option<PathBuf>,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -706,6 +709,7 @@ fn run() -> Result<(), IngestError> {
             port,
             no_open,
             max_age,
+            family,
         } => gui::run(gui::GuiArgs {
             library,
             backups,
@@ -715,6 +719,7 @@ fn run() -> Result<(), IngestError> {
             port,
             open: !no_open,
             max_age,
+            family,
         }),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();

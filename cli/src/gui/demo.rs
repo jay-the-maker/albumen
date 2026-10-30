@@ -136,6 +136,8 @@ pub struct Demo {
     pub card: PathBuf,
     pub backups: Vec<String>,
     pub state: PathBuf,
+    /// A synthetic twelve-member family library; member-12 is revoked.
+    pub family: PathBuf,
 }
 
 /// CRC-32 (IEEE), for PNG chunks.
@@ -318,12 +320,47 @@ pub fn build(work: &Path) -> Result<Demo, IngestError> {
         .iter()
         .map(|p| p.display().to_string())
         .collect();
+    let family = build_family(&root.join("family"))?;
     Ok(Demo {
         library,
         card,
         backups,
         state,
+        family,
     })
+}
+
+/// Demo only: twelve synthetic members, two synthetic photos each, then the
+/// founder revokes member-12. Keys and sources sit beside the library.
+fn build_family(root: &Path) -> Result<PathBuf, IngestError> {
+    use albumen_ingest::family;
+    let keys = root.join("keys");
+    let sources = root.join("sources");
+    let parent = root.join("library");
+    for dir in [&keys, &sources, &parent] {
+        dest::create_dir_all(dir)?;
+    }
+    let mut members = Vec::new();
+    for n in 1..=12 {
+        members.push(family::create_key(
+            &keys.join(format!("member-{n:02}.key")),
+        )?);
+    }
+    let library = family::init_library(&parent, &members[0], "member-01")?;
+    for (i, key) in members.iter().enumerate().skip(1) {
+        let token = family::invite(&library, &members[0], key.member_id())?;
+        family::join(&library, key, &token, &format!("member-{:02}", i + 1))?;
+        family::admit(&library, &members[0], key.member_id(), &token)?;
+    }
+    for (i, key) in members.iter().enumerate() {
+        for p in 0..2u32 {
+            let photo = sources.join(format!("member-{:02}-{p}.png", i + 1));
+            write_new(&photo, &synthetic_png(160, 120, 60 + 2 * i as u32 + p))?;
+            family::add_object(&library, key, &photo, None)?;
+        }
+    }
+    family::revoke(&library, &members[0], members[11].member_id())?;
+    Ok(library)
 }
 
 /// Demo only: change one byte of a backed-up copy (never an original).

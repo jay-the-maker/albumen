@@ -60,6 +60,8 @@ pub struct GuiArgs {
     pub port: u16,
     pub open: bool,
     pub max_age: String,
+    /// A family library to show read-only in the Family view.
+    pub family: Option<PathBuf>,
 }
 
 /// What the server knows. Paths are fixed at start.
@@ -70,6 +72,8 @@ pub struct Config {
     /// Folder for scan manifests and backup state, outside the library.
     pub state: PathBuf,
     pub max_age_secs: u64,
+    /// Family library shown read-only; the GUI never writes to it.
+    pub family: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -103,6 +107,7 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
             card: Some(built.card),
             state: built.state,
             max_age_secs,
+            family: args.family.clone().or(Some(built.family)),
         }
     } else {
         let library = args.library.clone().ok_or_else(|| IngestError::Usage {
@@ -118,6 +123,7 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
             card: args.card.clone(),
             state,
             max_age_secs,
+            family: args.family.clone(),
         }
     };
     SourceRoot::open(&config.library)?.refuse_destination(&config.state)?;
@@ -203,6 +209,10 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
         ),
         ("GET", "/api/library") => {
             let body = library_json(&server.config.library).to_string();
+            http::respond(&mut stream, 200, "application/json", body.as_bytes())
+        }
+        ("GET", "/api/family") => {
+            let body = family_json(server.config.family.as_deref()).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/status") => {
@@ -313,6 +323,18 @@ fn is_image(rel: &str) -> bool {
 /// Any photo in the library, previewable or not.
 fn is_photo(rel: &str) -> bool {
     is_image(rel) || ext(rel).is_some_and(|e| PLACEHOLDER_EXT.contains(&e.as_str()))
+}
+
+/// The Family view: the exact lines of `albumen family manifest --summary`.
+/// Read-only; nothing here writes, revokes, hides or deletes.
+pub fn family_json(family: Option<&Path>) -> serde_json::Value {
+    match family {
+        None => serde_json::json!({"library": null, "text": null, "error": null}),
+        Some(lib) => match crate::family::summary_text(lib, None) {
+            Ok(text) => serde_json::json!({"library": lib, "text": text, "error": null}),
+            Err(err) => serde_json::json!({"library": lib, "text": null, "error": err.to_string()}),
+        },
+    }
 }
 
 pub fn library_json(library: &Path) -> serde_json::Value {
@@ -730,6 +752,7 @@ mod tests {
             card: None,
             state: "/state".into(),
             max_age_secs: 1,
+            family: None,
         };
         assert!(job_args(&config, "rm", None, None).is_err());
         assert!(job_args(&config, "backup", Some("/elsewhere"), None).is_err());

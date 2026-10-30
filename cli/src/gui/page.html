@@ -40,6 +40,7 @@ select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:
 .dark .card{background:#2f3136;border-top-color:#4a4d54;border-right-color:#4a4d54;border-bottom-color:#4a4d54;color:#e8e9ec}.dark .summary{color:#e8e9ec}.dark .more,.dark .runs,.dark .act span{color:#a9adb5}
 .card h3{margin:0 0 2px;font-size:15px}.card .txt{white-space:pre-wrap}.card .w{font-weight:700;text-transform:none}.card .act{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .summary{margin:0 0 12px;white-space:pre-wrap}
+.fam{padding:6px 12px;border-left:4px solid var(--ok);margin:0 0 6px;background:#fff}.fam.revoked{border-left-color:var(--none);color:var(--mute)}
 .s-ok{border-left-color:var(--ok)}.s-ok .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
 .s-damaged{border-left-color:var(--bad)}.s-damaged .w{color:var(--bad)}.s-none .w{color:var(--none)}
 .badge{display:inline-flex;align-items:center;gap:8px;background:#e9f6ee;color:var(--ok);border:1px solid #bfe0cb;border-radius:22px;padding:6px 16px;font-weight:700;font-size:17px}
@@ -71,6 +72,8 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 <div id="side-dests"></div>
 <button data-s="backup"><span>Back up…</span></button>
 <button data-s="proof"><span>Proof</span></button>
+<h2>FAMILY</h2>
+<button data-s="family"><span>Family</span></button>
 </aside>
 <div class="main dark" id="main">
 <section id="events" class="view" hidden>
@@ -107,6 +110,13 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 <tr><td>Proof file</td><td><code id="p-path"></code> &nbsp;<a id="p-open" target="_blank" rel="noopener">Open proof file</a></td></tr>
 <tr><td>Size</td><td id="p-size"></td></tr><tr><td>SHA-256</td><td><code id="p-sha"></code></td></tr></table></div>
 <details class="more"><summary>Show details</summary><p class="runs" id="runs-proof">runs: albumen verify-manifest --proof</p><pre id="verify-raw"></pre></details>
+</section>
+<section id="family" class="view" hidden>
+<h1>Family</h1>
+<p class="sub">Read-only. Members, their photos, and who is revoked. Changes are made with albumen family on the command line.</p>
+<p class="summary" id="family-summary"></p>
+<div id="family-members"></div>
+<details class="more"><summary>Show details</summary><p class="runs" id="runs-family">runs: albumen family manifest --summary</p><pre id="family-raw"></pre></details>
 </section>
 <div class="tools">
 <input type="search" id="search" placeholder="Search names" aria-label="Search photo names">
@@ -151,7 +161,13 @@ function show(s){cur=s;document.querySelectorAll('aside button').forEach(b=>b.cl
  // R14: Info is about a photo; Backup health and Proof never show it.
  if(!libv&&!$('info').hidden)setInfo(false);
  if(s=='events')curEvent=null;
- if(s=='health')health();if(libv)draw();}
+ if(s=='health')health();if(s=='family')family();if(libv)draw();}
+// Family: the CLI's own lines, word for word. Nothing here writes.
+async function family(){const f=await j('/api/family');const box=$('family-members');box.innerHTML='';
+ if(!f.text){$('family-summary').textContent=f.error||'No family library was given. Start with --family DIR.';$('family-raw').textContent='';return;}
+ const lines=f.text.trimEnd().split('\n');$('family-summary').textContent=lines.slice(0,3).join('\n');
+ for(const l of lines.slice(3)){const d=document.createElement('div');d.className='fam'+(/, revoked; their photos stay$/.test(l)?' revoked':'');d.textContent=l;box.append(d);}
+ $('runs-family').textContent='runs: albumen family manifest --library '+q(f.library)+' --summary';$('family-raw').textContent=f.text;}
 async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(await r.text());return r.json();}
 let attach=null; // a job id from the URL (#screen:job:ID), shown instead of starting one
 async function job(kind,dest,on){
