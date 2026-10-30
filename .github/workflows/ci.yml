@@ -350,6 +350,11 @@ jobs:
       - name: The index-note line shows while an index save is pending
         run: node scripts/gui-index-note.mjs target/debug/albumen
 
+      - name: The GUI and albumen-mcp share one index (real binaries)
+        run: |
+          cargo build --locked -p albumen-mcp --bin albumen-mcp
+          node scripts/gui-mcp-e2e.mjs target/debug/albumen target/debug/albumen-mcp
+
   throughput:
     name: import throughput (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
