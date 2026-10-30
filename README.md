@@ -306,6 +306,29 @@ scripts/with-minio.sh cargo test --locked
 
 Fixture provenance and the CC0 dedication are in [fixtures/README.md](fixtures/README.md). The architecture outline is in [docs/architecture.md](docs/architecture.md).
 
+## Family library summary
+
+`albumen family manifest --library DIR --summary` prints a plain-text summary of a family library. It only reads the library; it writes nothing and cannot be combined with `--key`, `--apply` or `--execute`. The GUI's Family view (`albumen gui --family DIR`) shows the same lines and is read-only; changes are made with `albumen family` on the command line.
+
+```bash
+albumen family manifest --library ~/family --summary
+albumen family manifest --library ~/family --summary --viewer <member-id>   # the 64-hex id under members/
+```
+
+The output looks like this (ids shortened to 8 characters):
+
+```text
+family library <library-id>
+3 members: 2 active, 1 revoked
+6 photos in all members' folders
+member-01 (2cbe2e01): 2 photos
+member-02 (85e5fca5): 2 photos
+member-03 (fdf1e514): 2 photos, revoked; their photos stay
+viewer 2cbe2e01: 5 of 6 photos shown, 1 hidden
+```
+
+Members are listed by name. A revoked member's photos stay in the library. `--viewer` adds the last line for that member.
+
 ## Camera receiver
 
 `albumen-receive` runs on your machine and listens for a camera. WebDAV and SFTP are the first choices. FTP is there for older bodies and does not encrypt. Each finished upload is stored with `copy_verify`. An existing file is left as it is. The receiver does not delete anything in the library.

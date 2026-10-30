@@ -638,6 +638,13 @@ fn family_twelve_members() {
         "{summary}"
     );
     assert!(summary.contains("member-12 ("), "{summary}");
+    let names: Vec<&str> = summary
+        .lines()
+        .skip(3)
+        .map(|l| l.split(" (").next().unwrap())
+        .collect();
+    let want: Vec<String> = (1..=12).map(|n| format!("member-{n:02}")).collect();
+    assert_eq!(names, want, "members sorted by display name: {summary}");
     assert!(
         summary.contains(": 2 photos, revoked; their photos stay\n"),
         "{summary}"
@@ -692,4 +699,34 @@ fn family_twelve_members() {
     for (path, before) in &sources_before {
         assert_eq!(&kept(path), before, "source {path:?} changed");
     }
+}
+
+#[test]
+fn summary_is_read_only_and_documented_in_help() {
+    let help = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .args(["family", "manifest", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--summary"), "{help}");
+    assert!(help.contains("--viewer <MEMBER_ID>"), "{help}");
+    assert!(help.contains("Read-only"), "{help}");
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().to_str().unwrap();
+    for extra in [
+        &["--apply"][..],
+        &["--execute"][..],
+        &["--key", "k.key"][..],
+    ] {
+        let mut args = vec!["family", "manifest", "--library", library, "--summary"];
+        args.extend_from_slice(extra);
+        let out = Command::new(env!("CARGO_BIN_EXE_albumen"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
+    }
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
 }

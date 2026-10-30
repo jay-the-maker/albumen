@@ -197,19 +197,25 @@ pub enum Command {
         #[arg(long)]
         execute: bool,
     },
-    /// Rebuild the shared manifest from signed logs.
+    /// Rebuild the shared manifest from signed logs, or with --summary print
+    /// a read-only text summary of the family library.
     Manifest {
         #[arg(long)]
         library: PathBuf,
         /// When set with `--apply`, append a signed snapshot in this member's log.
         #[arg(long)]
         key: Option<PathBuf>,
-        /// Print a short text summary (members, photos per member, revoked)
-        /// instead of JSON. The GUI's Family view shows these same lines.
-        #[arg(long, conflicts_with = "key")]
+        /// Print a plain-text summary instead of JSON: member count (active and
+        /// revoked), photos in all members' folders, and photos per member,
+        /// listed by name.
+        /// Read-only: writes nothing, so it cannot be combined with --key,
+        /// --apply or --execute. The GUI's Family view shows these same lines.
+        #[arg(long, conflicts_with_all = ["key", "apply", "execute"])]
         summary: bool,
-        /// With `--summary`: also say how many photos this member sees and hides.
-        #[arg(long, requires = "summary")]
+        /// With --summary: a member id (the 64-hex key named under `members/`).
+        /// Adds a line with how many photos that member is shown and how many
+        /// they have hidden.
+        #[arg(long, requires = "summary", value_name = "MEMBER_ID")]
         viewer: Option<String>,
         #[arg(long)]
         apply: bool,
@@ -665,11 +671,24 @@ pub fn summary_text(library: &Path, viewer: Option<&str>) -> Result<String, Inge
         "{} in all members' folders\n",
         photos(objects.len())
     ));
-    for member in &members {
-        let id = text(member, "id");
+    // Sorted by the name shown, then id, so the CLI and the GUI list members
+    // in the same order.
+    let mut rows: Vec<(String, String, &serde_json::Value)> = members
+        .iter()
+        .map(|member| {
+            let id = text(member, "id");
+            let name = text(member, "name");
+            let label = if name.is_empty() {
+                id.chars().take(8).collect()
+            } else {
+                name
+            };
+            (label, id, member)
+        })
+        .collect();
+    rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    for (label, id, member) in rows {
         let short: String = id.chars().take(8).collect();
-        let name = text(member, "name");
-        let label = if name.is_empty() { short.clone() } else { name };
         let count = objects.iter().filter(|o| text(o, "member") == id).count();
         let mut line = format!("{label} ({short}): {}", photos(count));
         if member.get("revoked").and_then(serde_json::Value::as_bool) == Some(true) {
