@@ -1,0 +1,103 @@
+# PLAN ONLY. Not run yet: manual trigger only, no push or PR triggers.
+#
+# The garage-PC workspace run at 44d8b47 (`cargo test --workspace
+# --no-fail-fast`, log 20261030T1721Z-gui-triage-44d8b47-workspace-tests.txt)
+# had 13 failures that come from the PC's environment, not the code: no
+# MinIO or rclone, no bash, and no symlink privilege (os error 1314). This
+# job runs those 13 tests on Linux with pinned MinIO (scripts/with-minio.sh),
+# pinned rclone (scripts/install-rclone.sh), bash, ffmpeg and ExifTool, and
+# fails unless every one of the 13 is reported "ok". S3 must really be
+# present: ALBUMEN_S3_UNAVAILABLE fails the job instead of skipping.
+name: env failures on linux (plan)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  env-failures:
+    name: 13 environment failures (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install pinned ExifTool
+        run: scripts/install-exiftool.sh
+
+      - name: Install pinned rclone
+        run: scripts/install-rclone.sh
+
+      - name: ffmpeg for the synthetic Live Photo
+        run: bash scripts/ensure-ffmpeg.sh
+
+      - name: Tools are present (bash, rclone, exiftool, ffmpeg)
+        run: |
+          bash --version | head -1
+          rclone version | head -1
+          exiftool -ver
+          ffmpeg -version | head -1
+
+      - name: Run the 13 under MinIO
+        run: |
+          set -o pipefail
+          scripts/with-minio.sh bash -c '
+            set -euo pipefail
+            if [[ -n "${ALBUMEN_S3_UNAVAILABLE:-}" ]]; then
+              echo "MinIO did not start; S3 tests would skip" >&2; exit 1
+            fi
+            for t in "-p albumen --test export" \
+                     "-p albumen --test switch_from_apple" \
+                     "-p albumen --test two_copy_s3" \
+                     "-p albumen-ingest --lib" \
+                     "-p albumen-ingest --test iptc_core" \
+                     "-p albumen-ingest --test roundtrip" \
+                     "-p albumen-ingest --test synthetic_live_photo" \
+                     "-p albumen-mcp --test client" \
+                     "-p albumen-receive --lib"; do
+              echo "> cargo test --locked $t -- --test-threads=1"
+              cargo test --locked $t -- --test-threads=1
+            done' 2>&1 | tee env-failures.log
+
+      - name: Every one of the 13 passed (none skipped or ignored)
+        run: |
+          missing=0
+          for name in \
+            a_delete_or_tombstone_on_copy_a_never_reaches_the_s3_copy \
+            enabled_export_to_s3_verifies_and_leaves_the_library \
+            export::tests::s3_export_skips_identical_objects_and_verifies \
+            export_and_verify_fixture_corpus_over_rclone_sftp \
+            export_and_verify_s3_fixture_corpus \
+            icloud::tests::symlink_is_not_followed \
+            icloud_flags_a_live_pair_whose_content_identifiers_differ \
+            iptc_core_is_deterministic_and_survives_ingest_and_export \
+            rclone_sftp_webdav_and_b2_round_trip \
+            roundtrip::synthetic_live_photo_survives_the_webdav_receiver \
+            s3_round_trip_preserves_bytes_metadata_mtime_and_filename \
+            switch_from_apple_end_to_end \
+            synthetic_live_photo_survives_import_and_export; do
+            if grep -qx "test $name ... ok" env-failures.log; then
+              echo "ok   $name"
+            else
+              echo "MISS $name"; missing=$((missing+1))
+            fi
+          done
+          if grep -E "^test result: .* [1-9][0-9]* ignored" env-failures.log; then
+            echo "some tests were ignored"; missing=$((missing+1))
+          fi
+          test "$missing" -eq 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: env-failures-log
+          path: env-failures.log
