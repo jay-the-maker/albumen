@@ -12,12 +12,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn p(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
 /// Run `albumen args` with `ALBUMEN_INDEX_DIR=index_dir`; fail if it is
 /// still running after 60 s (it would be, blocked on a FIFO it opened).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn albumen(index_dir: &Path, args: &[&str]) -> (i32, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_albumen"))
         .args(args)
@@ -46,6 +48,7 @@ fn albumen(index_dir: &Path, args: &[&str]) -> (i32, String) {
 
 /// Where albumen-mcp keeps the search tree for `library`: `<key>.search`
 /// beside the `<key>.idx` index.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn tree_path(library: &Path, index_dir: &Path) -> PathBuf {
     let index = albumen_ingest::index::LibraryIndex::open(library, Some(index_dir)).unwrap();
     index.file().unwrap().with_extension("search")

@@ -91,6 +91,19 @@ jobs:
             --library "${RUNNER_TEMP}/library-scale" --index-dir "${RUNNER_TEMP}/index-scale" --items "${ITEMS}" \
             --leg "${{ matrix.os }}" --json "${RUNNER_TEMP}/library-scale.json"
 
+      # Gate (Linux, 380k only): the split memory budget. Reuses the library
+      # generated above; fresh index and thumbnail dirs so the first server
+      # builds the search tree and the second loads it. The 1M run stays in
+      # its own CI-only job.
+      - name: Peak RSS budget at 380,000 items (tree loaded <= 332.2 MiB, cold build <= 420 MiB)
+        if: runner.os == 'Linux' && (github.event.inputs.items || '380000') == '380000'
+        run: |
+          python scripts/rss-budget.py \
+            --binary target/release/albumen-mcp \
+            --library "${RUNNER_TEMP}/library-scale" --reuse --items 380000 \
+            --index-dir "${RUNNER_TEMP}/index-rss" --thumbnail-dir "${RUNNER_TEMP}/thumbs-rss" \
+            --json "${RUNNER_TEMP}/rss-budget.json"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -98,4 +111,5 @@ jobs:
           path: |
             ${{ runner.temp }}/library-scale.json
             ${{ runner.temp }}/library-scale-20k.json
+            ${{ runner.temp }}/rss-budget.json
           if-no-files-found: ignore
