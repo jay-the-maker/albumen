@@ -137,7 +137,8 @@ const LIB_VIEWS=['events','photos'];
 // Backup health shares the library's dark chrome.
 const DARK_VIEWS=[...LIB_VIEWS,'health'];
 let dests=[],lib={images:[],events:[]},curEvent=null,selected=null,cur='photos';
-const base=p=>p.replace(/\/+$/,'').split('/').pop()||p;
+// Drive and folder names, never the full (often temp) path; Windows paths too.
+const base=p=>p.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||p;
 const img=p=>'/img?p='+enc(p);
 document.querySelectorAll('aside button[data-s]').forEach(b=>b.onclick=()=>{if(b.dataset.s=='photos')curEvent=null;show(b.dataset.s);});
 // Inside an Event the source list lights Events: that is where the user is.
@@ -145,7 +146,9 @@ const lit=s=>s=='photos'&&curEvent?'events':s;
 function show(s){cur=s;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('on',b.dataset.s==lit(s)));
  document.querySelectorAll('.main section').forEach(x=>x.hidden=x.id!=s);
  const libv=LIB_VIEWS.includes(s);$('main').classList.toggle('dark',DARK_VIEWS.includes(s));
- for(const id of ['search','zoom','b-show'])$(id).disabled=!libv;
+ for(const id of ['search','zoom','b-show','b-info'])$(id).disabled=!libv;
+ // R14: Info is about a photo; Backup health and Proof never show it.
+ if(!libv&&!$('info').hidden)setInfo(false);
  if(s=='events')curEvent=null;
  if(s=='health')health();if(libv)draw();}
 async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(await r.text());return r.json();}

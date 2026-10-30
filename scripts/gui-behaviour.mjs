@@ -131,6 +131,17 @@ try {
   const shown = await ev(`[...document.querySelectorAll('#cards .card .txt')].map(t=>t.innerText).join('\\n')+'\\n'+$('health-summary').innerText`);
   check('R2: no UTC stamp left on the health screen', !/ UTC\b/.test(shown), shown);
   check('R2: stale time shown in local zone', /\d{4}-\d\d-\d\d \d\d:\d\d P[DS]T/.test(shown), shown);
+  // R13: drives are named, never shown as a temp path.
+  const names = await ev(`[...document.querySelectorAll('#side-dests span, #cards .card h3')].map(e=>e.textContent)`);
+  check('R13: sidebar and cards show drive names only', names.length == 8 && names.every(n => !/[\\/:]/.test(n) && !/temp|tmp/i.test(n)), names);
+  check('R13: the four demo drives are named', eq([...new Set(names)].sort(), ['Damaged Copy', 'Demo', 'New Drive', 'Old Drive']), names);
+  // R14: Info is closed on Backup health and Proof, and cannot be opened there.
+  check('R14: Info closed on Backup health', await ev(`$('info').hidden`), false);
+  check('R14: Info button disabled on Backup health', await ev(`$('b-info').disabled`), false);
+  await click('aside button[data-s="proof"]');
+  check('R14: Info closed on Proof', await ev(`$('info').hidden`), false);
+  check('R14: Info button disabled on Proof', await ev(`$('b-info').disabled`), false);
+  await click('aside button[data-s="health"]');
 } catch (e) { console.error(e); failed++; }
 
 check('no script errors', errors.length == 0, errors);
