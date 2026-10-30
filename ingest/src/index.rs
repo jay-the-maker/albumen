@@ -195,7 +195,7 @@ impl LibraryIndex {
         let file = self.file.as_ref()?;
         // `std::fs` opens with FILE_SHARE_READ | WRITE | DELETE on Windows,
         // so a reader never stops a writer's rename.
-        let bytes = read_index_bytes(file).ok()?;
+        let bytes = std::fs::read(file).ok()?;
         let text = std::str::from_utf8(&bytes).ok()?;
         parse_saved(text, &self.root.canonical().to_string_lossy())
     }
@@ -457,26 +457,6 @@ impl LibraryIndex {
     }
 }
 
-/// Read a saved index. On Windows an open in the instant another writer
-/// replaces the file can fail (access denied while the old file is being
-/// deleted); that is tried again, briefly, rather than read as "no index",
-/// which would make the caller walk the whole library. A missing file is
-/// returned at once.
-fn read_index_bytes(file: &Path) -> std::io::Result<Vec<u8>> {
-    let mut wait = std::time::Duration::from_millis(1);
-    let mut tries = 0;
-    loop {
-        match std::fs::read(file) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound && tries < 8 => {
-                tries += 1;
-                std::thread::sleep(wait);
-                wait *= 2;
-            }
-            other => return other,
-        }
-    }
-}
-
 fn is_not_found(err: &IngestError) -> bool {
     matches!(err, IngestError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
 }
@@ -504,34 +484,11 @@ fn remove_stale_partials(file: &Path, keep: &Path) {
     }
 }
 
-/// The first 64 KiB of a saved index (enough for the format, root and
-/// generation lines), with the same retry as [`read_index_bytes`].
-fn read_index_head(file: &Path) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut wait = std::time::Duration::from_millis(1);
-    for _ in 0..9 {
-        match std::fs::File::open(file) {
-            Ok(handle) => {
-                let mut head = Vec::new();
-                handle.take(64 * 1024).read_to_end(&mut head).ok()?;
-                return Some(head);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(_) => {
-                std::thread::sleep(wait);
-                wait *= 2;
-            }
-        }
-    }
-    None
-}
-
 /// The generation in the first lines of a saved file, without reading the
 /// rest. A first-format file is generation 0.
 fn read_generation(file: &Path) -> Option<u64> {
     use std::io::BufRead;
-    let bytes = read_index_head(file)?;
-    let mut reader = std::io::BufReader::new(&bytes[..]);
+    let mut reader = std::io::BufReader::new(std::fs::File::open(file).ok()?);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     match line.trim_end_matches('\n') {
@@ -577,7 +534,7 @@ fn flatten_dirs(dirs: &BTreeMap<String, DirRecord>) -> Vec<String> {
 /// generation and every file, in walk order. A short or damaged file is an
 /// error. For tests and tools that watch the file.
 pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
-    let bytes = read_index_bytes(file).map_err(|err| err.to_string())?;
+    let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
     let root = text
         .split('\n')
@@ -591,7 +548,7 @@ pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
 /// Check a saved index file: format, footer length and checksum. Returns its
 /// generation.
 pub fn check_saved_file(file: &Path) -> Result<u64, String> {
-    let bytes = read_index_bytes(file).map_err(|err| err.to_string())?;
+    let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
     let mut lines = text.split('\n');
     let _format = lines.next();

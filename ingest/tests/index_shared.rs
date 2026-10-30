@@ -133,9 +133,7 @@ fn gui_and_search_tool_share_one_index() {
     let reads = Arc::new(AtomicU64::new(0));
     let failures = Arc::new(AtomicU64::new(0));
     let max_read_us = Arc::new(AtomicU64::new(0));
-    let first_failure = Arc::new(std::sync::Mutex::new(None::<String>));
     let reader = {
-        let first_failure = first_failure.clone();
         let (stop, reads, failures, max_read_us, file) = (
             stop.clone(),
             reads.clone(),
@@ -146,12 +144,11 @@ fn gui_and_search_tool_share_one_index() {
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 let t = Instant::now();
-                let checked = check_saved_file(&file);
+                let ok = check_saved_file(&file).is_ok();
                 max_read_us.fetch_max(t.elapsed().as_micros() as u64, Ordering::Relaxed);
                 reads.fetch_add(1, Ordering::Relaxed);
-                if let Err(err) = checked {
+                if !ok {
                     failures.fetch_add(1, Ordering::Relaxed);
-                    first_failure.lock().unwrap().get_or_insert(err);
                 }
             }
         })
@@ -206,12 +203,11 @@ fn gui_and_search_tool_share_one_index() {
     println!(
         "M6 X2 RESULT seed={seed} iters={iters} reads={} parse_failures={} max_read_ms={:.2} \
          regressions={regressions} merges={merges} final_generation={last_generation} \
-         equals_fresh_walk={byte_identical} stale_partials={} first_failure={:?}",
+         equals_fresh_walk={byte_identical} stale_partials={}",
         reads.load(Ordering::Relaxed),
         failures.load(Ordering::Relaxed),
         max_read_us.load(Ordering::Relaxed) as f64 / 1000.0,
-        left.len(),
-        first_failure.lock().unwrap()
+        left.len()
     );
     assert_eq!(failures.load(Ordering::Relaxed), 0);
     assert_eq!(regressions, 0);
