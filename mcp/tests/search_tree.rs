@@ -55,15 +55,14 @@ fn settle() {
     std::thread::sleep(Duration::from_millis(2_100));
 }
 
-/// T pinned for every label: 2026-10-29 17:42 PDT = 2026-10-30T00:42:00Z
-/// ("2026-10-29 17:42 UTC-7" on a Pacific-time Windows PC).
+/// T pinned for every label: 2026-10-29 17:42 UTC-7 = 2026-10-30T00:42:00Z.
 const PINNED_NS: &str = "1793320920000000000";
-/// Labels use local time from `TZ` on Linux and macOS. On Windows `TZ` has
-/// no effect: the label is the OS zone's local time with a numeric offset
-/// (`local_text`), e.g. "2026-10-29 17:42 UTC-7" on a Pacific-time PC, never
-/// an abbreviation such as PDT.
+/// Labels are local time with a numeric offset, never an abbreviation such
+/// as PDT. On Linux and macOS that is `TZ` (America/Los_Angeles here). On
+/// Windows `TZ` has no effect, so the label is the OS zone's local time,
+/// e.g. "2026-10-29 17:42 UTC-7" on a Pacific-time PC.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const T: &str = "2026-10-29 17:42 PDT";
+const T: &str = "2026-10-29 17:42 UTC-7";
 #[cfg(windows)]
 const T: OsLocal = OsLocal;
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

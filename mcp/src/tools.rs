@@ -560,7 +560,7 @@ fn matches_text(matches: usize, paginated: bool) -> String {
 
 /// The `freshness` object every search answer carries (freshness label copy
 /// spec v1, states A to C). `label` is line 1 and `next` the next: line, word
-/// for word; T in `label` is local time with the zone abbreviation, and
+/// for word; T in `label` is local time with a numeric offset, and
 /// `checked_at` is the same instant in RFC 3339 UTC.
 ///
 /// - partial (B): some files were not compared with the disk; T is the
@@ -661,9 +661,11 @@ pub fn unreachable_freshness(root: &Path) -> Value {
     })
 }
 
-/// "2026-10-29 17:42 PDT": local time with the zone abbreviation (honours
-/// `TZ`). On Windows see the `cfg(windows)` version below: local time with a
-/// numeric offset. Never a bare time without a zone.
+/// "2026-10-29 17:42 UTC-7": local time from `TZ` with the numeric offset
+/// localtime gives for that instant, "UTC+5:30" for part-hour zones and
+/// plain "UTC" at zero; the same format as `albumen_ingest::clock::local_stamp`.
+/// Zone abbreviations such as PDT are never printed. On Windows see the
+/// `cfg(windows)` version below. Never a bare time without a zone.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_text(ns: i128) -> String {
     extern "C" {
@@ -671,23 +673,29 @@ fn local_text(ns: i128) -> String {
     }
     let secs = ns.div_euclid(1_000_000_000) as libc::time_t;
     // SAFETY: tzset only re-reads TZ; localtime_r writes into `tm`, which we
-    // own, and returns null on failure. tm_zone points at static zone data.
-    unsafe {
+    // own, and returns null on failure.
+    let tm = unsafe {
         tzset();
         let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&secs, &mut tm).is_null() || tm.tm_zone.is_null() {
+        if libc::localtime_r(&secs, &mut tm).is_null() {
             return utc_minutes(ns);
         }
-        let zone = std::ffi::CStr::from_ptr(tm.tm_zone).to_string_lossy();
-        format!(
-            "{:04}-{:02}-{:02} {:02}:{:02} {zone}",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min
-        )
+        tm
+    };
+    // Real offsets are within +-14 h; anything else means a bad conversion.
+    let offset_min = i64::from(tm.tm_gmtoff).div_euclid(60);
+    if offset_min.abs() > 14 * 60 {
+        return utc_minutes(ns);
     }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} {}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        offset_text(offset_min)
+    )
 }
 
 /// Windows: "2026-10-29 17:42 UTC-7": local time with the numeric offset
@@ -758,7 +766,10 @@ fn local_text(ns: i128) -> String {
 }
 
 /// "UTC", "UTC-7", "UTC+5:30", "UTC-9:30" from minutes east of UTC.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", windows)),
+    allow(dead_code)
+)]
 fn offset_text(minutes: i64) -> String {
     if minutes == 0 {
         return "UTC".to_string();
