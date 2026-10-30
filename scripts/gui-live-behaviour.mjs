@@ -252,6 +252,8 @@ try {
 
   // G5: 2,000 items with 200 movies: posters lazy, at most 6 /video at once.
   const url2k = await startGui(lib2k, 'state2k');
+  // Time the first screen on a ready library (the walk is timed by R1).
+  for (let i = 0; i < 600; i++) { try { if ((await (await fetch(url2k + '/api/library')).json()).status == 'ready') break; } catch {} await sleep(100); }
   inflight.clear(); maxInflight = 0; videoReqs = 0;
   const t0 = Date.now();
   await cmd('Page.navigate', {url: url2k + '/'});
@@ -260,11 +262,13 @@ try {
   check('G5 first screen of tiles within 1.0 s (first-thumbnail budget)', firstTile <= 1000, firstTile);
   await sleep(1500);
   const early = await ev(`({posters:window.__poster.started,movies:lib.images.filter(i=>i.video).length})`);
-  check('G5 posters are lazy: far-off movies not loaded yet', early.movies == 200 && early.posters > 0 && early.posters < 200, early);
-  for (let i = 0; i < 80; i++) { await ev(`(()=>{const p=document.getElementById('photos');p.scrollTop+=p.clientHeight;})()`); await sleep(120); }
+  check('G5 posters are lazy: far-off movies not loaded yet', early.movies == 200 && early.posters < 200, early);
+  for (let i = 0; i < 400; i++) { const st = await ev(`(()=>{const p=document.getElementById('photos');p.scrollTop+=p.clientHeight;return {done:gs.done,total:gs.total,end:p.scrollTop+p.clientHeight>=p.scrollHeight-2};})()`);
+    await sleep(120); if (st.done >= st.total && st.end) break; }
   await sleep(2000);
   const late = await ev(`({posters:window.__poster.started,max:window.__poster.max,tiles:document.querySelectorAll('#grid figure').length,done:gs&&gs.done})`);
   console.log('G5 /video requests ' + videoReqs + ', max in flight ' + maxInflight + ', page ' + JSON.stringify(late));
+  check('G5 every tile reached and posters loaded while scrolling', late.done == 2000 && late.posters > 0, late);
   check('G5 at most 6 /video requests at once', maxInflight > 0 && maxInflight <= 6 && late.max <= 6, {maxInflight, page: late.max});
   await snap('g5-grid');
 } catch (e) { console.error(e); failed++; }
