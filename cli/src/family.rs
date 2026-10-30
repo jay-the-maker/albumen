@@ -671,7 +671,8 @@ pub fn summary_text(library: &Path, viewer: Option<&str>) -> Result<String, Inge
         "{} in all members' folders\n",
         photos(objects.len())
     ));
-    // Sorted by the name shown, then id, so the CLI and the GUI list members
+    // Sorted by the name shown (case-insensitive, digit runs by value, so
+    // member-9 comes before member-10), then id, so the CLI and the GUI list members
     // in the same order.
     let mut rows: Vec<(String, String, &serde_json::Value)> = members
         .iter()
@@ -686,7 +687,7 @@ pub fn summary_text(library: &Path, viewer: Option<&str>) -> Result<String, Inge
             (label, id, member)
         })
         .collect();
-    rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    rows.sort_by(|a, b| natural_cmp(&a.0, &b.0).then_with(|| a.1.cmp(&b.1)));
     for (label, id, member) in rows {
         let short: String = id.chars().take(8).collect();
         let count = objects.iter().filter(|o| text(o, "member") == id).count();
@@ -724,5 +725,88 @@ fn load_or_create(path: &Path) -> Result<FamilyKey, IngestError> {
         family::load_key(path)
     } else {
         family::create_key(path)
+    }
+}
+
+/// Case-insensitive order where runs of ASCII digits compare by value.
+/// Ties fall back to the plain byte order so the result is total.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0, 0);
+    while i < x.len() && j < y.len() {
+        if x[i].is_ascii_digit() && y[j].is_ascii_digit() {
+            let (si, sj) = (i, j);
+            while i < x.len() && x[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < y.len() && y[j].is_ascii_digit() {
+                j += 1;
+            }
+            let da = a[si..i].trim_start_matches('0');
+            let db = b[sj..j].trim_start_matches('0');
+            let ord = da.len().cmp(&db.len()).then_with(|| da.cmp(db));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else {
+            let ca = a[i..].chars().next().unwrap();
+            let cb = b[j..].chars().next().unwrap();
+            let ord = ca.to_lowercase().cmp(cb.to_lowercase());
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i += ca.len_utf8();
+            j += cb.len_utf8();
+        }
+    }
+    (x.len() - i).cmp(&(y.len() - j)).then_with(|| a.cmp(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::natural_cmp;
+
+    #[test]
+    fn summary_names_sort_naturally_and_ignore_case() {
+        let mut names = vec![
+            "member-10",
+            "Member-2",
+            "member-9",
+            "member-1",
+            "MEMBER-01",
+            "Zoe",
+            "bob",
+        ];
+        names.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(
+            names,
+            [
+                "bob",
+                "MEMBER-01",
+                "member-1",
+                "Member-2",
+                "member-9",
+                "member-10",
+                "Zoe"
+            ]
+        );
+    }
+
+    #[test]
+    fn bob_before_zoe_and_member_9_before_member_10() {
+        use std::cmp::Ordering::Less;
+        assert_eq!(natural_cmp("bob", "Zoe"), Less);
+        assert_eq!(natural_cmp("member-9", "member-10"), Less);
+    }
+
+    #[test]
+    fn non_ascii_names_fold_case_and_tie_break_stably() {
+        use std::cmp::Ordering::{Greater, Less};
+        // Case folding beyond ASCII: these differ only in case.
+        assert_eq!(natural_cmp("élodie", "Ølaf"), Less);
+        assert_eq!(natural_cmp("ÉLODIE", "élodie"), Less); // tie broken by the original string
+        assert_eq!(natural_cmp("élodie", "ÉLODIE"), Greater);
+        assert_eq!(natural_cmp("Straße 2", "straße 10"), Less);
     }
 }

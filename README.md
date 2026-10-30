@@ -315,19 +315,27 @@ albumen family manifest --library ~/family --summary
 albumen family manifest --library ~/family --summary --viewer <member-id>   # the 64-hex id under members/
 ```
 
-The output looks like this (ids shortened to 8 characters):
+Captured output from a synthetic 3-member family (member-01 founder, member-02 hid one of member-01's photos, member-03 revoked), run on Windows:
 
 ```text
-family library <library-id>
+$ albumen family manifest --library <library> --summary
+family library 00f64fd216717c843c3495032ab6185f088f10274241a3c938479dfe99812350
 3 members: 2 active, 1 revoked
 6 photos in all members' folders
-member-01 (2cbe2e01): 2 photos
-member-02 (85e5fca5): 2 photos
-member-03 (fdf1e514): 2 photos, revoked; their photos stay
-viewer 2cbe2e01: 5 of 6 photos shown, 1 hidden
+member-01 (1535612a): 2 photos
+member-02 (2d4f1897): 2 photos
+member-03 (436d30ab): 2 photos, revoked; their photos stay
+$ albumen family manifest --library <library> --summary --viewer 2d4f189739e65b291c8b9bcb73f2bac57ce7820b6af4d766fb0993c718bae45e
+family library 00f64fd216717c843c3495032ab6185f088f10274241a3c938479dfe99812350
+3 members: 2 active, 1 revoked
+6 photos in all members' folders
+member-01 (1535612a): 2 photos
+member-02 (2d4f1897): 2 photos
+member-03 (436d30ab): 2 photos, revoked; their photos stay
+viewer 2d4f1897: 5 of 6 photos shown, 1 hidden
 ```
 
-Members are listed by name. A revoked member's photos stay in the library. `--viewer` adds the last line for that member.
+Members are listed by name, ignoring case, with numbers in order (member-9 before member-10). A revoked member's photos stay in the library. `--viewer` adds the last line for that member.
 
 ## Camera receiver
 

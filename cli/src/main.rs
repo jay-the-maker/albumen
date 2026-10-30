@@ -365,7 +365,10 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("family hide", "albumen family hide --library ~/family --key ~/me.key --sha256 SHA256 --apply"),
     ("family album-add", "albumen family album-add --library ~/family --key ~/me.key --album Summer --sha256 SHA256 --apply"),
     ("family album-omit", "albumen family album-omit --library ~/family --key ~/me.key --add Summer --apply"),
-    ("family manifest", "albumen family manifest --library ~/family --key ~/founder.key --apply"),
+    (
+        "family manifest",
+        "albumen family manifest --library ~/family --summary\n  albumen family manifest --library ~/family --key ~/founder.key --apply",
+    ),
     ("family sync", "albumen family sync --from ~/family --to /Volumes/Backup/family --apply"),
     ("family policy", "albumen family policy --bucket my-bucket --member sam"),
     ("family publish", "albumen family publish --library ~/family --key ~/founder.key --apply"),

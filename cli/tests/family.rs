@@ -712,6 +712,13 @@ fn summary_is_read_only_and_documented_in_help() {
     assert!(help.contains("--summary"), "{help}");
     assert!(help.contains("--viewer <MEMBER_ID>"), "{help}");
     assert!(help.contains("Read-only"), "{help}");
+    let summary_ex = help
+        .find("Example:\n  albumen family manifest --library ~/family --summary\n")
+        .expect("--summary example first");
+    let signing_ex = help
+        .find("  albumen family manifest --library ~/family --key ~/founder.key --apply")
+        .expect("signing example");
+    assert!(summary_ex < signing_ex, "{help}");
     let tmp = tempfile::tempdir().unwrap();
     let library = tmp.path().to_str().unwrap();
     for extra in [
