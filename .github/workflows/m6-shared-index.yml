@@ -56,7 +56,7 @@ jobs:
         run: |
           for seed in 1 2 3; do
             ALBUMEN_M6_FILES=10000 ALBUMEN_M6_ITERS=1000 ALBUMEN_M6_SEED=$seed ALBUMEN_M6_READ_BARS=1 \
-              .github/m6-one.sh gui_and_search_tool_share_one_index X2
+              bash .github/m6-one.sh gui_and_search_tool_share_one_index X2
           done
 
       - name: X2 at ${{ github.event.inputs.files || '380000' }} files, seeds 1-3 (read bars)
@@ -64,19 +64,19 @@ jobs:
           for seed in 1 2 3; do
             ALBUMEN_M6_FILES=$FILES ALBUMEN_M6_ITERS=$ITERS \
               ALBUMEN_M6_SEED=$seed ALBUMEN_M6_READ_BARS=1 \
-              .github/m6-one.sh gui_and_search_tool_share_one_index X2
+              bash .github/m6-one.sh gui_and_search_tool_share_one_index X2
           done
 
       - name: X3 kill mid-write at ${{ github.event.inputs.files || '380000' }} files
         run: |
           ALBUMEN_M6_FILES=$FILES ALBUMEN_M6_KILLS=$KILLS ALBUMEN_M6_SEED=1 \
-            .github/m6-one.sh kill_mid_write_leaves_old_or_new X3
+            bash .github/m6-one.sh kill_mid_write_leaves_old_or_new X3
 
       - name: X1 GUI + readers under one writer, 10,000 files x 10,000 cycles
         run: |
           ALBUMEN_M6_FILES=10000 ALBUMEN_M6_CYCLES=10000 \
             M6_PKG=albumen M6_TEST=gui_index_x1 M6_RESULT_MAX=index_read_max_ms=100 \
-            .github/m6-one.sh readers_keep_answering_while_one_writer_saves X1
+            bash .github/m6-one.sh readers_keep_answering_while_one_writer_saves X1
 
       - name: The rest of the index tests
         run: |
