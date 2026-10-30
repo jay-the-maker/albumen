@@ -13,8 +13,29 @@ log=$(mktemp)
 max_kb=${ALBUMEN_M6_MAX_RSS_KB:-339968}
 [ -x /usr/bin/time ] || { echo "::error::/usr/bin/time (GNU time) missing; cannot measure peak RSS"; exit 1; }
 timelog=$(mktemp)
+# Independent freeze ticker (XO 22:06Z): every 0.2 s log wall time and
+# monotonic-ish time (/proc/uptime). A gap over 1 s, or wall and uptime
+# drifting apart by over 1 s, makes the run INVALID (exit 75): rerun it,
+# it is neither a pass nor a product FAIL.
+ticks=$(mktemp)
+( while :; do echo "$(date +%s.%N) $(cut -d' ' -f1 /proc/uptime)"; sleep 0.2; done ) > "$ticks" &
+ticker=$!
+rc=0
 /usr/bin/time -v -o "$timelog" cargo test --release --locked -p "${M6_PKG:-albumen-ingest}" --test "${M6_TEST:-index_shared}" -- \
-  --exact "$name" --nocapture --test-threads=1 2>&1 | tee "$log"
+  --exact "$name" --nocapture --test-threads=1 2>&1 | tee "$log" || rc=$?
+kill "$ticker" 2>/dev/null || true
+wait "$ticker" 2>/dev/null || true
+read -r gap skew < <(awk 'NR==1{w0=$1;u0=$2} NR>1{g=($1-pw)*1000; if(g>mg)mg=g} {pw=$1; s=(($1-w0)-($2-u0))*1000; if(s<0)s=-s; if(s>ms)ms=s} END{printf "%.1f %.1f\n", mg+0, ms+0}' "$ticks")
+echo "M6 $tag FREEZE_TICKER max_gap_ms=$gap wall_vs_uptime_skew_ms=$skew"
+if grep -q "M6 $tag INVALID" "$log" || awk -v g="$gap" -v s="$skew" 'BEGIN{exit !(g>1000 || s>1000)}'; then
+  echo "M6 $tag INVALID (box froze: max_gap_ms=$gap skew_ms=$skew); timings are not evidence, rerun"
+  echo "::error::$name INVALID run (freeze); rerun, not a pass"
+  exit 75
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "::error::$name failed (exit $rc)"
+  exit "$rc"
+fi
 cat "$timelog"
 rss=$(sed -n 's/^[[:space:]]*Maximum resident set size (kbytes): \([0-9]*\)$/\1/p' "$timelog")
 if [ -z "$rss" ]; then
