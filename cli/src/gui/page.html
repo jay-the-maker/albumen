@@ -187,7 +187,7 @@ try{const z=localStorage.getItem('albumen-zoom');if(z){$('zoom').value=z;zoom(z)
 function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=!im;if(!im)return;
  $('i-name').textContent=base(im.path);
  $('i-taken').textContent=im.taken?'Taken '+im.taken.replace('T',' ')+' (from '+im.taken_from+')':'Date taken: not known';
- $('i-size').textContent=im.bytes+' bytes'+(im.preview===false?' \u00b7 '+im.format+', preview not available yet':'');}
+ $('i-size').textContent=im.bytes+' bytes'+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false?' \u00b7 '+im.format+', preview not available yet':'');}
 $('b-info').onclick=()=>{$('info').hidden=!$('info').hidden;infoPhoto();};
 let timer=null;
 function stopShow(){clearInterval(timer);timer=null;$('show').hidden=true;}

@@ -32,6 +32,23 @@ const PLACEHOLDER_EXT: &[&str] = &[
     "heic", "heif", "tif", "tiff", "dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf",
 ];
 
+/// Camera RAW types that pair with a same-stem JPEG in the same folder.
+const RAW_EXT: &[&str] = &["dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf"];
+
+/// Folder plus lowercase stem, the key a RAW + JPEG pair shares.
+fn pair_key(rel: &str) -> Option<String> {
+    let (stem, _) = rel.rsplit_once('.')?;
+    Some(stem.to_lowercase())
+}
+
+fn is_raw(rel: &str) -> bool {
+    ext(rel).is_some_and(|e| RAW_EXT.contains(&e.as_str()))
+}
+
+fn is_jpeg(rel: &str) -> bool {
+    ext(rel).is_some_and(|e| e == "jpg" || e == "jpeg")
+}
+
 pub struct GuiArgs {
     pub library: Option<PathBuf>,
     pub backups: Vec<String>,
@@ -299,23 +316,48 @@ fn is_photo(rel: &str) -> bool {
 pub fn library_json(library: &Path) -> serde_json::Value {
     let files = library_files(library);
     let mut bytes = 0u64;
+    // RAW + JPEG pairs (same folder, same stem): one photo, shown as the JPEG.
+    let mut raw_of: std::collections::HashMap<String, String> = Default::default();
+    for rel in files.iter().filter(|r| is_raw(r)) {
+        if let Some(k) = pair_key(rel) {
+            raw_of.entry(k).or_insert_with(|| rel.clone());
+        }
+    }
+    let mut paired_raw: std::collections::HashSet<String> = Default::default();
+    for rel in files.iter().filter(|r| is_jpeg(r)) {
+        if let Some(raw) = pair_key(rel).and_then(|k| raw_of.get(&k)) {
+            paired_raw.insert(raw.clone());
+        }
+    }
+    let size = |rel: &str| {
+        std::fs::metadata(library.join(rel))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
     let items: Vec<serde_json::Value> = files
         .iter()
-        .filter(|rel| is_photo(rel))
+        .filter(|rel| is_photo(rel) && !paired_raw.contains(*rel))
         .map(|rel| {
-            let len = std::fs::metadata(library.join(rel))
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let len = size(rel);
             bytes += len;
             let when = taken::taken(library, rel);
-            serde_json::json!({
+            let raw = is_jpeg(rel)
+                .then(|| pair_key(rel).and_then(|k| raw_of.get(&k)))
+                .flatten();
+            let mut item = serde_json::json!({
                 "path": rel,
                 "bytes": len,
                 "taken": when.as_ref().map(|t| t.when.clone()),
                 "taken_from": when.as_ref().map(|t| t.source),
                 "preview": is_image(rel),
                 "format": ext(rel).unwrap_or_default().to_ascii_uppercase(),
-            })
+            });
+            if let Some(raw) = raw {
+                bytes += size(raw);
+                item["format"] = "RAW + JPEG".into();
+                item["raw"] = raw.as_str().into();
+            }
+            item
         })
         .collect();
     serde_json::json!({
@@ -724,5 +766,49 @@ mod tests {
         );
         // Listed, but /img still only serves what a browser can show.
         assert!(read_image(lib, "IMG_0002.HEIC").is_none());
+    }
+
+    #[test]
+    fn raw_and_jpeg_with_the_same_stem_count_as_one_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+        let copy = |from: &str, to: &str| {
+            let bytes = std::fs::read(fixtures.join(from)).unwrap();
+            let mut f = albumen_ingest::dest::create_file(&lib.join(to)).unwrap();
+            f.write_all(&bytes).unwrap();
+        };
+        for sub in ["roll", "other"] {
+            std::fs::create_dir(lib.join(sub)).unwrap();
+        }
+        copy("raw-jpeg/IMG_0003.dng", "roll/IMG_0003.dng");
+        copy("raw-jpeg/IMG_0003.jpg", "roll/IMG_0003.JPG");
+        // Same stem in another folder is not a pair; a lone RAW stays a RAW.
+        copy("raw-jpeg/IMG_0003.dng", "other/IMG_0003.dng");
+        copy("raw-jpeg/IMG_0003.jpg", "other/IMG_0004.jpg");
+        let v = library_json(lib);
+        let images = v["images"].as_array().unwrap();
+        assert_eq!(images.len(), 3, "{v}");
+        let total: u64 = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 3, "{v}");
+        let pair = images
+            .iter()
+            .find(|i| i["path"] == "roll/IMG_0003.JPG")
+            .unwrap();
+        assert_eq!(pair["format"], "RAW + JPEG");
+        assert_eq!(pair["raw"], "roll/IMG_0003.dng");
+        assert_eq!(pair["preview"], true);
+        assert!(!images.iter().any(|i| i["path"] == "roll/IMG_0003.dng"));
+        let lone = images
+            .iter()
+            .find(|i| i["path"] == "other/IMG_0003.dng")
+            .unwrap();
+        assert_eq!(lone["format"], "DNG");
+        assert!(PAGE.contains("im.raw?' \\u00b7 RAW + JPEG'"));
     }
 }
