@@ -988,6 +988,11 @@ fn library_items(
         }
         if live::is_video(rel) {
             item["video"] = true.into();
+            // A lone H.264 movie gets a browser-drawn poster tile; HEVC
+            // keeps the plain can't-preview copy (no decoder, no transcode).
+            let (ok, codec) = live::playable(&library.join(rel));
+            item["playable"] = ok.into();
+            item["codec"] = codec.into();
         }
         if let Some(mov) = live_of.get(rel.as_str()) {
             let mov_len = size(mov);
@@ -1989,7 +1994,11 @@ mod tests {
         assert!(PAGE.contains(
             "const CANT=\"Can't preview this file here. Your original is kept unchanged.\";"
         ));
-        assert!(PAGE.contains("m.textContent=CANT;"));
+        // G3: tiles stay quiet (the copy is the hover title); one banner
+        // per view says it once.
+        assert!(PAGE.contains("i.title=CANT;"));
+        assert!(!PAGE.contains("m.textContent=CANT;"));
+        assert!(PAGE.contains("\" can't be previewed here yet. Your original\""));
         assert!(!PAGE.contains("\\u2014 '+base(p)"));
         assert!(PAGE.contains("im.format+'. '+CANT"));
         assert!(!PAGE.contains("preview not available yet"));
@@ -2035,6 +2044,40 @@ mod tests {
         assert_eq!(hevc["live_playable"], false);
         assert_eq!(hevc["live_codec"], "HEVC");
         assert!(PAGE.contains("if(im.live_playable===false){"));
+    }
+    /// G1/G2: a lone H.264 movie is marked playable (poster tile), a lone
+    /// HEVC movie is not (quiet tile, can't-preview copy, no player).
+    #[test]
+    fn lone_movies_carry_their_codec() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/live-photo");
+        let movie = std::fs::read(fx.join("IMG_0005.mov")).unwrap();
+        let mut stub = movie.clone();
+        let at = stub.windows(4).position(|w| w == b"avc1").unwrap();
+        stub[at..at + 4].copy_from_slice(b"hvc1");
+        for (name, bytes) in [("IMG_0008.MOV", &movie), ("IMG_0009.MOV", &stub)] {
+            let mut f = albumen_ingest::dest::create_file(&lib.join(name)).unwrap();
+            f.write_all(bytes).unwrap();
+        }
+        let v = library_json_with(lib, None);
+        let find = |p: &str| {
+            v["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["path"] == p)
+                .unwrap()
+                .clone()
+        };
+        let h264 = find("IMG_0008.MOV");
+        assert_eq!(h264["video"], true);
+        assert_eq!(h264["playable"], true);
+        assert_eq!(h264["codec"], "H.264");
+        let hevc = find("IMG_0009.MOV");
+        assert_eq!(hevc["playable"], false);
+        assert_eq!(hevc["codec"], "HEVC");
+        assert!(PAGE.contains("const POSTER_MAX=6;"));
     }
     /// Re-gate 2: header counts treat a Live pair (one item) as one photo
     /// and a lone movie as a video, with singular and plural wording.

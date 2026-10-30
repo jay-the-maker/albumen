@@ -24,6 +24,8 @@ h1{font-size:20px;font-weight:600;margin:0}.sub{color:var(--mute);margin:0 0 16p
 .grid figure.sel img{outline:3px solid #f2c94c;outline-offset:2px}
 .grid figcaption{font-size:12px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;opacity:.85}
 .grid figcaption small{display:block;opacity:.7}.mini #grid figcaption{display:none}.mini .ph .more{display:none}.mini .ph{font-weight:600}.grid .ph{flex-wrap:wrap}
+.grid .vt{position:relative;width:100%;aspect-ratio:4/3;border-radius:3px;background:#2b2d31;overflow:hidden}.grid .vt video{width:100%;height:100%;object-fit:cover;display:block}.grid .vt .play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font:16px/34px system-ui,sans-serif;text-align:center;pointer-events:none}.grid .vt .dur{position:absolute;right:6px;bottom:6px;font:600 11px/1 system-ui,sans-serif;padding:3px 5px;border-radius:4px;background:rgba(0,0,0,.6);color:#fff;pointer-events:none}
+.np{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:8px 12px;border-radius:6px;background:#eef0f3;color:#3a3d44;font-size:13px}.dark .np{background:#2f3136;color:#e8e9ec}.np button{margin-left:auto;border:0;background:none;font-size:16px;cursor:pointer;color:inherit}
 .ev-h{font-size:13px;font-weight:600;margin:4px 0 8px;opacity:.85}
 .events{grid-template-columns:repeat(auto-fill,minmax(calc(var(--thumb) * 1.2),1fr))}
 .primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 18px;font:inherit;font-weight:600;cursor:pointer}
@@ -79,6 +81,7 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 </section>
 <section id="photos" class="view">
 <div class="top"><button class="back" id="to-events" hidden>&#8249; Events</button><h1 id="photos-title">Photos</h1><span class="count" id="photos-count"></span></div>
+<div id="np" class="np" role="status" hidden><span id="np-t"></span><button type="button" id="np-x" aria-label="Dismiss" title="Dismiss">&#215;</button></div>
 <div id="grid"></div>
 </section>
 <section id="backup" class="view" hidden>
@@ -187,9 +190,30 @@ function countText(ps){const v=ps.filter(p=>{const im=byPath(p);return im&&im.vi
  const t=[];if(ph||!v)t.push(ph+(ph==1?' photo':' photos'));if(v)t.push(v+(v==1?' video':' videos'));return t.join(', ');}
 const CANT="Can't preview this file here. Your original is kept unchanged.";
 const fmt=p=>{const m=byPath(p);return (m&&m.format)||((p.match(/\.([^./]+)$/)||[])[1]||'').toUpperCase();};
+// G1: a lone H.264 movie gets a poster the browser draws from the original
+// (/video, preload=metadata, muted), its length and a play glyph. Nothing is
+// decoded or written by the server. HEVC keeps the quiet tile (G2).
+const movie=p=>{const m=byPath(p);return !!(m&&m.video&&m.playable&&!m.live);};
+const dur=s=>{if(!isFinite(s))return '';s=Math.round(s);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');};
+// G5: posters load lazily, only near view, at most POSTER_MAX at once.
+const POSTER_MAX=6;const pq=[];let pActive=0;window.__poster={max:0,started:0};
+let pObs=null;
+function posterObs(){if(!pObs)pObs=new IntersectionObserver(es=>{for(const x of es){const t=x.target;if(x.isIntersecting){if(!t._q&&!t._v){t._q=1;pq.push(t);}}else if(t._q){t._q=0;const k=pq.indexOf(t);if(k>=0)pq.splice(k,1);}}pump();},{root:$('photos'),rootMargin:'600px 0px'});return pObs;}
+function pump(){while(pActive<POSTER_MAX&&pq.length){const t=pq.shift();t._q=0;if(!t.isConnected||t._v)continue;loadPoster(t);}}
+function loadPoster(t){pActive++;window.__poster.started++;window.__poster.max=Math.max(window.__poster.max,pActive);
+ const v=document.createElement('video');v.muted=true;v.playsInline=true;v.preload='metadata';v.disablePictureInPicture=true;t._v=v;
+ let fin=false;const end=()=>{if(fin)return;fin=true;clearTimeout(to);pActive--;pump();};const to=setTimeout(end,15000);
+ v.addEventListener('loadedmetadata',()=>{t.querySelector('.dur').textContent=dur(v.duration);try{v.currentTime=Math.min(0.1,(v.duration||1)/2);}catch{}},{once:true});
+ v.addEventListener('seeked',end,{once:true});v.addEventListener('error',end,{once:true});
+ v.src='/video?p='+encodeURIComponent(t._p);t.prepend(v);}
+function posterTile(p){const t=document.createElement('div');t.className='vt';t._p=p;
+ const g=document.createElement('span');g.className='play';g.textContent='\u25B6';g.setAttribute('aria-hidden','true');
+ const d=document.createElement('span');d.className='dur';t.append(g,d);
+ if(window.IntersectionObserver)posterObs().observe(t);else loadPoster(t);return t;}
 function figure(p,cap,sub){const f=document.createElement('figure');let i;
  if(canShow(p)){i=new Image();i.loading='lazy';i.alt=base(p);i.setAttribute('elementtiming','tile');i.src=img(p);}
- else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent=CANT;i.append(b,m);}
+ else if(movie(p))i=posterTile(p);
+ else{i=document.createElement('div');i.className='ph';i.title=CANT;const b=document.createElement('span');b.textContent=fmt(p);i.append(b);}
  const lm=byPath(p);if(lm&&lm.live){const l=document.createElement('button');l.type='button';l.className='live';l.textContent='LIVE';l.title='Play the Live Photo';l.onclick=e=>{e.stopPropagation();selected=p;setInfo(true);draw();playLive();};f.append(l);}
  const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
 // Appends the next n tiles, never rebuilding what is already there. Each
@@ -217,9 +241,18 @@ function addTiles(n){const more=$('grid-more');
   const k=Math.min(n,ps.length-gs.gj);
   g._ps=ps.slice(gs.gj,gs.gj+k);fillBlock(g);
   more?more.before(g):$('grid').append(g);blockObs().observe(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
+// G3: one calm, dismissible line per view instead of the copy on every tile.
+const npGone=new Set();let npKey='';
+const plural=(n,one,many)=>n+' '+(n==1?one:many);
+function banner(evs){npKey=(curEvent?'e:'+curEvent.title:'all')+'|'+$('search').value.trim();let h=0,o=0;
+ for(const x of evs)for(const p of x.ps){const m=byPath(p);if(!m||m.preview!==false||(m.video&&m.playable))continue;if(m.format=='HEIC'||/\.hei[cf]$/i.test(p))h++;else o++;}
+ const t=[];if(h)t.push(plural(h,'HEIC photo','HEIC photos'));if(o)t.push(plural(o,'other file','other files'));
+ $('np-t').textContent=t.length?t.join(' and ')+" can't be previewed here yet. Your original"+(h+o==1?' is':'s are')+' kept unchanged.':'';
+ $('np').hidden=!t.length||npGone.has(npKey);}
+$('np-x').onclick=()=>{npGone.add(npKey);$('np').hidden=true;};
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
- if(bObs){bObs.disconnect();bObs=null;}$('grid').innerHTML='';early=null;if(moreObs){moreObs.disconnect();moreObs=null;}clearInterval(moreTimer);moreTimer=null;gridMore=null;
+ if(bObs){bObs.disconnect();bObs=null;}if(pObs){pObs.disconnect();pObs=null;}pq.length=0;$('grid').innerHTML='';early=null;if(moreObs){moreObs.disconnect();moreObs=null;}clearInterval(moreTimer);moreTimer=null;gridMore=null;
  let total=0;for(const x of evs)total+=x.ps.length;
  gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
  if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
@@ -229,6 +262,7 @@ function draw(){
   b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;$('grid').append(b);
   if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}
   gridMore=more;moreTimer=setInterval(nearEnd,400);}
+ setTimeout(()=>banner(evs),0);
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
  $('photos-count').textContent=countText(evs.flatMap(x=>x.ps));
  $('event-grid').innerHTML='';
@@ -272,7 +306,7 @@ function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=
  $('i-name').textContent=base(im.path);
  $('i-taken').textContent=!im.taken?'Date taken: not known':'Taken '+when(im.taken)+(im.taken.length<16||zoned(im.taken)?' (from '+im.taken_from+')':'');
  $('i-taken').title=im.taken?'From '+im.taken_from:'';
- $('i-size').textContent=human(im.bytes)+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false?' \u00b7 '+im.format+'. '+CANT:'');
+ $('i-size').textContent=human(im.bytes)+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false&&!(im.video&&im.playable)?' \u00b7 '+im.format+'. '+CANT:im.video&&im.playable?' \u00b7 '+im.format+' \u00b7 H.264 video':'');
  $('i-raw').hidden=!im.raw;$('i-raw').textContent=im.raw?'RAW file: '+base(im.raw)+' ('+human(im.raw_bytes||0)+')':'';
  $('i-note').hidden=!im.info;$('i-note').textContent=im.info||'';
  $('i-live').hidden=!im.live;$('i-live').querySelectorAll('video').forEach(v=>v.remove());

@@ -42,20 +42,30 @@ copyFileSync('fixtures/live-photo/IMG_0005.heic', join(lib, 'roll', 'IMG_0010.HE
 const hevc = Buffer.from(movie);
 hevc.write('hvc1', hevc.indexOf('avc1'), 'latin1');
 writeFileSync(join(lib, 'roll', 'IMG_0010.MOV'), hevc);
+// G2: a lone HEVC movie (same stub, no still): quiet tile, no player.
+writeFileSync(join(lib, 'roll', 'IMG_0030.MOV'), hevc);
+// G3: a view of 20 lone HEIC stills. G5: 2,000 items, 200 of them movies.
+const lib20 = join(work, 'lib20'); mkdirSync(join(lib20, 'heic'), {recursive: true});
+for (let i = 0; i < 20; i++) copyFileSync('fixtures/live-photo/IMG_0005.heic', join(lib20, 'heic', `IMG_${1000 + i}.HEIC`));
+const lib2k = join(work, 'lib2k'); mkdirSync(join(lib2k, 'mix'), {recursive: true});
+for (let i = 0; i < 2000; i++) { const n = String(i).padStart(4, '0');
+  if (i % 10 == 5) copyFileSync('fixtures/live-photo/IMG_0005.mov', join(lib2k, 'mix', `CLIP_${n}.MOV`));
+  else copyFileSync('fixtures/raw-jpeg/IMG_0003.jpg', join(lib2k, 'mix', `PIC_${n}.jpg`)); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const kids = [];
 let closeBrowser = async () => {};
 const done = async code => { try { await closeBrowser(); } catch {} await sleep(500); for (const k of kids) k.kill(); process.exit(code); };
 
 const env = {...process.env, ALBUMEN_HOME: join(work, 'home')};
-const gui = spawn(bin, ['gui', '--library', lib, '--no-open', '--port', '0', '--work', join(work, 'state')], {stdio: ['ignore', 'pipe', 'inherit'], env});
+const startGui = (l, st) => { const gui = spawn(bin, ['gui', '--library', l, '--no-open', '--port', '0', '--work', join(work, st)], {stdio: ['ignore', 'pipe', 'inherit'], env});
 kids.push(gui);
-const url = await new Promise((res, rej) => {
+return new Promise((res, rej) => {
   const rl = createInterface({input: gui.stdout});
   rl.on('line', l => { const m = l.match(/^albumen gui: (http:\/\/\S+?)\/?$/); if (m) res(m[1]); });
   gui.on('exit', c => rej(new Error('gui exited ' + c)));
   setTimeout(() => rej(new Error('gui printed no URL')), 120000);
-});
+}); };
+const url = await startGui(lib, 'state');
 
 const port = 9300 + Math.floor(Math.random() * 500);
 // HEADED=1: a normal visible window (used for the Edge run); the temp
@@ -96,6 +106,7 @@ const hover = async sel => {
   await cmd('Input.dispatchMouseEvent', {type: 'mouseMoved', x: b.x, y: b.y}); await sleep(600);
 };
 let failed = 0;
+const CANT = "Can't preview this file here. Your original is kept unchanged.";
 const check = (name, ok, got) => { console.log((ok ? 'ok   ' : 'FAIL ') + name + '  ' + JSON.stringify(got)); if (!ok) failed++; };
 
 closeBrowser = () => Promise.race([cmd('Browser.close'), sleep(2000)]);
@@ -104,7 +115,11 @@ await cmd('Page.enable');
 await cmd('Network.enable');
 const videoResponses = [];
 const onMsg = ws.onmessage;
+// G5: /video requests in flight, from the browser's own network log.
+const inflight = new Set(); let maxInflight = 0, videoReqs = 0;
 ws.onmessage = m => { const d = JSON.parse(m.data);
+  if (d.method == 'Network.requestWillBeSent' && d.params.request.url.includes('/video?')) { inflight.add(d.params.requestId); videoReqs++; maxInflight = Math.max(maxInflight, inflight.size); }
+  if (d.method == 'Network.loadingFinished' || d.method == 'Network.loadingFailed') inflight.delete(d.params.requestId);
   if (d.method == 'Network.responseReceived' && d.params.response.url.includes('/video?'))
     videoResponses.push({status: d.params.response.status, range: d.params.response.headers['Content-Range'] || d.params.response.headers['content-range'] || null});
   onMsg(m); };
@@ -133,13 +148,39 @@ try {
   check('LIVE badges on the two ID-matched pairs only', await ev(`document.querySelectorAll('#grid figure .live').length`) == 2 &&
     (await ev(`${badge('IMG_0005').js}!=null&&${badge('IMG_0010').js}!=null&&${badge('IMG_0008').js}==null`)), tiles);
   const heads = await ev(`({photos:document.getElementById('photos-count').textContent,lib:document.getElementById('lib-count').textContent})`);
-  check('header counts: Live pair is one photo, lone movie is a video', heads.photos == '3 photos, 1 video' && heads.lib == '3 photos, 1 video', heads);
+  check('header counts: Live pair is one photo, lone movie is a video', heads.photos == '3 photos, 2 videos' && heads.lib == '3 photos, 2 videos', heads);
   const forms = await ev(`[countText(['roll/IMG_0005.HEIC']),countText(['roll/IMG_0008.MOV']),countText(['roll/IMG_0005.HEIC','roll/IMG_0008.MOV']),countText([]),countText(['roll/IMG_0005.HEIC','roll/IMG_0010.HEIC'])]`);
   check('count wording singular/plural', JSON.stringify(forms) == JSON.stringify(['1 photo', '1 video', '1 photo, 1 video', '0 photos', '2 photos']), forms);
   check('tile copy has no stray leading dash', !tiles.some(t => t.includes('\u2014')), tiles);
-  const heicTile = await ev(`(()=>{const f=${fig('IMG_0005.HEIC').js};return f&&{ph:f.querySelector('.ph').innerText.replace(/\\s+/g,' ').trim(),cap:f.querySelector('figcaption').textContent,all:f.innerText};})()`);
-  check('HEIC tile: name once, as the caption, with HEIC and the can\'t-preview copy', heicTile && heicTile.cap == 'IMG_0005.HEIC' &&
-    heicTile.ph == "HEIC Can't preview this file here. Your original is kept unchanged." && heicTile.all.split('IMG_0005.HEIC').length == 2, heicTile);
+  const heicTile = await ev(`(()=>{const f=${fig('IMG_0005.HEIC').js};return f&&{ph:f.querySelector('.ph').innerText.replace(/\\s+/g,' ').trim(),title:f.querySelector('.ph').title,live:!!f.querySelector('.live'),cap:f.querySelector('figcaption').textContent,all:f.innerText};})()`);
+  check('G3 HEIC tile: quiet HEIC glyph, LIVE badge, name once as the caption, copy only on hover', heicTile && heicTile.cap == 'IMG_0005.HEIC' &&
+    heicTile.ph == 'HEIC' && heicTile.title == CANT && heicTile.live && heicTile.all.split('IMG_0005.HEIC').length == 2, heicTile);
+  const np = await ev(`({shown:!document.getElementById('np').hidden,text:document.getElementById('np-t').textContent,n:document.querySelectorAll('.np').length})`);
+  check('G3 one banner for the view', np.shown && np.n == 1 && np.text == "3 HEIC photos and 1 other file can't be previewed here yet. Your originals are kept unchanged.", np);
+  check('G3 no tile carries the can\'t-preview text', await ev(`[...document.querySelectorAll('#grid figure')].filter(f=>f.innerText.includes("Can't preview")).length`) == 0, null);
+  // G1: the lone H.264 movie tile gets a browser-drawn poster, length and play glyph.
+  await until(`(()=>{const v=${fig('IMG_0008.MOV').js}?.querySelector('video');return v&&v.readyState>=2&&!v.seeking;})()`, 'G1 poster frame');
+  const g1 = await ev(`(()=>{const f=${fig('IMG_0008.MOV').js};const v=f.querySelector('video');const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+    const x=c.getContext('2d');x.drawImage(v,0,0);const d=x.getImageData(0,0,c.width,c.height).data;let s=0,s2=0,n=0;for(let i=0;i<d.length;i+=4){const y=(d[i]+d[i+1]+d[i+2])/3;s+=y;s2+=y*y;n++;}
+    const m=s/n;return {preload:v.preload,muted:v.muted,controls:v.controls,src:v.getAttribute('src'),w:v.videoWidth,h:v.videoHeight,variance:s2/n-m*m,dur:f.querySelector('.dur').textContent,play:!!f.querySelector('.play'),text:f.innerText.replace(/\\s+/g,' ').trim()};})()`);
+  check('G1 movie tile: poster pixels vary, duration, play glyph, no can\'t-preview', g1.preload == 'metadata' && g1.muted && !g1.controls && g1.src.startsWith('/video?p=') && g1.w > 0 && g1.variance > 0 &&
+    /^\d+:\d\d$/.test(g1.dur) && g1.play && !g1.text.includes("Can't preview"), g1);
+  await snap('g1-poster');
+  // G2: the lone HEVC movie keeps the quiet tile and gets no <video>.
+  const g2 = await ev(`(()=>{const f=${fig('IMG_0030.MOV').js};return f&&{videos:f.querySelectorAll('video').length,ph:f.querySelector('.ph')?.innerText.trim(),title:f.querySelector('.ph')?.title};})()`);
+  check('G2 HEVC movie tile: no <video>, quiet placeholder, copy on hover', g2 && g2.videos == 0 && g2.ph == 'MOV' && g2.title == CANT, g2);
+  await click(fig('IMG_0030.MOV'));
+  await sleep(200);
+  const g2i = await ev(`document.getElementById('i-size').textContent`);
+  check('G2 HEVC movie Info keeps the full can\'t-preview copy', g2i.endsWith('MOV. ' + CANT), g2i);
+  await click(fig('IMG_0005.HEIC'));
+  await sleep(200);
+  const g3i = await ev(`({name:document.getElementById('i-name').textContent,size:document.getElementById('i-size').textContent,taken:document.getElementById('i-taken').textContent})`);
+  check('G3 HEIC Info: file name, type, date and the full copy', g3i.name == 'IMG_0005.HEIC' && g3i.size.endsWith('HEIC. ' + CANT) && g3i.taken.length > 0, g3i);
+  await click(fig('IMG_0008.MOV'));
+  await sleep(200);
+  const g1i = await ev(`document.getElementById('i-size').textContent`);
+  check('G1 H.264 movie Info has no can\'t-preview copy', !g1i.includes("Can't preview") && g1i.includes('H.264 video'), g1i);
   await snap('badge');
 
   // The real click on the LIVE badge.
@@ -194,6 +235,38 @@ try {
       const out={canPlayType:v.canPlayType(${JSON.stringify(type + '; codecs="avc1.42E01E"')})||v.canPlayType(${JSON.stringify(type)}),t:v.currentTime,err:err||(v.error&&v.error.code)};v.remove();return out;})()`);
     console.log(`mime ${type}: ${JSON.stringify(r)}`);
   }
+
+  // G3: a view of 20 HEIC photos says it once, in one dismissible banner.
+  const url20 = await startGui(lib20, 'state20');
+  await cmd('Page.navigate', {url: url20 + '/'});
+  await until(`typeof lib!=='undefined'&&lib.images.length==20&&document.querySelectorAll('#grid figure').length==20`, 'G3 library');
+  await sleep(100);
+  const b20 = await ev(`({tiles:[...document.querySelectorAll('#grid figure')].filter(f=>f.innerText.includes("Can't preview")).length,
+    banners:[...document.querySelectorAll('.np')].filter(b=>!b.hidden).length,text:document.getElementById('np-t').textContent,ph:[...new Set([...document.querySelectorAll('#grid .ph')].map(p=>p.innerText.trim()))]})`);
+  check('G3 20 HEIC: 0 tile copies, 1 banner', b20.tiles == 0 && b20.banners == 1 && b20.text == "20 HEIC photos can't be previewed here yet. Your originals are kept unchanged." && b20.ph.join() == 'HEIC', b20);
+  await snap('g3-banner');
+  await click('#np-x');
+  await ev(`(()=>{const s=document.getElementById('search');s.dispatchEvent(new Event('input'));})()`);
+  await sleep(200);
+  check('G3 banner stays dismissed for the view', await ev(`document.getElementById('np').hidden`) === true, null);
+
+  // G5: 2,000 items with 200 movies: posters lazy, at most 6 /video at once.
+  const url2k = await startGui(lib2k, 'state2k');
+  inflight.clear(); maxInflight = 0; videoReqs = 0;
+  const t0 = Date.now();
+  await cmd('Page.navigate', {url: url2k + '/'});
+  await until(`typeof lib!=='undefined'&&lib.images.length==2000&&[...document.querySelectorAll('#grid img')].some(i=>i.complete&&i.naturalWidth>0)`, 'G5 first tile');
+  const firstTile = Date.now() - t0;
+  check('G5 first screen of tiles within 1.0 s (first-thumbnail budget)', firstTile <= 1000, firstTile);
+  await sleep(1500);
+  const early = await ev(`({posters:window.__poster.started,movies:lib.images.filter(i=>i.video).length})`);
+  check('G5 posters are lazy: far-off movies not loaded yet', early.movies == 200 && early.posters > 0 && early.posters < 200, early);
+  for (let i = 0; i < 80; i++) { await ev(`(()=>{const p=document.getElementById('photos');p.scrollTop+=p.clientHeight;})()`); await sleep(120); }
+  await sleep(2000);
+  const late = await ev(`({posters:window.__poster.started,max:window.__poster.max,tiles:document.querySelectorAll('#grid figure').length,done:gs&&gs.done})`);
+  console.log('G5 /video requests ' + videoReqs + ', max in flight ' + maxInflight + ', page ' + JSON.stringify(late));
+  check('G5 at most 6 /video requests at once', maxInflight > 0 && maxInflight <= 6 && late.max <= 6, {maxInflight, page: late.max});
+  await snap('g5-grid');
 } catch (e) { console.error(e); failed++; }
 
 check('no script errors', errors.length == 0, errors);
