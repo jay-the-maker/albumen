@@ -34,6 +34,8 @@ jobs:
       FILES: ${{ github.event.inputs.files || '380000' }}
       ITERS: ${{ github.event.inputs.iters || '100' }}
       KILLS: ${{ github.event.inputs.kills || '500' }}
+      # Peak RSS bar for every X2/X3 step: m6-one.sh runs each under /usr/bin/time -v.
+      ALBUMEN_M6_MAX_RSS_KB: "339968"
     defaults:
       run:
         shell: bash
