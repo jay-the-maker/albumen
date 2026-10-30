@@ -110,6 +110,21 @@ jobs:
         shell: bash
         run: scripts/with-minio.sh cargo test --locked --all-targets
 
+      # CI only: runners are throwaway VMs. Never run tzutil on a dev PC.
+      - name: Search labels under India Standard Time (UTC+5:30)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ALBUMEN_EXPECTED_LOCAL_LABEL: "2026-10-30 06:12 UTC+5:30"
+        run: |
+          tzutil /s "India Standard Time"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          tzutil /g
+          cargo test --locked -p albumen-mcp --test search_tree
+          $code = $LASTEXITCODE
+          tzutil /s "UTC"
+          exit $code
+
   android:
     name: android camera-roll backup
     runs-on: ubuntu-24.04

@@ -11,6 +11,7 @@ pub mod io;
 pub mod metadata;
 pub mod mount;
 pub mod page;
+mod search_tree;
 pub mod thumbnail;
 pub mod tools;
 

@@ -2,9 +2,11 @@
 
 //! Metadata read from the files in front of us.
 //!
-//! There is no catalog on disk. A process-local cache remembers a file only
-//! while its SHA-256 and length still match, and a search that misses
-//! re-reads that file with ExifTool. Sidecar metadata is joined in memory.
+//! The cache remembers a file only while its stat key and SHA-256 still
+//! match, and a search that misses re-reads that file with ExifTool. Sidecar
+//! metadata is joined in memory. Search persists the cache as a checksummed
+//! search tree beside the index (see [`crate::search_tree`]); nothing else
+//! reads it.
 
 use albumen_ingest::{exiftool_command, sha256_hex};
 use serde_json::{Map, Value};
@@ -14,13 +16,13 @@ use std::path::{Path, PathBuf};
 /// Capture time as written in the file, without converting time zones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WallTime {
-    year: i32,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: u8,
-    nanos: u32,
+    pub(crate) year: i32,
+    pub(crate) month: u8,
+    pub(crate) day: u8,
+    pub(crate) hour: u8,
+    pub(crate) minute: u8,
+    pub(crate) second: u8,
+    pub(crate) nanos: u32,
 }
 
 impl WallTime {
@@ -146,60 +148,715 @@ impl Filters {
     }
 }
 
-/// SHA-256 keyed memory of ExifTool reads. Dropping it drops the only copy.
-#[derive(Debug, Default)]
+/// The five stat fields the warm search trusts instead of a re-hash.
+///
+/// Search only. Export, verify-manifest, backup and status never read this:
+/// they SHA-256 every file every time (see `file_hash_count` tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatKey {
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub mtime_ns: i128,
+    pub ctime_ns: i128,
+}
+
+impl StatKey {
+    pub fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            StatKey {
+                device: meta.dev(),
+                inode: meta.ino(),
+                size: meta.len(),
+                mtime_ns: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+                ctime_ns: i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // No portable device/inode or ctime here: use mtime for both times
+            // and the creation time as a stand-in identity.
+            let ns = |t: std::io::Result<std::time::SystemTime>| -> i128 {
+                t.ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as i128)
+                    .unwrap_or(-1)
+            };
+            StatKey {
+                device: 0,
+                inode: ns(meta.created()) as u64,
+                size: meta.len(),
+                mtime_ns: ns(meta.modified()),
+                ctime_ns: ns(meta.modified()),
+            }
+        }
+    }
+
+    /// A hash taken within `RACY_NANOS` of the file's last change cannot rule
+    /// out a same-second write after it, so it is not trusted next time.
+    pub(crate) fn settled_at(&self, hashed_ns: i128, racy_ns: i128) -> bool {
+        self.mtime_ns >= 0 && hashed_ns - self.mtime_ns.max(self.ctime_ns) >= racy_ns
+    }
+}
+
+pub(crate) fn now_ns() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0)
+}
+
+/// One directory's `.xmp`/`.aae` names, by lowercase name. Re-listed when
+/// the directory's mtime moves or the listing was taken inside the racy window.
+#[derive(Debug)]
+struct DirSidecars {
+    mtime_ns: i128,
+    settled: bool,
+    names: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Entry {
+    pub(crate) sha: String,
+    pub(crate) stat: StatKey,
+    /// True when the hash was taken at least `RACY_NANOS` after the change.
+    pub(crate) settled: bool,
+    pub(crate) record: Record,
+    /// When this entry's stat key was last compared with the disk (ns).
+    pub(crate) checked_ns: i128,
+}
+
+/// A cached file whose stat was not compared with the disk this search
+/// because the recheck budget ran out.
+#[derive(Debug, Clone)]
+pub struct Unchecked {
+    pub path: String,
+    pub checked_ns: i128,
+}
+
+/// Memory of ExifTool reads, keyed by SHA-256 and the file's stat.
+///
+/// Warm search: when all five [`StatKey`] fields are unchanged since a
+/// settled hash, the file is not read again. Any change, or a hash taken too
+/// close to the last write, means a fresh SHA-256. Dropping it drops the only copy.
+#[derive(Debug)]
 pub struct Cache {
-    entries: HashMap<String, (String, u64, Record)>,
+    pub(crate) entries: HashMap<String, Entry>,
+    dirs: HashMap<String, DirSidecars>,
+    racy_ns: i128,
+    hashed: u64,
+    /// Entries changed since the search tree was last written.
+    pub(crate) dirty: bool,
+    /// The search tree file this cache was loaded from, once tried.
+    pub(crate) tree: Option<std::path::PathBuf>,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Cache {
+            entries: HashMap::new(),
+            dirs: HashMap::new(),
+            racy_ns: i128::from(albumen_ingest::index::RACY_NANOS),
+            hashed: 0,
+            dirty: false,
+            tree: None,
+        }
+    }
 }
 
 impl Cache {
+    /// Files this cache has SHA-256'd since it was made.
+    pub fn hashed(&self) -> u64 {
+        self.hashed
+    }
+
+    /// [`existing_sidecars`], but each directory is listed once and reused
+    /// while its mtime is unchanged, instead of one listing per file.
+    pub fn sidecars(&mut self, root: &Path, relative: &str) -> Vec<String> {
+        if is_sidecar(relative) {
+            return Vec::new();
+        }
+        let (parent, _) = split_relative(relative);
+        self.refresh_dir(root, parent);
+        self.listed_sidecars(root, relative)
+    }
+
+    /// Re-list `parent` when its mtime moved or its listing was taken inside
+    /// the racy window. Call once per directory per batch, then
+    /// [`Cache::listed_sidecars`] for each file in it.
+    pub fn refresh_dir(&mut self, root: &Path, parent: &str) -> bool {
+        let dir = if parent.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(PathBuf::from_iter(parent.split('/')))
+        };
+        let Ok(meta) = std::fs::metadata(&dir) else {
+            self.dirs.remove(parent);
+            return false;
+        };
+        let mtime_ns = StatKey::of(&meta).mtime_ns;
+        let fresh = match self.dirs.get(parent) {
+            Some(cached) => !(cached.settled && cached.mtime_ns == mtime_ns),
+            None => true,
+        };
+        if fresh {
+            let listed_ns = now_ns();
+            let mut names: HashMap<String, Vec<String>> = HashMap::new();
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let Ok(actual) = entry.file_name().into_string() else {
+                        continue;
+                    };
+                    let lower = actual.to_ascii_lowercase();
+                    if lower.ends_with(".xmp") || lower.ends_with(".aae") {
+                        names.entry(lower).or_default().push(actual);
+                    }
+                }
+            }
+            for list in names.values_mut() {
+                list.sort();
+            }
+            self.dirs.insert(
+                parent.to_string(),
+                DirSidecars {
+                    mtime_ns,
+                    settled: mtime_ns >= 0 && listed_ns - mtime_ns >= self.racy_ns,
+                    names,
+                },
+            );
+        }
+        self.dirs
+            .get(parent)
+            .is_some_and(|dir| !dir.names.is_empty())
+    }
+
+    /// Sidecars of `relative` from the listing [`Cache::refresh_dir`] took.
+    pub fn listed_sidecars(&self, root: &Path, relative: &str) -> Vec<String> {
+        if is_sidecar(relative) {
+            return Vec::new();
+        }
+        let (parent, name) = split_relative(relative);
+        let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+        let Some(listing) = self.dirs.get(parent) else {
+            return Vec::new();
+        };
+        if listing.names.is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for candidate in [
+            format!("{stem}.xmp"),
+            format!("{name}.xmp"),
+            format!("{stem}.aae"),
+            format!("{name}.aae"),
+        ] {
+            let Some(actuals) = listing.names.get(&candidate.to_ascii_lowercase()) else {
+                continue;
+            };
+            // Exact case first, then other spellings, as existing_sidecars does.
+            let ordered = actuals
+                .iter()
+                .filter(|actual| **actual == candidate)
+                .chain(actuals.iter().filter(|actual| **actual != candidate));
+            for actual in ordered {
+                let relative_sidecar = join_relative(parent, actual);
+                if found.contains(&relative_sidecar) {
+                    continue;
+                }
+                if root
+                    .join(PathBuf::from_iter(relative_sidecar.split('/')))
+                    .is_file()
+                {
+                    found.push(relative_sidecar);
+                }
+            }
+        }
+        found
+    }
+
+    #[cfg(test)]
+    fn with_racy_ns(racy_ns: i128) -> Self {
+        Cache {
+            racy_ns,
+            ..Cache::default()
+        }
+    }
+
     pub fn load(
         &mut self,
         root: &Path,
         relative_paths: &[String],
     ) -> Result<HashMap<String, Record>, String> {
-        let mut digests = HashMap::with_capacity(relative_paths.len());
-        let mut missing = Vec::new();
+        let mut digests = self.refresh(root, relative_paths)?;
         for relative in relative_paths {
-            let full = root.join(PathBuf::from_iter(relative.split('/')));
-            let len = std::fs::metadata(&full)
-                .map_err(|err| format!("{relative}: {err}"))?
-                .len();
-            let sha = sha256_hex(&full).map_err(|err| err.to_string())?;
-            if let Some((cached_sha, cached_len, record)) = self.entries.get(relative) {
-                if cached_sha == &sha && *cached_len == len {
-                    digests.insert(relative.clone(), record.clone());
+            if !digests.contains_key(relative) {
+                if let Some(entry) = self.entries.get(relative) {
+                    digests.insert(relative.clone(), entry.record.clone());
+                }
+            }
+        }
+        Ok(digests)
+    }
+
+    /// Bring every path's entry up to date, as [`Cache::load`] does, without
+    /// copying records. Records the cache did not keep (over the item limit)
+    /// are returned; read the rest with [`Cache::record`].
+    pub fn refresh(
+        &mut self,
+        root: &Path,
+        relative_paths: &[String],
+    ) -> Result<HashMap<String, Record>, String> {
+        let stats = stat_all(root, relative_paths, None);
+        let mut unkept = HashMap::new();
+        self.refresh_stated(
+            root,
+            relative_paths,
+            stats,
+            &mut unkept,
+            &mut Vec::new(),
+            &|_, _| None,
+            &mut Vec::new(),
+        )?;
+        Ok(unkept)
+    }
+
+    /// [`Cache::refresh`] with each path's stat already taken by
+    /// [`stat_all`]. A `None` stat (budget ran out) keeps a cached entry as
+    /// it is and reports it in `unchecked`; a path with no entry is stat'd
+    /// here. Returns each path's length.
+    ///
+    /// `judge(i, record)` runs on each entry that needed no rehash, while
+    /// it is in hand, and its answer goes in `verdicts[i]` (`None` for the
+    /// rest), so a caller filtering records need not look them up again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_stated<S: AsRef<str>>(
+        &mut self,
+        root: &Path,
+        relative_paths: &[S],
+        stats: Vec<Option<Result<StatKey, String>>>,
+        unkept: &mut HashMap<String, Record>,
+        unchecked: &mut Vec<Unchecked>,
+        judge: &dyn Fn(usize, &Record) -> Option<bool>,
+        verdicts: &mut Vec<Option<bool>>,
+    ) -> Result<Vec<u64>, String> {
+        let mut lengths = Vec::with_capacity(relative_paths.len());
+        verdicts.clear();
+        verdicts.reserve(relative_paths.len());
+        let mut missing = Vec::new();
+        let checked_ns = now_ns();
+        for (i, (relative, stat)) in relative_paths.iter().zip(stats).enumerate() {
+            let relative = relative.as_ref();
+            let stat = match stat {
+                Some(stat) => stat?,
+                None => {
+                    if let Some(entry) = self.entries.get(relative) {
+                        lengths.push(entry.stat.size);
+                        verdicts.push(judge(i, &entry.record));
+                        unchecked.push(Unchecked {
+                            path: relative.to_string(),
+                            checked_ns: entry.checked_ns,
+                        });
+                        continue;
+                    }
+                    stat_one(root, relative)?
+                }
+            };
+            lengths.push(stat.size);
+            if let Some(entry) = self.entries.get_mut(relative) {
+                if entry.settled && entry.stat == stat {
+                    entry.checked_ns = checked_ns;
+                    verdicts.push(judge(i, &entry.record));
                     continue;
                 }
             }
-            missing.push((relative.clone(), sha, len));
+            verdicts.push(None);
+            let full = root.join(PathBuf::from_iter(relative.split('/')));
+            let hashed_ns = now_ns();
+            self.hashed += 1;
+            let sha = sha256_hex(&full).map_err(|err| err.to_string())?;
+            let settled = stat.settled_at(hashed_ns, self.racy_ns);
+            if let Some(entry) = self.entries.get_mut(relative) {
+                if entry.sha == sha && entry.stat.size == stat.size {
+                    entry.stat = stat;
+                    entry.settled = settled;
+                    entry.checked_ns = hashed_ns;
+                    self.dirty = true;
+                    continue;
+                }
+            }
+            missing.push((relative.to_string(), sha, stat, settled, hashed_ns));
         }
         if !missing.is_empty() {
             let fresh = read_exiftool(
                 root,
                 &missing
                     .iter()
-                    .map(|(path, _, _)| path.clone())
+                    .map(|(path, ..)| path.clone())
                     .collect::<Vec<_>>(),
             )?;
-            for (relative, sha, len) in missing {
+            for (relative, sha, stat, settled, hashed_ns) in missing {
                 let record = fresh.get(&relative).cloned().unwrap_or_else(Record::empty);
-                self.remember(relative.clone(), sha, len, record.clone());
-                digests.insert(relative, record);
+                if !self.remember(
+                    relative.clone(),
+                    Entry {
+                        sha,
+                        stat,
+                        settled,
+                        record: record.clone(),
+                        checked_ns: hashed_ns,
+                    },
+                ) {
+                    unkept.insert(relative, record);
+                }
             }
         }
-        Ok(digests)
+        Ok(lengths)
     }
 
-    fn remember(&mut self, relative: String, sha: String, len: u64, record: Record) {
+    /// The record for `relative`: from `unkept` (what [`Cache::refresh`]
+    /// returned) or from the cache.
+    pub fn record<'a>(
+        &'a self,
+        unkept: &'a HashMap<String, Record>,
+        relative: &str,
+    ) -> Option<&'a Record> {
+        unkept
+            .get(relative)
+            .or_else(|| self.entries.get(relative).map(|entry| &entry.record))
+    }
+
+    /// Use the search tree at `file` for this cache: load it the first time
+    /// (whole or not at all), and remember it so [`Cache::save_tree`] can
+    /// rewrite it. Returns what happened, for diagnostics.
+    pub fn open_tree(&mut self, file: PathBuf, root_id: &str) -> String {
+        if self.tree.as_ref() == Some(&file) {
+            return "in memory".to_string();
+        }
+        self.tree = Some(file.clone());
+        match crate::search_tree::load(&file, root_id) {
+            Ok(entries) if self.entries.is_empty() && cache_item_limit().is_none() => {
+                // Nothing to merge and no limit: take the loaded map as is
+                // rather than re-inserting it, which held two full maps at once.
+                self.entries = entries;
+                "loaded".to_string()
+            }
+            Ok(entries) => {
+                let limit = cache_item_limit().unwrap_or(usize::MAX);
+                for (path, entry) in entries {
+                    if self.entries.len() >= limit {
+                        break;
+                    }
+                    self.entries.entry(path).or_insert(entry);
+                }
+                "loaded".to_string()
+            }
+            Err(why) => {
+                self.dirty = true;
+                format!("discarded: {why}")
+            }
+        }
+    }
+
+    /// Write the search tree if anything changed, keeping only paths
+    /// `exists` still knows.
+    pub fn save_tree(
+        &mut self,
+        root_id: &str,
+        exists: impl Fn(&str) -> bool,
+    ) -> std::io::Result<()> {
+        let Some(file) = self.tree.clone() else {
+            return Ok(());
+        };
+        if !self.dirty {
+            return Ok(());
+        }
+        self.entries.retain(|path, _| exists(path));
+        crate::search_tree::save(&file, root_id, self.entries.iter())?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Keep `entry`. False when the item limit left it out.
+    fn remember(&mut self, relative: String, entry: Entry) -> bool {
         let replacing = self.entries.contains_key(&relative);
         if let Some(limit) = cache_item_limit() {
             if !replacing && self.entries.len() >= limit {
-                return;
+                return false;
             }
         }
-        self.entries.insert(relative, (sha, len, record));
+        self.entries.insert(relative, entry);
+        self.dirty = true;
+        true
     }
+}
+
+fn stat_one(root: &Path, relative: &str) -> Result<StatKey, String> {
+    // Index paths always use '/', which is also the separator here.
+    #[cfg(unix)]
+    let full = root.join(relative);
+    #[cfg(not(unix))]
+    let full = root.join(PathBuf::from_iter(relative.split('/')));
+    #[cfg(windows)]
+    return win_stat::stat_path(&full).map_err(|err| format!("{relative}: {err}"));
+    #[cfg(not(windows))]
+    std::fs::metadata(&full)
+        .map(|meta| StatKey::of(&meta))
+        .map_err(|err| format!("{relative}: {err}"))
+}
+
+/// Windows stat with a real change time.
+///
+/// `std::fs::Metadata` has no ctime on Windows, so a same-size edit with the
+/// modified time put back looked unchanged and a warm search would report a
+/// stale answer as fresh. NTFS keeps a ChangeTime that moves on every data
+/// or attribute change; it is used here exactly as Linux uses ctime.
+#[cfg(windows)]
+mod win_stat {
+    use super::StatKey;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    };
+
+    const ATTR_DIRECTORY: u32 = 0x10;
+    const ATTR_REPARSE_POINT: u32 = 0x400;
+
+    /// FILETIME (100 ns since 1601) to ns since 1970, as `std` converts
+    /// `created()`/`modified()`; -1 before 1970.
+    pub(super) fn ns(filetime: i64) -> i128 {
+        const EPOCH: i64 = 116_444_736_000_000_000;
+        if filetime >= EPOCH {
+            i128::from(filetime - EPOCH) * 100
+        } else {
+            -1
+        }
+    }
+
+    fn key(created: i64, written: i64, changed: i64, size: u64) -> StatKey {
+        let mtime_ns = ns(written);
+        StatKey {
+            device: 0,
+            inode: ns(created) as u64,
+            size,
+            mtime_ns,
+            ctime_ns: if changed == 0 { mtime_ns } else { ns(changed) },
+        }
+    }
+
+    /// One file: one handle opened for attributes only, then FileBasicInfo
+    /// for ChangeTime. If ChangeTime cannot be read, ctime is the mtime.
+    pub(super) fn stat_path(full: &Path) -> std::io::Result<StatKey> {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(full)?;
+        let meta = file.metadata()?;
+        let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle is open for the call and the buffer is a
+        // FILE_BASIC_INFO of the size passed.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle() as _,
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } != 0;
+        let mut out = StatKey::of(&meta);
+        if ok && basic.ChangeTime != 0 {
+            out.ctime_ns = ns(basic.ChangeTime);
+        }
+        Ok(out)
+    }
+
+    /// Every regular file in one directory with its ChangeTime, from one
+    /// directory handle (FileIdBothDirectoryInfo), with no per-file open.
+    /// Entries whose ChangeTime is zero are left out so the caller stats
+    /// them file by file. An unreadable directory gives an empty map.
+    pub(super) fn list_dir(dir: &Path) -> HashMap<OsString, StatKey> {
+        let mut listed = HashMap::new();
+        let Ok(handle) = std::fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+        else {
+            return listed;
+        };
+        let mut buf = vec![0u64; 8192]; // 64 KiB, 8-byte aligned
+        let mut class = FileIdBothDirectoryRestartInfo;
+        loop {
+            // SAFETY: the handle is an open directory and the buffer is
+            // valid for the byte length passed.
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    handle.as_raw_handle() as _,
+                    class,
+                    buf.as_mut_ptr().cast(),
+                    (buf.len() * 8) as u32,
+                )
+            } != 0;
+            if !ok {
+                break; // ERROR_NO_MORE_FILES, or unreadable: fallback covers it
+            }
+            class = FileIdBothDirectoryInfo;
+            let base = buf.as_ptr() as *const u8;
+            let mut at = 0usize;
+            loop {
+                // SAFETY: `at` follows NextEntryOffset chains the system
+                // wrote inside the buffer; each entry is 8-byte aligned.
+                let entry = unsafe { &*(base.add(at) as *const FILE_ID_BOTH_DIR_INFO) };
+                let name_len = entry.FileNameLength as usize / 2;
+                // SAFETY: FileName holds FileNameLength bytes in the buffer.
+                let name = unsafe { std::slice::from_raw_parts(entry.FileName.as_ptr(), name_len) };
+                let regular = entry.FileAttributes & (ATTR_DIRECTORY | ATTR_REPARSE_POINT) == 0;
+                if regular && entry.ChangeTime != 0 {
+                    listed.insert(
+                        OsString::from_wide(name),
+                        key(
+                            entry.CreationTime,
+                            entry.LastWriteTime,
+                            entry.ChangeTime,
+                            entry.EndOfFile as u64,
+                        ),
+                    );
+                }
+                if entry.NextEntryOffset == 0 {
+                    break;
+                }
+                at += entry.NextEntryOffset as usize;
+            }
+        }
+        listed
+    }
+}
+
+/// Stat every path on a small thread pool, in order. A path not reached
+/// before `deadline` is `None`.
+pub fn stat_all<S: AsRef<str> + Sync>(
+    root: &Path,
+    relative_paths: &[S],
+    deadline: Option<std::time::Instant>,
+) -> Vec<Option<Result<StatKey, String>>> {
+    let mut out: Vec<Option<Result<StatKey, String>>> = Vec::new();
+    out.resize_with(relative_paths.len(), || None);
+    let run = |paths: &[S], slots: &mut [Option<Result<StatKey, String>>]| {
+        for (relative, slot) in paths.iter().zip(slots.iter_mut()) {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                return;
+            }
+            *slot = Some(stat_one(root, relative.as_ref()));
+        }
+    };
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8);
+    if cfg!(windows) && std::env::var_os("ALBUMEN_STAT_PER_FILE").is_none() {
+        return stat_all_by_dir(root, relative_paths, deadline, threads);
+    }
+    if threads == 1 || relative_paths.len() < 512 {
+        run(relative_paths, &mut out);
+        return out;
+    }
+    let chunk = relative_paths.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (paths, slots) in relative_paths.chunks(chunk).zip(out.chunks_mut(chunk)) {
+            scope.spawn(move || run(paths, slots));
+        }
+    });
+    out
+}
+
+/// Stat by listing each directory once instead of opening every file.
+///
+/// On Windows a per-file stat opens a handle per file (CreateFileW), and
+/// every open passes the antivirus filter: 380k opens cost ~2.4 s on 8
+/// threads. Here each directory is read through one handle with
+/// GetFileInformationByHandleEx(FileIdBothDirectoryInfo), whose entries
+/// carry size, LastWriteTime and ChangeTime with no per-file open; an entry
+/// with no ChangeTime is stat'ed file by file.
+/// NTFS can lag a directory entry's size and time while a writer still has
+/// the file open; the entry is current once the writer closes it. Set
+/// `ALBUMEN_STAT_PER_FILE=1` to stat file by file. A path the listing does
+/// not show falls back to [`stat_one`], so its error text is unchanged.
+pub(crate) fn stat_all_by_dir<S: AsRef<str> + Sync>(
+    root: &Path,
+    relative_paths: &[S],
+    deadline: Option<std::time::Instant>,
+    threads: usize,
+) -> Vec<Option<Result<StatKey, String>>> {
+    let mut by_dir: std::collections::BTreeMap<&str, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, relative) in relative_paths.iter().enumerate() {
+        let relative = relative.as_ref();
+        let dir = relative.rfind('/').map_or("", |at| &relative[..at]);
+        by_dir.entry(dir).or_default().push(i);
+    }
+    let groups: Vec<(&str, Vec<usize>)> = by_dir.into_iter().collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::with_capacity(relative_paths.len()));
+    let work = || {
+        let mut local = Vec::new();
+        loop {
+            let g = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some((dir, members)) = groups.get(g) else {
+                break;
+            };
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                break;
+            }
+            let full_dir = if dir.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(PathBuf::from_iter(dir.split('/')))
+            };
+            #[cfg(windows)]
+            let listed = win_stat::list_dir(&full_dir);
+            #[cfg(not(windows))]
+            let mut listed: std::collections::HashMap<std::ffi::OsString, StatKey> =
+                std::collections::HashMap::new();
+            #[cfg(not(windows))]
+            if let Ok(entries) = std::fs::read_dir(&full_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if !meta.is_dir() && !meta.file_type().is_symlink() {
+                            listed.insert(entry.file_name(), StatKey::of(&meta));
+                        }
+                    }
+                }
+            }
+            for &i in members {
+                let relative = relative_paths[i].as_ref();
+                let name = relative.rsplit('/').next().unwrap_or(relative);
+                let stat = match listed.get(std::ffi::OsStr::new(name)) {
+                    Some(key) => Ok(*key),
+                    None => stat_one(root, relative),
+                };
+                local.push((i, stat));
+            }
+        }
+        results.lock().unwrap().extend(local);
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1).min(groups.len().max(1)) {
+            scope.spawn(work);
+        }
+    });
+    let mut out: Vec<Option<Result<StatKey, String>>> = Vec::new();
+    out.resize_with(relative_paths.len(), || None);
+    for (i, stat) in results.into_inner().unwrap() {
+        out[i] = Some(stat);
+    }
+    out
 }
 
 /// How many files one ExifTool process reads.
@@ -302,6 +959,42 @@ fn join_relative(parent: &str, name: &str) -> String {
     }
 }
 
+/// [`with_sidecars`] for sidecar paths already found (by [`Cache::sidecars`]),
+/// without searching `all` for case variants.
+pub fn with_found_sidecars<'a>(
+    own: &Record,
+    sidecars: &[String],
+    lookup: impl Fn(&str) -> Option<&'a Record>,
+) -> Record {
+    let mut merged = own.clone();
+    for path in sidecars {
+        if let Some(sidecar) = lookup(path) {
+            merge_sidecar(&mut merged, sidecar);
+        }
+    }
+    merged
+}
+
+fn merge_sidecar(merged: &mut Record, sidecar: &Record) {
+    if merged.captured.is_none() {
+        merged.captured = sidecar.captured;
+    }
+    if merged.camera.is_none() {
+        merged.camera.clone_from(&sidecar.camera);
+    }
+    if merged.lens.is_none() {
+        merged.lens.clone_from(&sidecar.lens);
+    }
+    if merged.latitude.is_none() {
+        merged.latitude = sidecar.latitude;
+    }
+    if merged.longitude.is_none() {
+        merged.longitude = sidecar.longitude;
+    }
+    push_unique(&mut merged.keywords, &sidecar.keywords);
+    push_unique(&mut merged.captions, &sidecar.captions);
+}
+
 pub fn with_sidecars(relative: &str, own: &Record, all: &HashMap<String, Record>) -> Record {
     if is_sidecar(relative) {
         return own.clone();
@@ -315,26 +1008,9 @@ pub fn with_sidecars(relative: &str, own: &Record, all: &HashMap<String, Record>
         format!("{stem}.aae"),
         format!("{name}.aae"),
     ] {
-        let Some(sidecar) = find_sibling(all, parent, &candidate) else {
-            continue;
-        };
-        if merged.captured.is_none() {
-            merged.captured = sidecar.captured;
+        if let Some(sidecar) = find_sibling(all, parent, &candidate) {
+            merge_sidecar(&mut merged, sidecar);
         }
-        if merged.camera.is_none() {
-            merged.camera.clone_from(&sidecar.camera);
-        }
-        if merged.lens.is_none() {
-            merged.lens.clone_from(&sidecar.lens);
-        }
-        if merged.latitude.is_none() {
-            merged.latitude = sidecar.latitude;
-        }
-        if merged.longitude.is_none() {
-            merged.longitude = sidecar.longitude;
-        }
-        push_unique(&mut merged.keywords, &sidecar.keywords);
-        push_unique(&mut merged.captions, &sidecar.captions);
     }
     merged
 }
@@ -761,6 +1437,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stat_by_dir_listing_matches_per_file_stat() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("a/b")).unwrap();
+        let mut paths = Vec::new();
+        for (i, rel) in ["top.jpg", "a/one.jpg", "a/b/two.jpg", "a/b/three.dng"]
+            .iter()
+            .enumerate()
+        {
+            let full = root.path().join(PathBuf::from_iter(rel.split('/')));
+            std::fs::write(&full, vec![b'x'; 10 + i]).unwrap();
+            paths.push(rel.to_string());
+        }
+        paths.push("a/b/missing.jpg".to_string());
+        paths.push("nodir/missing.jpg".to_string());
+        let per_file: Vec<_> = paths.iter().map(|p| stat_one(root.path(), p)).collect();
+        for threads in [1, 3, 8] {
+            let by_dir = stat_all_by_dir(root.path(), &paths, None, threads);
+            assert_eq!(by_dir.len(), paths.len());
+            for (want, got) in per_file.iter().zip(by_dir) {
+                assert_eq!(Some(want.clone()), got);
+            }
+        }
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(stat_all_by_dir(root.path(), &paths, Some(past), 2)
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
     fn date_bounds_and_antimeridian() {
         let day = parse_user_time("2016-03-21", false).unwrap();
         let end = parse_user_time("2016-03-21", true).unwrap();
@@ -846,6 +1551,54 @@ mod tests {
         assert_eq!(second["note.xmp"].lens.as_deref(), Some("Lens B"));
         let names = list_files(root.path());
         assert_eq!(names, vec!["note.xmp".to_string()]);
+    }
+
+    #[test]
+    fn warm_search_skips_only_unchanged_settled_files() {
+        let root = tempfile::tempdir().unwrap();
+        let mut relative = Vec::new();
+        for n in 0..5 {
+            let name = format!("n{n}.xmp");
+            std::fs::write(
+                root.path().join(&name),
+                xmp(&format!("cap {n}"), "kw", "Lens A"),
+            )
+            .unwrap();
+            relative.push(name);
+        }
+        let mut cache = Cache::with_racy_ns(0);
+        cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 5);
+        cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 5, "unchanged stat must not re-hash");
+
+        // Same size, one byte flipped, mtime put back: ctime still moves.
+        let path = root.path().join("n2.xmp");
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at = bytes.windows(5).position(|w| w == b"cap 2").unwrap() + 4;
+        bytes[at] = b'9';
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let again = cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 6, "exactly the changed file is re-hashed");
+        assert!(again["n2.xmp"].captions.iter().any(|c| c.contains("cap 9")));
+    }
+
+    #[test]
+    fn a_hash_taken_inside_the_racy_window_is_not_trusted() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.xmp"), xmp("c", "k", "L")).unwrap();
+        let relative = vec!["a.xmp".to_string()];
+        let mut cache = Cache::default();
+        cache.load(root.path(), &relative).unwrap();
+        cache.load(root.path(), &relative).unwrap();
+        assert_eq!(cache.hashed(), 2, "a just-written file is hashed again");
     }
 
     fn list_files(root: &Path) -> Vec<String> {
