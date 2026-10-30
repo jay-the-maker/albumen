@@ -20,7 +20,7 @@
 //! fsync, rename, so a kill mid-write leaves the old tree or the new one.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -62,35 +62,66 @@ fn device_of(_path: &Path) -> u64 {
 
 /// Read a tree. `Err` says why it was discarded; a missing file is
 /// `Err("missing")`.
+///
+/// Streams the file a line at a time and checks the body sha256 as it goes,
+/// so the whole file never sits in memory beside the parsed entries (at 380k
+/// files the text alone is ~90 MiB). A checksum or count mismatch at the end
+/// still discards everything: whole or not at all.
 pub fn load(file: &Path, root_id: &str) -> Result<HashMap<String, Entry>, String> {
-    let text = match std::fs::read(file) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|_| "not utf-8".to_string())?,
+    let handle = match std::fs::File::open(file) {
+        Ok(handle) => handle,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err("missing".to_string()),
         Err(err) => return Err(format!("unreadable: {err}")),
     };
-    let mut head = text.splitn(4, '\n');
-    let format = head.next().unwrap_or_default();
+    let mut reader = std::io::BufReader::with_capacity(1 << 20, handle);
+    let mut line = String::new();
+    let next_line = |reader: &mut std::io::BufReader<std::fs::File>,
+                     line: &mut String|
+     -> Result<bool, String> {
+        line.clear();
+        match reader.read_line(line) {
+            Ok(0) => Ok(false),
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+                Err("not utf-8".to_string())
+            }
+            Err(err) => Err(format!("unreadable: {err}")),
+        }
+    };
+    let head_line = |line: &str| line.strip_suffix('\n').unwrap_or(line).to_string();
+    next_line(&mut reader, &mut line)?;
+    let format = head_line(&line);
     if format != FORMAT {
         return Err(format!("wrong version {format:?}"));
     }
-    let root = head.next().unwrap_or_default();
-    if root.strip_prefix("root\t") != Some(root_id) {
+    next_line(&mut reader, &mut line)?;
+    if head_line(&line).strip_prefix("root\t") != Some(root_id) {
         return Err("another root or device".to_string());
     }
-    let check = head
-        .next()
-        .and_then(|line| line.strip_prefix("sha256\t"))
-        .ok_or("no checksum")?;
-    let (want, count) = check.split_once('\t').ok_or("no entry count")?;
-    let count: usize = count.parse().map_err(|_| "bad entry count")?;
-    let body = head.next().ok_or("truncated")?;
-    if hex(&sha2::Sha256::digest(body.as_bytes())) != want {
-        return Err("checksum mismatch".to_string());
+    if !next_line(&mut reader, &mut line)? {
+        return Err("no checksum".to_string());
     }
+    let check = head_line(&line);
+    let check = check.strip_prefix("sha256\t").ok_or("no checksum")?;
+    let (want, count) = check.split_once('\t').ok_or("no entry count")?;
+    let want = want.to_string();
+    let count: usize = count.parse().map_err(|_| "bad entry count")?;
+    let mut hasher = sha2::Sha256::new();
     let mut entries = HashMap::with_capacity(count);
-    for line in body.lines() {
-        let (path, entry) = parse_line(line).ok_or("bad entry")?;
+    let mut any = false;
+    while next_line(&mut reader, &mut line)? {
+        any = true;
+        hasher.update(line.as_bytes());
+        let row = line.strip_suffix('\n').unwrap_or(&line);
+        let row = row.strip_suffix('\r').unwrap_or(row);
+        let (path, entry) = parse_line(row).ok_or("bad entry")?;
         entries.insert(path, entry);
+    }
+    if !any {
+        return Err("truncated".to_string());
+    }
+    if hex(&hasher.finalize()) != want {
+        return Err("checksum mismatch".to_string());
     }
     if entries.len() != count {
         return Err("entry count mismatch".to_string());
@@ -104,18 +135,19 @@ pub fn save<'a>(
     root_id: &str,
     entries: impl Iterator<Item = (&'a String, &'a Entry)>,
 ) -> std::io::Result<()> {
-    let mut rows: Vec<String> = entries
-        .map(|(path, entry)| render_line(path, entry))
-        .collect();
-    rows.sort_unstable();
-    let mut body = String::with_capacity(rows.iter().map(|row| row.len() + 1).sum());
-    for row in &rows {
-        body.push_str(row);
-        body.push('\n');
+    // Sort references by path and render each row when it is needed (once
+    // for the hash, once for the write) instead of holding every rendered
+    // row: at 380k files the rows alone were ~90 MiB on top of the map.
+    let mut rows: Vec<(&'a String, &'a Entry)> = entries.collect();
+    rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let mut hasher = sha2::Sha256::new();
+    for (path, entry) in &rows {
+        hasher.update(render_line(path, entry).as_bytes());
+        hasher.update(b"\n");
     }
     let head = format!(
         "{FORMAT}\nroot\t{root_id}\nsha256\t{}\t{}\n",
-        hex(&sha2::Sha256::digest(body.as_bytes())),
+        hex(&hasher.finalize()),
         rows.len()
     );
     if let Some(dir) = file.parent() {
@@ -123,15 +155,19 @@ pub fn save<'a>(
     }
     let temp = file.with_extension(format!("search.tmp-{}", std::process::id()));
     let written = (|| {
-        let mut out = std::fs::File::create(&temp)?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&temp)?);
         out.write_all(head.as_bytes())?;
-        if std::env::var(CRASH_ENV).is_ok_and(|value| value == "before-rename") {
-            out.write_all(&body.as_bytes()[..body.len() / 2])?;
-            out.sync_all()?;
+        let crash = std::env::var(CRASH_ENV).is_ok_and(|value| value == "before-rename");
+        let stop = if crash { rows.len() / 2 } else { rows.len() };
+        for (path, entry) in &rows[..stop] {
+            out.write_all(render_line(path, entry).as_bytes())?;
+            out.write_all(b"\n")?;
+        }
+        let out = out.into_inner().map_err(|err| err.into_error())?;
+        out.sync_all()?;
+        if crash {
             std::process::abort();
         }
-        out.write_all(body.as_bytes())?;
-        out.sync_all()?;
         drop(out);
         std::fs::rename(&temp, file)
     })();

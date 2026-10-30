@@ -536,6 +536,12 @@ impl Cache {
         }
         self.tree = Some(file.clone());
         match crate::search_tree::load(&file, root_id) {
+            Ok(entries) if self.entries.is_empty() && cache_item_limit().is_none() => {
+                // Nothing to merge and no limit: take the loaded map as is
+                // rather than re-inserting it, which held two full maps at once.
+                self.entries = entries;
+                "loaded".to_string()
+            }
             Ok(entries) => {
                 let limit = cache_item_limit().unwrap_or(usize::MAX);
                 for (path, entry) in entries {
