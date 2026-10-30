@@ -248,7 +248,7 @@ fn several_destinations_report_each_and_exit_with_the_worst() {
     assert!(blocks[1].starts_with("stale: "));
     assert!(blocks[2].starts_with("not backed up: "));
     assert!(
-        blocks[3].starts_with("3 destinations: 1 ok, 1 stale, 1 not backed up\n"),
+        blocks[3].starts_with("3 backups: 1 ok, 1 stale, 1 not backed up\n"),
         "{text}"
     );
     assert_plain_words(&text);
@@ -259,10 +259,7 @@ fn several_destinations_report_each_and_exit_with_the_worst() {
     let (code, text) = status(&[p(&gone), p(&fresh)]);
     assert_eq!(code, 4, "{text}");
     assert!(text.contains("\n\nok: backup checked"), "{text}");
-    assert!(
-        text.contains("2 destinations: 1 ok, 1 unreadable"),
-        "{text}"
-    );
+    assert!(text.contains("2 backups: 1 ok, 1 unreadable"), "{text}");
     assert_next_rules(code, &text);
 }
 

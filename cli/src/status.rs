@@ -325,7 +325,7 @@ pub fn summary(reports: &[Report]) -> Option<(String, Option<String>)> {
             parts.push(format!("{n} {}", state.word()));
         }
     }
-    let line = format!("{} destinations: {}", reports.len(), parts.join(", "));
+    let line = format!("{} backups: {}", reports.len(), parts.join(", "));
     let worst = reports.iter().max_by_key(|r| (r.state.rank(), r.state));
     Some((line, worst.and_then(|r| r.next.clone())))
 }

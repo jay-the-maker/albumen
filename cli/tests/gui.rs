@@ -131,7 +131,7 @@ fn health_summary_and_next_match_the_cli_word_for_word() {
     let lines: Vec<&str> = text.lines().collect();
     let summary = status["summary"].as_str().unwrap();
     let next = status["summary_next"].as_str().unwrap();
-    assert!(summary.starts_with("4 destinations: "), "{summary}");
+    assert!(summary.starts_with("4 backups: "), "{summary}");
     assert_eq!(lines[lines.len() - 2], summary);
     assert_eq!(lines[lines.len() - 1], next);
     assert_eq!(status["exit"].as_i64(), out.status.code().map(i64::from));
