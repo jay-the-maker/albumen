@@ -151,10 +151,15 @@ fn readers_keep_answering_while_one_writer_saves() {
     let fallbacks = Arc::new(AtomicU64::new(0));
     let partials = Arc::new(AtomicU64::new(0));
     let read_ms = Arc::new(Mutex::new(Vec::new()));
+    // Diagnostics only (no bar): when each slow read started, and when each
+    // writer refresh (walk + save) ran, on one clock.
+    let t0 = Instant::now();
+    let slow_reads: Arc<Mutex<Vec<(f64, f64)>>> = Arc::new(Mutex::new(Vec::new()));
     let readers: Vec<_> = (0..2)
         .map(|_| {
             let (file, stop, counts) = (file.clone(), stop.clone(), counts.clone());
             let checked = checked.clone();
+            let slow_reads = slow_reads.clone();
             let (reads, parse_failures, fallbacks, partials, read_ms) = (
                 reads.clone(),
                 parse_failures.clone(),
@@ -166,10 +171,12 @@ fn readers_keep_answering_while_one_writer_saves() {
                 while !stop.load(Ordering::Relaxed) {
                     let t = Instant::now();
                     let got = read_saved_file(&file);
-                    read_ms
-                        .lock()
-                        .unwrap()
-                        .push(t.elapsed().as_secs_f64() * 1000.0);
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    read_ms.lock().unwrap().push(ms);
+                    if ms > 50.0 {
+                        let at = (t - t0).as_secs_f64() * 1000.0;
+                        slow_reads.lock().unwrap().push((at, ms));
+                    }
                     reads.fetch_add(1, Ordering::Relaxed);
                     match got {
                         Ok((generation, paths)) => {
@@ -201,6 +208,21 @@ fn readers_keep_answering_while_one_writer_saves() {
     let mut base = gui_pages(&addr, 300);
     let base_p50 = pct(&mut base, 0.50);
     let base_p95 = pct(&mut base, 0.95);
+    let base_max = pct(&mut base, 1.0);
+    // Diagnostic control (no bar): single requests spaced out like the
+    // write-phase samples, with no writer running.
+    let mut spaced: Vec<f64> = (0..300)
+        .flat_map(|_| {
+            std::thread::sleep(Duration::from_millis(5));
+            gui_pages(&addr, 1)
+        })
+        .collect();
+    let (spaced_p50, spaced_p95, spaced_max) = (
+        pct(&mut spaced, 0.50),
+        pct(&mut spaced, 0.95),
+        pct(&mut spaced, 1.0),
+    );
+    let mut windows: Vec<(f64, f64)> = Vec::new();
 
     let mut during = Vec::new();
     let mut serial = 0u64;
@@ -216,7 +238,9 @@ fn readers_keep_answering_while_one_writer_saves() {
             std::fs::remove_file(library.path().join(&rel)).unwrap();
             all.remove(&rel);
         }
+        let w0 = (Instant::now() - t0).as_secs_f64() * 1000.0;
         writer.refresh().unwrap();
+        windows.push((w0, (Instant::now() - t0).as_secs_f64() * 1000.0));
         if writer.save_error.is_some() {
             save_errors += 1;
         }
@@ -234,6 +258,25 @@ fn readers_keep_answering_while_one_writer_saves() {
     }
     let p50 = pct(&mut during, 0.50);
     let p95 = pct(&mut during, 0.95);
+    let write_max = pct(&mut during, 1.0);
+    let slow = slow_reads.lock().unwrap().clone();
+    let overlapping = slow
+        .iter()
+        .filter(|(at, ms)| windows.iter().any(|(a, b)| *at < *b && at + ms > *a))
+        .count();
+    let mut refresh: Vec<f64> = windows.iter().map(|(a, b)| b - a).collect();
+    let (rf50, rfmax) = (pct(&mut refresh, 0.50), pct(&mut refresh, 1.0));
+    for (at, ms) in slow.iter().take(10) {
+        println!("M6 X1 SLOW_READ at_ms={at:.1} took_ms={ms:.1}");
+    }
+    println!(
+        "M6 X1 DIAG gui_base_max_ms={base_max:.2} gui_spaced_p50_ms={spaced_p50:.2} \
+         gui_spaced_p95_ms={spaced_p95:.2} gui_spaced_max_ms={spaced_max:.2} gui_write_max_ms={write_max:.2} \
+         gui_write_samples={} writer_refresh_p50_ms={rf50:.2} writer_refresh_max_ms={rfmax:.2} \
+         slow_reads_over_50ms={} slow_reads_overlapping_a_writer_refresh={overlapping}",
+        during.len(),
+        slow.len()
+    );
     let mut rm = read_ms.lock().unwrap().clone();
     let (r50, r95, rmax) = (pct(&mut rm, 0.50), pct(&mut rm, 0.95), pct(&mut rm, 1.0));
     let (reads, parse_failures, fallbacks, partials) = (
