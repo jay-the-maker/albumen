@@ -130,7 +130,14 @@ fn lines(text: &str) -> Vec<&str> {
 }
 
 fn assert_plain_words(text: &str) {
-    let lower = text.to_lowercase();
+    // Paths are the test's own temp dirs, whose random names can contain any
+    // letters; check only the words Albumen wrote.
+    let lower = text
+        .split_whitespace()
+        .filter(|w| !w.contains('/') && !w.contains('\\'))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     for word in ["manifest", "hash", "sha", "drift"] {
         assert!(
             !lower.contains(word),
@@ -259,7 +266,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
             p(&never),
             &format!(
                 "next: to back up this folder, run albumen backup --from {} --to <your backup disk>",
-                p(&never)
+                sq(p(&never))
             ),
         ]
     );
