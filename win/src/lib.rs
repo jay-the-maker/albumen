@@ -305,3 +305,106 @@ pub fn reserve_blocks(file: &std::fs::File, len: u64) -> std::io::Result<()> {
         Ok(())
     }
 }
+
+/// Minutes east of UTC that this computer's zone applies at `unix` seconds,
+/// or `None` if the OS cannot say. Linux and macOS: `tzset` then
+/// `localtime_r`'s `tm_gmtoff`, so `TZ` is honoured. Windows: the OS zone and
+/// that year's DST rules via `SystemTimeToTzSpecificLocalTimeEx`; `TZ` has
+/// no effect there.
+#[cfg(unix)]
+pub fn utc_offset_minutes(unix: i64) -> Option<i64> {
+    extern "C" {
+        fn tzset();
+    }
+    let t: libc::time_t = unix.try_into().ok()?;
+    // SAFETY: tzset takes no arguments; localtime_r writes only into `tm`,
+    // which we own, and reports failure with a null return.
+    let tm = unsafe {
+        tzset();
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return None;
+        }
+        tm
+    };
+    let minutes = i64::from(tm.tm_gmtoff) / 60;
+    (minutes.abs() <= 14 * 60).then_some(minutes)
+}
+
+/// See the unix version.
+#[cfg(windows)]
+pub fn utc_offset_minutes(unix: i64) -> Option<i64> {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::{
+        GetDynamicTimeZoneInformation, SystemTimeToTzSpecificLocalTimeEx,
+        DYNAMIC_TIME_ZONE_INFORMATION, TIME_ZONE_ID_INVALID,
+    };
+    let (year, month, day, secs) = civil(unix);
+    let utc = SYSTEMTIME {
+        wYear: u16::try_from(year).ok()?,
+        wMonth: month as u16,
+        wDayOfWeek: 0,
+        wDay: day as u16,
+        wHour: (secs / 3_600) as u16,
+        wMinute: ((secs % 3_600) / 60) as u16,
+        wSecond: (secs % 60) as u16,
+        wMilliseconds: 0,
+    };
+    // SAFETY: both structs are plain data we own; the calls only write into
+    // them and report failure through their return values.
+    let local = unsafe {
+        let mut zone: DYNAMIC_TIME_ZONE_INFORMATION = std::mem::zeroed();
+        if GetDynamicTimeZoneInformation(&mut zone) == TIME_ZONE_ID_INVALID {
+            return None;
+        }
+        let mut local: SYSTEMTIME = std::mem::zeroed();
+        if SystemTimeToTzSpecificLocalTimeEx(&zone, &utc, &mut local) == 0 {
+            return None;
+        }
+        local
+    };
+    let local_unix = days_from_civil(
+        i64::from(local.wYear),
+        i64::from(local.wMonth),
+        i64::from(local.wDay),
+    ) * 86_400
+        + i64::from(local.wHour) * 3_600
+        + i64::from(local.wMinute) * 60
+        + i64::from(local.wSecond);
+    let minutes = (local_unix - unix).div_euclid(60);
+    (minutes.abs() <= 14 * 60).then_some(minutes)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn utc_offset_minutes(unix: i64) -> Option<i64> {
+    let _ = unix;
+    None
+}
+
+/// (year, month, day, seconds into the day) for Unix seconds (Hinnant).
+#[cfg(windows)]
+fn civil(unix: i64) -> (i64, i64, i64, i64) {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(month <= 2), month, day, secs)
+}
+
+/// Days since 1970-01-01 for a civil date (Hinnant).
+#[cfg(windows)]
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
