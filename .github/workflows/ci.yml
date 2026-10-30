@@ -307,6 +307,28 @@ jobs:
       - name: Compare the scaled run with the stored baseline
         run: cargo run --release --locked -p albumen-bench -- --check
 
+  gui-behaviour:
+    name: gui behaviour (headless Chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      # Node 22+ has a built-in WebSocket; Chrome is on the ubuntu-24.04 image.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the CLI
+        run: cargo build --locked -p albumen --bin albumen
+
+      - name: Click through the demo library with real input
+        run: node scripts/gui-behaviour.mjs target/debug/albumen
+
   throughput:
     name: import throughput (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
