@@ -236,3 +236,99 @@ fn ok_card_says_match_what_was_backed_up_not_your_originals() {
     );
     assert!(!status.contains("all match your originals"));
 }
+
+/// iPhoto-style layout: a source list instead of step tabs, a live zoom
+/// slider, and CLI plumbing only under "Show details".
+#[test]
+fn page_is_a_source_list_library_with_plumbing_under_show_details() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (code, page) = get(&addr, "/");
+    assert_eq!(code, 200);
+    for needle in [
+        "<aside id=\"side\">",
+        "<h2>LIBRARY</h2>",
+        "<h2>BACKUPS</h2>",
+        "<button data-s=\"events\"><span>Events</span></button>",
+        "<button data-s=\"photos\" class=\"on\"><span>Photos</span></button>",
+        "<section id=\"photos\" class=\"view\">",
+        "<section id=\"health\" class=\"view\" hidden>",
+        "<input type=\"range\" id=\"zoom\"",
+        "$('zoom').oninput=",
+        "<summary>Show details</summary>",
+        ">Info</button>",
+        ">Slideshow</button>",
+        ">Back up</button>",
+        ">Check backup</button>",
+        // Honest wording kept exactly.
+        "Albumen only reads this folder. Nothing in it is changed, moved or deleted.",
+        "Copies new and changed photos to a local or mounted folder, then checks every copy.",
+        "One honest state per backup folder.",
+        "Re-reads every backed-up copy and keeps a proof file you can open.",
+        " items match, checked with SHA-256.",
+        "--ok:#1f7a3f;--stale:#b26a00;--bad:#b3261e;--none:#6b7078;--accent:#2b5fd9",
+    ] {
+        assert!(page.contains(needle), "missing {needle}");
+    }
+    for gone in [
+        "<nav>",
+        "1 Choose photos",
+        "Not verified (exit",
+        ">Edit<",
+        ">Share<",
+        ">Faces<",
+        ">Places<",
+    ] {
+        assert!(!page.contains(gone), "still has {gone}");
+    }
+    // Every "runs:" line and the raw output sit inside a <details>.
+    for (at, _) in page.match_indices("class=\"runs\"") {
+        let open = page[..at].rfind("<details").expect("runs inside details");
+        let close = page[..at].rfind("</details>");
+        assert!(
+            close.map_or(true, |c| c < open),
+            "runs line outside details"
+        );
+    }
+    // No monospace font on the home (Photos) screen: only details use it.
+    let style = &page[page.find("<style>").unwrap()..page.find("</style>").unwrap()];
+    for rule in style.split('}').filter(|r| r.contains("monospace")) {
+        assert!(
+            rule.contains("details.more"),
+            "monospace outside details: {rule}"
+        );
+    }
+}
+
+/// Events come from the capture time stored in each photo, oldest first.
+#[test]
+fn demo_photos_group_into_four_events_by_capture_date() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, library) = get(&addr, "/api/library");
+    let library: serde_json::Value = serde_json::from_str(&library).unwrap();
+    let events: Vec<(String, u64)> = library["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["title"].as_str().unwrap().to_string(),
+                e["count"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            ("Oct 3, 2026".to_string(), 3),
+            ("Oct 4, 2026".to_string(), 2),
+            ("Oct 11, 2026".to_string(), 4),
+            ("Oct 18, 2026".to_string(), 3),
+        ]
+    );
+    let first = &library["images"][0];
+    assert_eq!(first["taken_from"], "photo metadata", "{first}");
+    assert!(first["taken"].as_str().unwrap().starts_with("2026-10-"));
+    assert_eq!(library["events"][0]["key"], "2026-10-03 harbour.png");
+}
