@@ -377,7 +377,12 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
     );
     // The temp path itself may contain "albumen" (e.g. a checkout under
     // sl-albumen), so look only at the words around the quoted paths.
-    let words = text.lines().last().unwrap().replace(&q(&first), "");
+    let words = text
+        .lines()
+        .last()
+        .unwrap()
+        .replace(&q(&format!("{first}.changed")), "")
+        .replace(&q(&first), "");
     assert!(!words.contains("albumen"), "{text}");
     assert_plain_words(&text);
     assert_next_rules(code, &text);
