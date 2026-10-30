@@ -775,7 +775,18 @@ fn library_files(library: &Path) -> Vec<String> {
         });
     }
     out.sort();
-    out
+    without_hidden(library, out)
+}
+
+/// `paths` minus what the hide files (receiver tombstones, the family log)
+/// say is hidden, read now on every listing (M7, A8). The index stays a
+/// plain path cache; the files are the only source of truth.
+fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
+    let hidden = albumen_ingest::hides::hidden_paths(library, &paths, None);
+    if !hidden.paths.is_empty() {
+        paths.retain(|p| !hidden.paths.contains(p));
+    }
+    paths
 }
 
 /// The library's files from the persisted M3 path index (the one search
@@ -832,6 +843,7 @@ fn library_files_indexed_in(
             *note.lock().unwrap() = index.save_error.clone();
             let mut paths = index.into_paths();
             paths.sort();
+            let paths = without_hidden(library, paths);
             let photos = paths.iter().filter(|p| is_photo(p)).count();
             found.fetch_max(photos, Ordering::Relaxed);
             paths
