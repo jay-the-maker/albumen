@@ -598,9 +598,145 @@ fn stat_one(root: &Path, relative: &str) -> Result<StatKey, String> {
     let full = root.join(relative);
     #[cfg(not(unix))]
     let full = root.join(PathBuf::from_iter(relative.split('/')));
+    #[cfg(windows)]
+    return win_stat::stat_path(&full).map_err(|err| format!("{relative}: {err}"));
+    #[cfg(not(windows))]
     std::fs::metadata(&full)
         .map(|meta| StatKey::of(&meta))
         .map_err(|err| format!("{relative}: {err}"))
+}
+
+/// Windows stat with a real change time.
+///
+/// `std::fs::Metadata` has no ctime on Windows, so a same-size edit with the
+/// modified time put back looked unchanged and a warm search would report a
+/// stale answer as fresh. NTFS keeps a ChangeTime that moves on every data
+/// or attribute change; it is used here exactly as Linux uses ctime.
+#[cfg(windows)]
+mod win_stat {
+    use super::StatKey;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    };
+
+    const ATTR_DIRECTORY: u32 = 0x10;
+    const ATTR_REPARSE_POINT: u32 = 0x400;
+
+    /// FILETIME (100 ns since 1601) to ns since 1970, as `std` converts
+    /// `created()`/`modified()`; -1 before 1970.
+    pub(super) fn ns(filetime: i64) -> i128 {
+        const EPOCH: i64 = 116_444_736_000_000_000;
+        if filetime >= EPOCH {
+            i128::from(filetime - EPOCH) * 100
+        } else {
+            -1
+        }
+    }
+
+    fn key(created: i64, written: i64, changed: i64, size: u64) -> StatKey {
+        let mtime_ns = ns(written);
+        StatKey {
+            device: 0,
+            inode: ns(created) as u64,
+            size,
+            mtime_ns,
+            ctime_ns: if changed == 0 { mtime_ns } else { ns(changed) },
+        }
+    }
+
+    /// One file: one handle opened for attributes only, then FileBasicInfo
+    /// for ChangeTime. If ChangeTime cannot be read, ctime is the mtime.
+    pub(super) fn stat_path(full: &Path) -> std::io::Result<StatKey> {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(full)?;
+        let meta = file.metadata()?;
+        let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle is open for the call and the buffer is a
+        // FILE_BASIC_INFO of the size passed.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle() as _,
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } != 0;
+        let mut out = StatKey::of(&meta);
+        if ok && basic.ChangeTime != 0 {
+            out.ctime_ns = ns(basic.ChangeTime);
+        }
+        Ok(out)
+    }
+
+    /// Every regular file in one directory with its ChangeTime, from one
+    /// directory handle (FileIdBothDirectoryInfo), with no per-file open.
+    /// Entries whose ChangeTime is zero are left out so the caller stats
+    /// them file by file. An unreadable directory gives an empty map.
+    pub(super) fn list_dir(dir: &Path) -> HashMap<OsString, StatKey> {
+        let mut listed = HashMap::new();
+        let Ok(handle) = std::fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+        else {
+            return listed;
+        };
+        let mut buf = vec![0u64; 8192]; // 64 KiB, 8-byte aligned
+        let mut class = FileIdBothDirectoryRestartInfo;
+        loop {
+            // SAFETY: the handle is an open directory and the buffer is
+            // valid for the byte length passed.
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    handle.as_raw_handle() as _,
+                    class,
+                    buf.as_mut_ptr().cast(),
+                    (buf.len() * 8) as u32,
+                )
+            } != 0;
+            if !ok {
+                break; // ERROR_NO_MORE_FILES, or unreadable: fallback covers it
+            }
+            class = FileIdBothDirectoryInfo;
+            let base = buf.as_ptr() as *const u8;
+            let mut at = 0usize;
+            loop {
+                // SAFETY: `at` follows NextEntryOffset chains the system
+                // wrote inside the buffer; each entry is 8-byte aligned.
+                let entry = unsafe { &*(base.add(at) as *const FILE_ID_BOTH_DIR_INFO) };
+                let name_len = entry.FileNameLength as usize / 2;
+                // SAFETY: FileName holds FileNameLength bytes in the buffer.
+                let name = unsafe { std::slice::from_raw_parts(entry.FileName.as_ptr(), name_len) };
+                let regular = entry.FileAttributes & (ATTR_DIRECTORY | ATTR_REPARSE_POINT) == 0;
+                if regular && entry.ChangeTime != 0 {
+                    listed.insert(
+                        OsString::from_wide(name),
+                        key(
+                            entry.CreationTime,
+                            entry.LastWriteTime,
+                            entry.ChangeTime,
+                            entry.EndOfFile as u64,
+                        ),
+                    );
+                }
+                if entry.NextEntryOffset == 0 {
+                    break;
+                }
+                at += entry.NextEntryOffset as usize;
+            }
+        }
+        listed
+    }
 }
 
 /// Stat every path on a small thread pool, in order. A path not reached
@@ -642,10 +778,12 @@ pub fn stat_all<S: AsRef<str> + Sync>(
 
 /// Stat by listing each directory once instead of opening every file.
 ///
-/// On Windows `std::fs::metadata` opens a handle per file (CreateFileW), and
+/// On Windows a per-file stat opens a handle per file (CreateFileW), and
 /// every open passes the antivirus filter: 380k opens cost ~2.4 s on 8
-/// threads. `DirEntry::metadata` there comes from the directory listing
-/// (FindFirstFile/FindNextFile) with no open, ~0.4 s for the same tree.
+/// threads. Here each directory is read through one handle with
+/// GetFileInformationByHandleEx(FileIdBothDirectoryInfo), whose entries
+/// carry size, LastWriteTime and ChangeTime with no per-file open; an entry
+/// with no ChangeTime is stat'ed file by file.
 /// NTFS can lag a directory entry's size and time while a writer still has
 /// the file open; the entry is current once the writer closes it. Set
 /// `ALBUMEN_STAT_PER_FILE=1` to stat file by file. A path the listing does
@@ -681,8 +819,12 @@ pub(crate) fn stat_all_by_dir<S: AsRef<str> + Sync>(
             } else {
                 root.join(PathBuf::from_iter(dir.split('/')))
             };
+            #[cfg(windows)]
+            let listed = win_stat::list_dir(&full_dir);
+            #[cfg(not(windows))]
             let mut listed: std::collections::HashMap<std::ffi::OsString, StatKey> =
                 std::collections::HashMap::new();
+            #[cfg(not(windows))]
             if let Ok(entries) = std::fs::read_dir(&full_dir) {
                 for entry in entries.flatten() {
                     if let Ok(meta) = entry.metadata() {
