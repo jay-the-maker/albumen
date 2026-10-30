@@ -79,7 +79,17 @@ pub struct Report {
 /// backslashes, so spaces, apostrophes and brackets stay literal.
 fn cmd_quote(text: &str) -> String {
     if cfg!(windows) {
-        format!("'{}'", text.replace('\'', "''"))
+        // PowerShell treats the curly quotes U+2018..U+201B like ' inside a
+        // single-quoted string, so each one is doubled too.
+        let mut quoted = String::from("'");
+        for c in text.chars() {
+            if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                quoted.push(c);
+            }
+            quoted.push(c);
+        }
+        quoted.push('\'');
+        quoted
     } else {
         crate::proof::shell_quote(text)
     }

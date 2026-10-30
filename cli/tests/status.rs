@@ -293,7 +293,14 @@ fn move_line(more: &str, path: &str, quote: fn(&str) -> String) -> String {
 /// quotes, or PowerShell single quotes on Windows.
 fn q(text: &str) -> String {
     if cfg!(windows) {
-        format!("'{}'", text.replace('\'', "''"))
+        let mut quoted = String::from("'");
+        for c in text.chars() {
+            if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                quoted.push(c);
+            }
+            quoted.push(c);
+        }
+        quoted + "'"
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
@@ -371,8 +378,23 @@ fn bad_max_age_is_a_usage_error() {
 #[cfg(windows)]
 #[test]
 fn printed_move_item_line_moves_the_changed_copy_in_powershell() {
+    let line = move_item_through_powershell("Jay's [2026] backup");
+    assert!(line.contains("''s [2026] backup"), "{line}");
+}
+
+/// A curly apostrophe (U+2019) also ends a PowerShell single-quoted string
+/// unless it is doubled, so a folder named Jay’s backup must move too.
+#[cfg(windows)]
+#[test]
+fn printed_move_item_line_handles_a_curly_apostrophe() {
+    let line = move_item_through_powershell("Jay\u{2019}s backup");
+    assert!(line.contains("Jay\u{2019}\u{2019}s backup"), "{line}");
+}
+
+#[cfg(windows)]
+fn move_item_through_powershell(folder: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
-    let dest = backup(tmp.path(), "Jay's [2026] backup", 2);
+    let dest = backup(tmp.path(), folder, 2);
     let original = dest.join("roll").join("IMG_0001.jpg");
     let mut bytes = fs::read(&original).unwrap();
     bytes[0] ^= 1;
@@ -380,13 +402,12 @@ fn printed_move_item_line_moves_the_changed_copy_in_powershell() {
 
     let (code, text) = status(&[p(&dest)]);
     assert_eq!(code, 1, "{text}");
-    let last = text.lines().last().unwrap();
+    let last = text.lines().last().unwrap().to_string();
     let command = last
         .split_once("for example: ")
         .map(|(_, c)| c)
         .unwrap_or_else(|| panic!("no command in {last:?}"));
     assert!(command.starts_with("Move-Item -LiteralPath '"), "{last}");
-    assert!(command.contains("''s [2026] backup"), "{last}");
     println!("next line: {last}");
 
     let run = Command::new("powershell")
@@ -404,4 +425,5 @@ fn printed_move_item_line_moves_the_changed_copy_in_powershell() {
     assert!(!original.exists(), "changed copy still in place");
     assert_eq!(fs::read(&aside).unwrap(), bytes, "moved copy differs");
     println!("moved: {} -> {}", original.display(), aside.display());
+    last
 }
