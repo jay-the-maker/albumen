@@ -388,6 +388,8 @@ async function init(){
  $('lib').textContent='Folder: '+lib.library;
  $('lib-count').textContent=countText(lib.images.map(i=>i.path));
  try{const f=await j('/api/found');$('index-note').hidden=!f.index_note;$('index-note').textContent=f.index_note?'Updating the library index…':'';$('index-note').title=f.index_note||'';if(f.index_note)pollIndex();$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';}catch(e){}
+ // The hide line follows the files: a hide file that breaks or is fixed shows on the next poll.
+ setInterval(async()=>{try{const f=await j('/api/found');$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';}catch(e){}},10000);
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);sideDests(st);
  for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=base(d);o.title=d;$(sel).append(o);}}
  $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';

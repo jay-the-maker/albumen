@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::export::TOMBSTONE_SUFFIX;
+pub use crate::export::TOMBSTONE_SUFFIX;
 
 /// What [`hidden_paths`] found.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -113,6 +113,10 @@ fn family_object(rel: &str) -> Option<(&str, &str)> {
     (sha.len() == 64 && sha.starts_with(hh)).then_some((member, sha))
 }
 
+/// Start of the error (and of the gui's line) when the family log can't be
+/// read; the path follows, then a newline and the detail.
+pub const FAMILY_LOG_UNREADABLE: &str = "Family photos hidden: can't read the family log ";
+
 fn family_state(library: &Path, paths: &[String], viewer: Option<&str>, out: &mut Hidden) {
     let value: Value = match crate::family::manifest_json(library)
         .map_err(|err| err.to_string())
@@ -120,7 +124,17 @@ fn family_state(library: &Path, paths: &[String], viewer: Option<&str>, out: &mu
     {
         Ok(v) => v,
         Err(err) => {
-            out.errors.push(format!("family manifest: {err}"));
+            // Fail closed: every family object is hidden for everyone until
+            // the log reads again, and the message says exactly that.
+            out.errors.push(format!(
+                "{FAMILY_LOG_UNREADABLE}{}\n{err}",
+                library.join("members").display()
+            ));
+            for rel in paths {
+                if family_object(rel).is_some() {
+                    out.paths.insert(rel.clone());
+                }
+            }
             return;
         }
     };

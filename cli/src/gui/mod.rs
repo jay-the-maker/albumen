@@ -786,14 +786,49 @@ static HIDE_NOTE: Mutex<Option<String>> = Mutex::new(None);
 /// One quiet line for hide problems: the photo stays hidden (fail closed),
 /// and the user is told which file made that call.
 fn hide_note(errors: &[String]) -> Option<String> {
-    match errors {
+    use albumen_ingest::hides::FAMILY_LOG_UNREADABLE;
+    // The family-log line is shown as is: "Family photos hidden: can't read
+    // the family log <path>" (the detail after the path goes to the log).
+    let family = errors
+        .iter()
+        .find(|e| e.starts_with(FAMILY_LOG_UNREADABLE))
+        .map(|e| {
+            let path = &e[FAMILY_LOG_UNREADABLE.len()..];
+            let path = path.split('\n').next().unwrap_or(path);
+            format!("{FAMILY_LOG_UNREADABLE}{path}")
+        });
+    let rest: Vec<&String> = errors
+        .iter()
+        .filter(|e| !e.starts_with(FAMILY_LOG_UNREADABLE))
+        .collect();
+    let receiver = match rest.as_slice() {
         [] => None,
         [one] => Some(format!("Hidden because a hide file can't be read: {one}")),
-        [first, rest @ ..] => Some(format!(
+        [first, more @ ..] => Some(format!(
             "{} hide files can't be read, so their photos stay hidden. First: {first}",
-            rest.len() + 1
+            more.len() + 1
         )),
+    };
+    match (family, receiver) {
+        (Some(f), Some(r)) => Some(format!("{f} · {r}")),
+        (f, r) => f.or(r),
     }
+}
+
+/// The hide files the last listing read (receiver tombstones). None until
+/// a listing exists. `/api/found` re-reads them (and the family log) on
+/// each poll so the quiet line follows a file that breaks or is fixed.
+static HIDE_WATCH: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// The quiet line as of now: re-checked against the files once a listing
+/// exists, else what the first walk found so far.
+fn current_hide_note(library: &Path) -> Option<String> {
+    let watch = HIDE_WATCH.lock().unwrap().clone();
+    if let Some(watch) = watch {
+        let hidden = albumen_ingest::hides::hidden_paths(library, &watch, None);
+        *HIDE_NOTE.lock().unwrap() = hide_note(&hidden.errors);
+    }
+    HIDE_NOTE.lock().unwrap().clone()
 }
 
 /// `paths` minus what the hide files (receiver tombstones, the family log)
@@ -803,9 +838,16 @@ fn hide_note(errors: &[String]) -> Option<String> {
 fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
     let hidden = albumen_ingest::hides::hidden_paths(library, &paths, None);
     for err in &hidden.errors {
-        eprintln!("albumen gui: hide: {err}");
+        eprintln!("albumen gui: hide: {}", err.replace('\n', ": "));
     }
     *HIDE_NOTE.lock().unwrap() = hide_note(&hidden.errors);
+    *HIDE_WATCH.lock().unwrap() = Some(
+        paths
+            .iter()
+            .filter(|p| p.ends_with(albumen_ingest::hides::TOMBSTONE_SUFFIX))
+            .cloned()
+            .collect(),
+    );
     if !hidden.paths.is_empty() {
         paths.retain(|p| !hidden.paths.contains(p));
     }
@@ -836,7 +878,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "found": server.found.load(std::sync::atomic::Ordering::Relaxed),
         "paths": paths,
         "index_note": server.index_note.lock().unwrap().clone(),
-        "hide_note": HIDE_NOTE.lock().unwrap().clone(),
+        "hide_note": current_hide_note(&server.config.library),
     })
 }
 
@@ -1451,6 +1493,13 @@ mod tests {
         let two = hide_note(&["a.jpg.albumen-tombstone: e".into(), "b: e".into()]).unwrap();
         assert!(two.starts_with("2 hide files can't be read"), "{two}");
         assert!(two.contains("a.jpg.albumen-tombstone"), "{two}");
+        let fam = hide_note(&[
+            "Family photos hidden: can't read the family log /l (x)/members\nio error".into(),
+        ]);
+        assert_eq!(
+            fam.as_deref(),
+            Some("Family photos hidden: can't read the family log /l (x)/members")
+        );
     }
 
     #[test]

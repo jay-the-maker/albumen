@@ -662,3 +662,107 @@ fn a_first_build_never_streams_a_hidden_tile() {
     }
     println!("M7 first-build polls={polls} streamed_max={streamed_seen} visible={visible_n}");
 }
+
+/// Wait for the listing, then return /api/found.
+fn ready_found(addr: &str) -> serde_json::Value {
+    let began = Instant::now();
+    loop {
+        let (_, body) = get(addr, "/api/library?offset=0&limit=1");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v["status"] == "ready" {
+            return found_page(addr);
+        }
+        assert!(began.elapsed() < Duration::from_secs(60), "never ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            files_under(&p, out);
+        } else {
+            out.push(p);
+        }
+    }
+}
+
+#[test]
+fn a_family_log_read_error_hides_every_family_object_and_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = family(tmp.path());
+    let mut objects = Vec::new();
+    for name in ["one.jpg", "two.jpg"] {
+        let src = tmp.path().join(name);
+        fs::write(&src, format!("synthetic-m7-famlog-{name}")).unwrap();
+        objects.push(family_add(&f, &src).0);
+    }
+    let index = tempfile::tempdir().unwrap();
+    for viewer in [&f.member_a, &f.member_b] {
+        let v = visible(&f.library, index.path(), Some(viewer));
+        assert!(objects.iter().all(|o| v.contains(o)), "before: {v:?}");
+    }
+    // Make the family log unreadable (synthetic fixture in a temp dir): a
+    // device's log directory becomes a plain file, so listing it fails.
+    let mut files = Vec::new();
+    files_under(&f.library.join("members"), &mut files);
+    let log_dir = files
+        .iter()
+        .filter_map(|p| p.ancestors().find(|a| a.ends_with("log")))
+        .next()
+        .expect("no family log dir")
+        .to_path_buf();
+    fs::remove_dir_all(&log_dir).unwrap();
+    fs::write(&log_dir, b"not a log directory").unwrap();
+    for viewer in [Some(f.member_a.as_str()), Some(f.member_b.as_str()), None] {
+        let h = hidden_paths(&f.library, &objects, viewer);
+        for o in &objects {
+            assert!(
+                h.paths.contains(o),
+                "{viewer:?} still sees {o} with a broken log"
+            );
+        }
+        assert_eq!(h.errors.len(), 1, "{:?}", h.errors);
+        assert!(
+            h.errors[0].starts_with("Family photos hidden: can't read the family log "),
+            "{:?}",
+            h.errors
+        );
+    }
+    let work = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let gui_index = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(&f.library, work.path(), gui_index.path(), home.path());
+    let found = ready_found(&addr);
+    let want = format!(
+        "Family photos hidden: can't read the family log {}",
+        f.library.join("members").display()
+    );
+    println!("M7 family-log note: {}", found["hide_note"]);
+    assert_eq!(found["hide_note"].as_str(), Some(want.as_str()));
+}
+
+#[test]
+fn the_hide_note_follows_a_hide_file_on_the_next_poll() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for name in ["IMG_0001.JPG", "IMG_0002.JPG"] {
+        fs::write(library.path().join(name), b"").unwrap();
+    }
+    let tomb = library.path().join("IMG_0002.JPG.albumen-tombstone");
+    fs::write(&tomb, br#"{"hidden":true}"#).unwrap();
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    assert!(ready_found(&addr)["hide_note"].is_null());
+    fs::write(&tomb, b"{").unwrap();
+    let broken = found_page(&addr);
+    let note = broken["hide_note"].as_str().unwrap_or_default().to_string();
+    println!("M7 hide-note after break: {note}");
+    assert!(note.contains("IMG_0002.JPG.albumen-tombstone"), "{broken}");
+    fs::write(&tomb, br#"{"hidden":true}"#).unwrap();
+    let fixed = found_page(&addr);
+    println!("M7 hide-note after fix: {}", fixed["hide_note"]);
+    assert!(fixed["hide_note"].is_null(), "{fixed}");
+}
