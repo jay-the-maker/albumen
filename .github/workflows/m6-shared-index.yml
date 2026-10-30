@@ -84,6 +84,8 @@ jobs:
 
       - name: M7 hidden photos stay hidden at ${{ github.event.inputs.files || '380000' }} files (M6 bars)
         run: |
+          # Diagnostic, no bar: the step log carries "M7 HIDE_POLL_DIAG ... hide_poll_ms="
+          # (one /api/found hide-line refresh after the listing; also in the RESULT line).
           # First tile <= 2 s, full listing (ready_ms) <= 60 s, and gui child peak RSS <= 332 MiB, with no hidden photo shown.
           ALBUMEN_M7_FILES=$FILES ALBUMEN_M7_BARS=1 M6_TREE_RSS=diag \
             M6_PKG=albumen M6_TEST=m7_hide_persist \
@@ -94,9 +96,9 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
-          # 8 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
-          grep -Eq '^test result: ok\. 8 passed; 0 failed; 0 ignored' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 8 tests green"; exit 1; }
+          # 9 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
+          grep -Eq '^test result: ok\. 9 passed; 0 failed; 0 ignored' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 9 tests green"; exit 1; }
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
         run: |
