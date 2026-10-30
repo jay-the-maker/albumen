@@ -78,7 +78,7 @@ fn demo_serves_page_and_four_honest_states() {
     );
     let (code, library) = get(&addr, "/api/library");
     assert_eq!(code, 200);
-    assert!(library.contains("\"files\":12"), "{library}");
+    assert!(library.contains("\"files\":19"), "{library}");
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn ok_card_says_match_what_was_backed_up_not_your_originals() {
     let card = json["destinations"][0]["text"].as_str().unwrap();
     assert_eq!(json["destinations"][0]["state"], "ok", "{card}");
     assert!(
-        card.contains("12 items, all match what was backed up"),
+        card.contains("19 items, all match what was backed up"),
         "{card}"
     );
     assert!(!status.contains("all match your originals"));
@@ -316,19 +316,33 @@ fn demo_photos_group_into_four_events_by_capture_date() {
             )
         })
         .collect();
+    // One shared fixture for every screen (R5): the IMG_0003 RAW + JPEG
+    // pair (2015, plus "pier.jpg", a copy of that JPEG whose camera time
+    // wins over its file name), HEIC only (2018), Oct 3 with a lone RAW, and
+    // the undated CR3 and NEF last.
     assert_eq!(
         events,
         [
-            ("Oct 3, 2026".to_string(), 3),
+            ("Sep 3, 2015".to_string(), 2),
+            ("Apr 1, 2018".to_string(), 1),
+            ("Oct 3, 2026".to_string(), 4),
             ("Oct 4, 2026".to_string(), 2),
             ("Oct 11, 2026".to_string(), 4),
             ("Oct 18, 2026".to_string(), 3),
+            ("No date".to_string(), 2),
         ]
     );
     let first = &library["images"][0];
     assert_eq!(first["taken_from"], "photo metadata", "{first}");
     assert!(first["taken"].as_str().unwrap().starts_with("2026-10-"));
-    assert_eq!(library["events"][0]["key"], "2026-10-03 harbour.png");
+    let oct3 = library["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["title"] == "Oct 3, 2026")
+        .unwrap();
+    let key = oct3["key"].as_str().unwrap();
+    assert!(key.ends_with(".png") || key.ends_with(".jpg"), "{oct3}");
 }
 
 /// Taste gate v1 FIX-1: every element the script looks up by id exists, so
@@ -386,35 +400,137 @@ fn heic_and_raw_get_placeholder_tiles() {
     assert!(page.contains("m.preview!==false"));
     let (_, library) = get(&addr, "/api/library");
     let library: serde_json::Value = serde_json::from_str(&library).unwrap();
-    assert!(library["images"]
+    let no_preview: Vec<&str> = library["images"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|i| i["preview"] == true));
+        .filter(|i| i["preview"] == false)
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        no_preview,
+        [
+            "2026-10-03 reef.dng",
+            "IMG_0002.heic",
+            "IMG_0101.cr3",
+            "IMG_0102.nef"
+        ]
+    );
 }
 
-/// FIX-4: Places and Faces are listed under LIBRARY as disabled
-/// 'not built yet' rows: no data-s, so no click opens a view.
+/// Attributes of an HTML start tag, e.g. `<button class="soon" disabled>`.
+fn attrs(tag: &str) -> Vec<(String, String)> {
+    let inner = tag.trim_start_matches('<').trim_end_matches('>');
+    let mut out = Vec::new();
+    let mut rest = inner.split_once(char::is_whitespace).map_or("", |x| x.1);
+    while let Some(start) = rest.find(|c: char| !c.is_whitespace()) {
+        rest = &rest[start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '=')
+            .unwrap_or(rest.len());
+        let name = rest[..end].to_ascii_lowercase();
+        rest = &rest[end..];
+        let mut value = String::new();
+        if let Some(r) = rest.strip_prefix('=') {
+            let q = r.chars().next().unwrap();
+            let close = r[1..].find(q).unwrap() + 1;
+            value = r[1..close].to_string();
+            rest = &r[close + 1..];
+        }
+        out.push((name, value));
+    }
+    out
+}
+
+/// Every `<button …>…</button>` in the LIBRARY source list: (attributes, text).
+fn library_rows(page: &str) -> Vec<(Vec<(String, String)>, String)> {
+    let aside = &page[page.find("<aside id=\"side\">").unwrap()..];
+    let aside = &aside[..aside.find("<h2>BACKUPS</h2>").unwrap()];
+    aside
+        .split("<button")
+        .skip(1)
+        .map(|b| {
+            let open = &b[..b.find('>').unwrap() + 1];
+            let body = &b[open.len()..b.find("</button>").unwrap()];
+            let mut text = String::new();
+            let mut in_tag = false;
+            for c in body.chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    c if !in_tag => text.push(c),
+                    _ => {}
+                }
+            }
+            (attrs(&format!("<button{open}")), text)
+        })
+        .collect()
+}
+
+/// FIX-4, structural (R4): Places and Faces are LIBRARY rows that carry the
+/// `disabled` attribute and no `data-s`, there is no view for them, and the
+/// script never refers to them, so nothing can open them.
 #[test]
 fn places_and_faces_are_disabled_not_built_yet_rows() {
     let work = tempfile::tempdir().unwrap();
     let (_gui, addr) = start(work.path());
     let (code, page) = get(&addr, "/");
     assert_eq!(code, 200);
-    for name in ["Places", "Faces"] {
-        let row = format!(
-            "<button class=\"soon\" disabled title=\"{name} is not built yet\"><span>{name}</span><small>not built yet</small></button>"
+    let rows = library_rows(&page);
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|(_, t)| t.split("not built yet").next().unwrap().trim())
+        .collect();
+    assert_eq!(names, ["Events", "Photos", "Places", "Faces"]);
+    for (a, text) in &rows[2..] {
+        let has = |n: &str| a.iter().any(|(k, _)| k == n);
+        assert!(has("disabled"), "{text} row is not disabled: {a:?}");
+        assert!(
+            !has("data-s") && !has("onclick"),
+            "{text} row opens something"
         );
-        assert!(page.contains(&row), "missing {name} row");
-        assert!(!page.contains(&format!("data-s=\"{}\"", name.to_lowercase())));
-        assert!(!page.contains(&format!("<section id=\"{}\"", name.to_lowercase())));
+        assert!(text.contains("not built yet"), "{text}");
     }
-    let lib = page.find("<h2>LIBRARY</h2>").unwrap();
-    let photos = page.find("<span>Photos</span>").unwrap();
-    let places = page.find("<span>Places</span>").unwrap();
-    let faces = page.find("<span>Faces</span>").unwrap();
-    let backups = page.find("<h2>BACKUPS</h2>").unwrap();
-    assert!(lib < photos && photos < places && places < faces && faces < backups);
+    for (a, text) in &rows[..2] {
+        assert!(!a.iter().any(|(k, _)| k == "disabled"), "{text}");
+    }
+    // No section, and not a word about them in the script.
+    let lower = page.to_ascii_lowercase();
+    let script = &lower[lower.rfind("<script>").unwrap()..];
+    for word in ["places", "faces"] {
+        assert!(!script.contains(word), "script refers to {word}");
+        assert!(
+            !lower.contains(&format!("id=\"{word}\"")),
+            "{word} view exists"
+        );
+    }
+}
+
+/// R1: Info shows a camera time as written and says it has no zone; only a
+/// time with an offset is converted to this computer's zone.
+/// R2: Backup health converts the CLI's UTC stamps to local time with a zone
+/// and uses the dark chrome. (Behaviour runs in scripts/gui-behaviour.mjs.)
+#[test]
+fn times_are_labelled_honestly_and_health_is_dark() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, page) = get(&addr, "/");
+    assert!(page.contains("camera time, no time zone recorded"));
+    assert!(page.contains("const DARK_VIEWS=[...LIB_VIEWS,'health'];"));
+    assert!(page.contains(".dark .card{"));
+    assert!(page.contains("#info{overflow:auto;min-height:0;background:#2f3136;"));
+    assert!(!page.contains("#info{overflow:auto;min-height:0;background:#fff"));
+    assert!(page.contains("localStamps(st.summary||'')"));
+    let (_, library) = get(&addr, "/api/library");
+    let library: serde_json::Value = serde_json::from_str(&library).unwrap();
+    for i in library["images"].as_array().unwrap() {
+        if let Some(t) = i["taken"].as_str() {
+            assert!(
+                !t.ends_with('Z') && !t[10..].contains(['+', '-']),
+                "an offset reached the page, so R1's camera-time label would be wrong: {t}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -36,6 +36,7 @@ select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:
 .bar{height:6px;background:#eceef2;border-radius:3px;overflow:hidden;margin:4px 0 6px}.bar i{display:block;height:100%;background:var(--accent);width:0}
 .count{font-size:13px;color:var(--mute)}
 .card{background:#fff;border:1px solid var(--line);border-left:5px solid var(--none);border-radius:10px;padding:12px 16px;margin-bottom:12px}
+.dark .card{background:#2f3136;border-top-color:#4a4d54;border-right-color:#4a4d54;border-bottom-color:#4a4d54;color:#e8e9ec}.dark .summary{color:#e8e9ec}.dark .more,.dark .runs,.dark .act span{color:#a9adb5}
 .card h3{margin:0 0 2px;font-size:15px}.card .txt{white-space:pre-wrap}.card .w{font-weight:700;text-transform:none}.card .act{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .summary{margin:0 0 12px;white-space:pre-wrap}
 .s-ok{border-left-color:var(--ok)}.s-ok .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
@@ -49,8 +50,8 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 .tools{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#d9dce1;border-top:1px solid #bfc4cc;font-size:13px}
 .tools input[type=search]{width:180px;padding:4px 10px;border:1px solid #b9bec6;border-radius:14px;font:inherit}
 .tools .grow{flex:1}.tools input[type=range]{width:160px}
-#info{overflow:auto;min-height:0;background:#fff;color:var(--ink);border-left:1px solid #cfd3da;padding:14px 16px;font-size:13px}
-#info h3{margin:0 0 6px;font-size:14px}#info p{margin:4px 0}
+#info{overflow:auto;min-height:0;background:#2f3136;color:#e8e9ec;border-left:1px solid #4a4d54;padding:14px 16px;font-size:13px}
+#info h3{margin:0 0 6px;font-size:14px}#info p{margin:4px 0}#info .count,#info .runs,#info .more{color:#a9adb5}#info pre{background:#26282c;color:#e8e9ec}
 #show{position:fixed;inset:0;background:#000;display:flex;align-items:center;justify-content:center;z-index:9}
 #show img{max-width:96vw;max-height:92vh}#show p{position:fixed;bottom:12px;color:#aaa;font-size:13px;margin:0}
 [hidden]{display:none!important}
@@ -133,6 +134,8 @@ const $=id=>document.getElementById(id);
 const H={'X-Albumen':'1'};
 const enc=encodeURIComponent;
 const LIB_VIEWS=['events','photos'];
+// Backup health shares the library's dark chrome.
+const DARK_VIEWS=[...LIB_VIEWS,'health'];
 let dests=[],lib={images:[],events:[]},curEvent=null,selected=null,cur='photos';
 const base=p=>p.replace(/\/+$/,'').split('/').pop()||p;
 const img=p=>'/img?p='+enc(p);
@@ -141,7 +144,7 @@ document.querySelectorAll('aside button[data-s]').forEach(b=>b.onclick=()=>{if(b
 const lit=s=>s=='photos'&&curEvent?'events':s;
 function show(s){cur=s;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('on',b.dataset.s==lit(s)));
  document.querySelectorAll('.main section').forEach(x=>x.hidden=x.id!=s);
- const libv=LIB_VIEWS.includes(s);$('main').classList.toggle('dark',libv);
+ const libv=LIB_VIEWS.includes(s);$('main').classList.toggle('dark',DARK_VIEWS.includes(s));
  for(const id of ['search','zoom','b-show'])$(id).disabled=!libv;
  if(s=='events')curEvent=null;
  if(s=='health')health();if(libv)draw();}
@@ -193,11 +196,20 @@ $('search').oninput=draw;
 function zoom(v){document.documentElement.style.setProperty('--thumb',v+'px');document.documentElement.classList.toggle('mini',Number(v)<130);try{localStorage.setItem('albumen-zoom',v);}catch(e){}}
 $('zoom').oninput=()=>zoom($('zoom').value);
 try{const z=localStorage.getItem('albumen-zoom');if(z){$('zoom').value=z;zoom(z);}}catch(e){}
-// Sizes in KB/MB; capture times as local time with this computer's zone.
+// Sizes in KB/MB.
 function human(n){return n<1024?n+' bytes':n<1048576?Math.round(n/1024)+' KB':(n/1048576).toFixed(1)+' MB';}
-function when(t){if(t.length<16)return t;const d=new Date(t);
- const z=(new Intl.DateTimeFormat('en-US',{timeZoneName:'short'}).formatToParts(isNaN(d)?new Date():d).find(x=>x.type=='timeZoneName')||{}).value||'';
- return t.slice(0,10)+' '+t.slice(11,16)+(z?' '+z:'');}
+// A moment as local time with this computer's zone: "2026-10-18 09:00 PDT".
+function local(d){const p=n=>String(n).padStart(2,'0');
+ const z=(new Intl.DateTimeFormat('en-US',{timeZoneName:'short'}).formatToParts(d).find(x=>x.type=='timeZoneName')||{}).value||'';
+ return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+(z?' '+z:'');}
+// Capture times: only a time that carries an offset is a real moment, shown
+// in this computer's zone. A camera clock reading has no zone, so it is shown
+// as written and says so; no zone is invented for it.
+function when(t){if(t.length<16)return t;
+ if(/(Z|[+-]\d\d:?\d\d)$/.test(t)){const d=new Date(t);if(!isNaN(d))return local(d);}
+ return t.slice(0,10)+' '+t.slice(11,16)+' camera time, no time zone recorded';}
+// CLI status text says "2026-10-18 05:01 UTC"; the page shows local time.
+const localStamps=s=>s.replace(/(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d) UTC/g,(_,y,mo,d,h,mi)=>local(new Date(Date.UTC(+y,mo-1,+d,+h,+mi))));
 function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=!im;if(!im)return;
  $('i-name').textContent=base(im.path);
  $('i-taken').textContent=im.taken?'Taken '+when(im.taken)+' (from '+im.taken_from+')':'Date taken: not known';
@@ -224,7 +236,7 @@ async function init(){
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);sideDests(st);
  for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=base(d);o.title=d;$(sel).append(o);}}
  $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';
- $('health-summary').textContent=st.summary||'';$('health-summary').hidden=!st.summary;
+ $('health-summary').textContent=localStamps(st.summary||'');$('health-summary').hidden=!st.summary;
  $('health-next').textContent=st.summary_next||'';$('health-next').hidden=!st.summary_next;
  $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ');
  runsB();runsV();draw();}
@@ -256,10 +268,10 @@ function nextStep(d,act){const btn=(t,f)=>{const b=document.createElement('butto
  else if(d.state=='ok'){check();}
  else{say('Next: check that this folder is connected and readable, then check again.');btn('Check again',health);}}
 async function health(){const st=await j('/api/status');$('cards').innerHTML='';sideDests(st);
- $('health-summary').textContent=st.summary||'';$('health-summary').hidden=!st.summary;
+ $('health-summary').textContent=localStamps(st.summary||'');$('health-summary').hidden=!st.summary;
  for(const d of st.destinations){const c=document.createElement('div');c.className='card '+cls(d.state);
   const lines=d.text.trimEnd().split('\n');const hidden=lines.filter(l=>l==d.dest||/^(next|proof): /.test(l));
-  const t=lines.filter(l=>!hidden.includes(l)).join('\n');const i=t.indexOf(':');
+  const t=localStamps(lines.filter(l=>!hidden.includes(l)).join('\n'));const i=t.indexOf(':');
   const h=document.createElement('h3');h.textContent=base(d.dest);
   const w=document.createElement('span');w.className='w';w.textContent=t.slice(0,i+1);
   const p=document.createElement('div');p.className='txt';p.append(w,document.createTextNode(t.slice(i+1)));

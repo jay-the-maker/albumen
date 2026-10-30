@@ -2,8 +2,10 @@
 
 //! `albumen gui --demo`: a synthetic photo set and pre-staged backup folders.
 //!
-//! Every image is generated here (colour gradients and shapes); no real
-//! photo is used. Each start builds a new dated folder under the work
+//! Every PNG is generated here (colour gradients and shapes); the RAW,
+//! HEIC and JPEG extras are the repo's own synthetic fixtures. No real photo
+//! is used. This is the one library every GUI screen and test is shot from,
+//! so counts agree across screens. Each start builds a new dated folder under the work
 //! directory, so the click-path always begins at "exported 12 new". Nothing
 //! is removed. All writes go through `albumen_ingest::dest`.
 
@@ -15,8 +17,39 @@ use albumen_ingest::{dest, IngestError};
 
 use super::io_err;
 
-/// Photos in the demo set.
+/// Generated PNG photos in the demo set.
 pub const DEMO_PHOTOS: u32 = 12;
+
+/// The rest of the shared fixture: one of each case the screens show.
+/// Oct 3 gets a JPEG and a lone RAW (dated by file name); IMG_0003 is a
+/// RAW + JPEG pair dated by the RAW's metadata; IMG_0002 is HEIC only; the
+/// CR3 and NEF carry no date and land in "No date".
+pub const EXTRAS: [(&str, &[u8]); 7] = [
+    (
+        "2026-10-03 pier.jpg",
+        include_bytes!("../../../fixtures/raw-jpeg/IMG_0003.jpg"),
+    ),
+    ("2026-10-03 reef.dng", b"demo dng\n"),
+    (
+        "IMG_0003.dng",
+        include_bytes!("../../../fixtures/raw-jpeg/IMG_0003.dng"),
+    ),
+    (
+        "IMG_0003.jpg",
+        include_bytes!("../../../fixtures/raw-jpeg/IMG_0003.jpg"),
+    ),
+    (
+        "IMG_0002.heic",
+        include_bytes!("../../../fixtures/heic/IMG_0002.heic"),
+    ),
+    ("IMG_0101.cr3", b"synthetic not a real raw"),
+    ("IMG_0102.nef", b"demo nef\n"),
+];
+
+/// Photos the library shows: the PNGs plus the extras, with the
+/// IMG_0003 pair counted once.
+#[cfg(test)]
+pub const DEMO_LIBRARY_PHOTOS: u32 = DEMO_PHOTOS + EXTRAS.len() as u32 - 1;
 
 pub struct Demo {
     pub library: PathBuf,
@@ -169,6 +202,9 @@ pub fn build(work: &Path) -> Result<Demo, IngestError> {
         let png = synthetic_png_taken(480, 360, i as u32 + 1, when);
         write_new(&library.join(demo_name(i)), &png)?;
     }
+    for (name, bytes) in EXTRAS {
+        write_new(&library.join(name), bytes)?;
+    }
     for i in 0..3u32 {
         let png = synthetic_png(480, 360, 40 + i);
         write_new(
@@ -268,5 +304,30 @@ mod tests {
     #[test]
     fn crc_matches_known_value() {
         assert_eq!(crc32(b"IEND"), 0xAE42_6082);
+    }
+
+    /// R5: the shared fixture holds every case the screens show.
+    #[test]
+    fn shared_fixture_has_lone_raw_pair_heic_and_undated() {
+        let work = tempfile::tempdir().unwrap();
+        let demo = build(work.path()).unwrap();
+        let v = crate::gui::library_json(&demo.library);
+        let images = v["images"].as_array().unwrap();
+        assert_eq!(images.len() as u32, DEMO_LIBRARY_PHOTOS, "{v}");
+        let find = |p: &str| images.iter().find(|i| i["path"] == p).unwrap();
+        assert_eq!(find("2026-10-03 reef.dng")["preview"], false);
+        assert!(find("2026-10-03 reef.dng")["raw"].is_null());
+        assert_eq!(find("IMG_0003.jpg")["raw"], "IMG_0003.dng");
+        assert_eq!(find("IMG_0002.heic")["format"], "HEIC");
+        assert!(find("IMG_0101.cr3")["taken"].is_null());
+        assert!(find("IMG_0102.nef")["taken"].is_null());
+        let oct3 = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["title"] == "Oct 3, 2026")
+            .unwrap();
+        // "pier.jpg" carries the 2015 camera time, so it is not on Oct 3.
+        assert_eq!(oct3["count"], 4, "{oct3}");
     }
 }

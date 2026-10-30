@@ -291,8 +291,8 @@ enum Command {
     /// Serves a page on 127.0.0.1 and opens the browser. The page runs scan,
     /// backup, status, verify-manifest, and an import-card dry run as this
     /// binary; it has no write path of its own and no delete control.
-    /// `--demo` builds 12 synthetic photos and four backup folders in a new
-    /// dated folder under --work (default: the temp directory).
+    /// `--demo` builds 18 synthetic photos (PNG, JPEG, RAW, HEIC) and four
+    /// backup folders in a new dated folder under --work (default: the temp directory).
     Gui {
         /// Photos folder to show. Only read.
         #[arg(long, required_unless_present = "demo")]
