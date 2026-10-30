@@ -55,14 +55,62 @@ fn settle() {
     std::thread::sleep(Duration::from_millis(2_100));
 }
 
-/// T pinned for every label: 2026-10-30T00:42:00Z. On Linux and macOS the
-/// label is local time from `TZ` (America/Los_Angeles here) with the zone
-/// abbreviation; elsewhere (Windows) this branch's `local_text` shows UTC.
+/// T pinned for every label: 2026-10-29 17:42 UTC-7 = 2026-10-30T00:42:00Z.
 const PINNED_NS: &str = "1793320920000000000";
+/// Labels are local time with a numeric offset, never an abbreviation such
+/// as PDT. On Linux and macOS that is `TZ` (America/Los_Angeles here). On
+/// Windows `TZ` has no effect, so the label is the OS zone's local time,
+/// e.g. "2026-10-29 17:42 UTC-7" on a Pacific-time PC.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const T: &str = "2026-10-29 17:42 PDT";
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const T: &str = "2026-10-29 17:42 UTC-7";
+#[cfg(windows)]
+const T: OsLocal = OsLocal;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 const T: &str = "2026-10-30 00:42 UTC";
+
+/// Windows expected label, worked out independently of the server through
+/// .NET's TimeZoneInfo for the pinned instant.
+#[cfg(windows)]
+struct OsLocal;
+
+#[cfg(windows)]
+impl std::fmt::Display for OsLocal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let label = LABEL.get_or_init(|| {
+            let script = "$u=[DateTime]::new(2026,10,30,0,42,0,[DateTimeKind]::Utc);\
+                $z=[TimeZoneInfo]::Local;$l=[TimeZoneInfo]::ConvertTimeFromUtc($u,$z);\
+                $m=[int]$z.GetUtcOffset($u).TotalMinutes;\
+                $l.ToString('yyyy-MM-dd HH:mm',[Globalization.CultureInfo]::InvariantCulture)+' '+$m";
+            let out = Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .output()
+                .expect("powershell for the expected local label");
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let (when, minutes) = text.rsplit_once(' ').expect("label and offset");
+            let minutes: i64 = minutes.parse().expect("offset minutes");
+            let zone = if minutes == 0 {
+                "UTC".to_string()
+            } else {
+                let sign = if minutes < 0 { '-' } else { '+' };
+                let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
+                if m == 0 {
+                    format!("UTC{sign}{h}")
+                } else {
+                    format!("UTC{sign}{h}:{m:02}")
+                }
+            };
+            let label = format!("{when} {zone}");
+            // CI sets this after `tzutil /s "India Standard Time"` so the
+            // half-hour offset is checked against a fixed string too.
+            if let Ok(want) = std::env::var("ALBUMEN_EXPECTED_LOCAL_LABEL") {
+                assert_eq!(label, want, "OS zone label");
+            }
+            label
+        });
+        f.write_str(label)
+    }
+}
 const T_UTC: &str = "2026-10-30T00:42:00Z";
 
 fn open(root: &Path, index_dir: &Path) -> Library {
