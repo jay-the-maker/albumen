@@ -91,6 +91,52 @@ struct Server {
     jobs: Mutex<Vec<Job>>,
     /// The last finished scan, passed as `--previous` to the next one.
     last_scan: Mutex<Option<PathBuf>>,
+    /// HEIC thumbnail index state, refreshed off the request path.
+    thumbs: Mutex<ThumbView>,
+    /// Refreshes started; the view keeps the newest finished one.
+    thumb_gen: std::sync::atomic::AtomicU64,
+}
+
+/// What the last finished thumbnail-index refresh found.
+#[derive(Default)]
+struct ThumbView {
+    generation: u64,
+    cached: std::collections::HashSet<String>,
+}
+
+/// Refresh the HEIC thumbnail index in the background (at start and after
+/// each scan), so /api/library never reads the index or stats every HEIC.
+/// A newer generation always wins over an older one that finishes late.
+fn refresh_thumbs(server: &Arc<Server>) {
+    use std::sync::atomic::Ordering;
+    let gen = server.thumb_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let s = Arc::clone(server);
+    std::thread::spawn(move || {
+        let lib = &s.config.library;
+        let Some(cache) = live::cache_dir(lib) else {
+            return;
+        };
+        let scan = s
+            .last_scan
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| newest_scan(&s.config.state));
+        let files = library_files(lib);
+        let heics: Vec<&str> = files
+            .iter()
+            .map(String::as_str)
+            .filter(|r| thumbs::is_heic(r))
+            .collect();
+        let r = thumbs::refresh(lib, &heics, &thumbs::thumbs_root(&cache), scan.as_deref());
+        let mut view = s.thumbs.lock().unwrap();
+        if gen > view.generation {
+            *view = ThumbView {
+                generation: gen,
+                cached: r.cached,
+            };
+        }
+    });
 }
 
 pub fn run(args: GuiArgs) -> Result<(), IngestError> {
@@ -175,7 +221,10 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
         config,
         jobs: Mutex::new(Vec::new()),
         last_scan: Mutex::new(None),
+        thumbs: Mutex::new(ThumbView::default()),
+        thumb_gen: Default::default(),
     });
+    refresh_thumbs(&server);
     for stream in listener.incoming().flatten() {
         let server = Arc::clone(&server);
         std::thread::spawn(move || {
@@ -235,14 +284,14 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
         }
         ("GET", "/api/library") => {
             let lib = &server.config.library;
-            let scan = server
-                .last_scan
-                .lock()
-                .unwrap()
-                .clone()
-                .or_else(|| newest_scan(&server.config.state));
             let cache = live::cache_dir(lib);
-            let body = library_json_scan(lib, cache.as_deref(), scan.as_deref()).to_string();
+            let (generation, cached) = {
+                let v = server.thumbs.lock().unwrap();
+                (v.generation, v.cached.clone())
+            };
+            let mut v = library_json_scan(lib, cache.as_deref(), &cached);
+            v["thumbs_generation"] = generation.into();
+            let body = v.to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/video") => {
@@ -409,34 +458,17 @@ fn newest_scan(state: &Path) -> Option<PathBuf> {
 /// `library_json` with an explicit preview cache folder (None: no cache).
 #[cfg(test)]
 pub fn library_json_with(library: &Path, cache: Option<&Path>) -> serde_json::Value {
-    library_json_scan(library, cache, None)
+    library_json_scan(library, cache, &Default::default())
 }
 
-/// `library_json_with`, reusing hashes from an M3 scan manifest for the
-/// HEIC thumbnail index.
+/// `library_json_with`, with the HEIC paths that the last background
+/// thumbnail-index refresh found cached. The index itself is not read here.
 pub fn library_json_scan(
     library: &Path,
     cache: Option<&Path>,
-    scan: Option<&Path>,
+    thumbs_cached: &std::collections::HashSet<String>,
 ) -> serde_json::Value {
     let files = library_files(library);
-    // HEIC thumbnail index (M5 AC2-AC4): keys only, no decoding.
-    let heics: Vec<&str> = files
-        .iter()
-        .map(String::as_str)
-        .filter(|r| thumbs::is_heic(r))
-        .collect();
-    let thumb_of: std::collections::HashMap<String, &'static str> = match cache {
-        Some(c) => {
-            let root = thumbs::thumbs_root(c);
-            let r = thumbs::refresh(library, &heics, &root, scan);
-            r.entries
-                .iter()
-                .map(|e| (e.path.clone(), thumbs::thumb_state(&root, e)))
-                .collect()
-        }
-        None => Default::default(),
-    };
     // Live Photos: a still and a movie with the same folder and stem AND the
     // same ContentIdentifier are one photo. Same stem without a matching ID
     // stays two items, each with an Info line saying why.
@@ -555,7 +587,12 @@ pub fn library_json_scan(
             }
             if thumbs::is_heic(rel) {
                 // No decoder: the tile is the honest placeholder.
-                item["thumb"] = thumb_of.get(rel.as_str()).copied().unwrap_or("none").into();
+                item["thumb"] = if thumbs_cached.contains(rel.as_str()) {
+                    "cached"
+                } else {
+                    "none"
+                }
+                .into();
             }
             if live::is_video(rel) {
                 item["video"] = true.into();
@@ -876,6 +913,7 @@ fn start_job(server: &Arc<Server>, kind: &str, dest: Option<&str>) -> Result<usi
         if code == 0 {
             if let Some(m) = scan_manifest {
                 *s.last_scan.lock().unwrap() = Some(m);
+                refresh_thumbs(&s);
             }
         }
         let mut jobs = s.jobs.lock().unwrap();
@@ -1399,9 +1437,13 @@ mod tests {
         assert_eq!(before, snapshot(&lib), "after scan");
         let cache = live::cache_dir_in(&home, &lib).unwrap();
         let troot = thumbs::thumbs_root(&cache);
-        // GUI open + index build, reusing the scan's hashes.
-        let v = library_json_scan(&lib, Some(&cache), Some(&manifest));
+        // GUI listing: never builds or reads the thumbnail index (F1).
+        let v = library_json_with(&lib, Some(&cache));
         assert!(v["images"].as_array().unwrap().len() >= 5);
+        assert!(
+            !troot.join(thumbs::INDEX_FILE).exists(),
+            "listing left the index alone"
+        );
         let heics: Vec<&str> = before
             .iter()
             .map(|f| f.0.as_str())
@@ -1409,15 +1451,18 @@ mod tests {
             .collect();
         let heics: Vec<String> = heics.iter().map(|r| r.replace('\\', "/")).collect();
         let refs: Vec<&str> = heics.iter().map(String::as_str).collect();
+        // Index build, as the background refresh does it, reusing the scan's hashes.
+        let cold = thumbs::refresh(&lib, &refs, &troot, Some(&manifest));
+        assert_eq!((cold.hashed, cold.from_scan), (0, refs.len() as u64));
         let warm = thumbs::refresh(&lib, &refs, &troot, Some(&manifest));
         assert_eq!(warm.hashed, 0, "warm index build re-hashes nothing");
-        assert_eq!(warm.entries.len(), refs.len());
+        assert_eq!(warm.entries as usize, refs.len());
         assert_eq!(before, snapshot(&lib), "after GUI open and index build");
         // Invalidate: move the cache away (never delete), then rebuild.
         std::fs::rename(&cache, dir.path().join("moved-away")).unwrap();
         let rebuilt = thumbs::refresh(&lib, &refs, &troot, Some(&manifest));
         assert_eq!((rebuilt.hashed, rebuilt.from_scan), (0, refs.len() as u64));
-        let _ = library_json_scan(&lib, Some(&cache), Some(&manifest));
+        let _ = library_json_with(&lib, Some(&cache));
         let _ = library_json_with(&lib, None);
         assert_eq!(before, snapshot(&lib), "after invalidate and rebuild");
         assert_eq!(hevc_codec, live::playable(&lib.join("clips/hevc.mov")));
@@ -1451,7 +1496,7 @@ mod tests {
         assert!(PAGE.contains(
             "const CANT=\"Can't preview this file here. Your original is kept unchanged.\";"
         ));
-        assert!(PAGE.contains("m.textContent=base(p)+'. '+CANT;"));
+        assert!(PAGE.contains("m.textContent=CANT;"));
         assert!(!PAGE.contains("\\u2014 '+base(p)"));
         assert!(PAGE.contains("im.format+'. '+CANT"));
         assert!(!PAGE.contains("preview not available yet"));

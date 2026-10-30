@@ -169,6 +169,7 @@ const stem=p=>base(p).replace(/\.[^.]+$/,'')||base(p);
 function visible(){const evs=curEvent?[curEvent]:lib.events;return evs.flatMap(e=>e.photos).filter(match);}
 // HEIC and RAW are listed and counted like any photo; the browser cannot
 // show them yet, so they get a calm placeholder tile instead of an image.
+// The file name is shown once, as the caption.
 const canShow=p=>{const m=byPath(p);return !m||m.preview!==false;};
 // Plain words for any file the browser cannot show (spec AC3).
 // Header counts: a Live Photo pair or RAW + JPEG is one item, so one photo;
@@ -179,7 +180,7 @@ const CANT="Can't preview this file here. Your original is kept unchanged.";
 const fmt=p=>{const m=byPath(p);return (m&&m.format)||'';};
 function figure(p,cap,sub){const f=document.createElement('figure');let i;
  if(canShow(p)){i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);}
- else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent=base(p)+'. '+CANT;i.append(b,m);}
+ else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent=CANT;i.append(b,m);}
  const lm=byPath(p);if(lm&&lm.live){const l=document.createElement('button');l.type='button';l.className='live';l.textContent='LIVE';l.title='Play the Live Photo';l.onclick=e=>{e.stopPropagation();selected=p;setInfo(true);draw();playLive();};f.append(l);}
  const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
 function draw(){
@@ -187,7 +188,7 @@ function draw(){
  $('grid').innerHTML='';
  for(const {e,ps} of evs){if(!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;$('grid').append(h);}
   const g=document.createElement('div');g.className='grid';
-  for(const p of ps){const f=figure(p,stem(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
+  for(const p of ps){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
   $('grid').append(g);}
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
  $('photos-count').textContent=countText(evs.flatMap(x=>x.ps));

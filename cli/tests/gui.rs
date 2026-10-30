@@ -456,9 +456,21 @@ fn heic_thumb_index_is_served_by_page_from_albumen_home() {
         .clone();
     assert_eq!(heic["thumb"], "none");
     assert_eq!(heic["preview"], false);
-    let (code, page) = get(&addr, "/api/thumbs?offset=0&limit=10");
-    assert_eq!(code, 200);
-    let page: serde_json::Value = serde_json::from_str(&page).unwrap();
+    assert!(library["thumbs_generation"].is_u64());
+    // The index is built in the background at start (F1); wait for it.
+    let mut page = serde_json::Value::Null;
+    for _ in 0..200 {
+        let (code, body) = get(&addr, "/api/thumbs?offset=0&limit=10");
+        assert_eq!(code, 200);
+        page = serde_json::from_str(&body).unwrap();
+        if !page["entries"].as_array().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (_, library) = get(&addr, "/api/library");
+    let library: serde_json::Value = serde_json::from_str(&library).unwrap();
+    assert!(library["thumbs_generation"].as_u64().unwrap() >= 1);
     let rows = page["entries"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{page}");
     assert_eq!(rows[0]["path"], "IMG_0002.heic");
@@ -623,7 +635,7 @@ fn product_lead_asks_after_fix_7_are_in_the_page() {
     assert!(page.contains("DEMO-ONLY window. Synthetic sample images."));
     assert!(!page.contains("#fff4d6") && !page.contains("#6b5100"));
     // 5. Captions are stems.
-    assert!(page.contains("figure(p,stem(p))"));
+    assert!(page.contains("figure(p,canShow(p)?stem(p):base(p))"));
     // 6. Smallest zoom: no captions, placeholder shows only the format.
     assert!(page.contains(".mini #grid figcaption{display:none}"));
     assert!(page.contains(".mini .ph .more{display:none}"));

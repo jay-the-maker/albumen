@@ -123,16 +123,14 @@ pub struct Refresh {
     pub from_scan: u64,
     /// Whether the index file was written.
     pub written: bool,
-    /// Current entries, sorted by path.
-    pub entries: Vec<Entry>,
-}
-
-impl Refresh {
-    /// Distinct content keys referenced now.
-    #[cfg(test)]
-    pub fn keys(&self) -> HashSet<&str> {
-        self.entries.iter().map(|e| e.key.as_str()).collect()
-    }
+    /// Entries in the index now.
+    pub entries: u64,
+    /// Paths whose current key has a thumbnail file (none today).
+    pub cached: HashSet<String>,
+    /// Most index or scan entries held in memory at once. The previous
+    /// index is streamed one entry at a time; only scan hashes for files
+    /// missing from it are held.
+    pub peak_held: usize,
 }
 
 fn stamp(path: &Path) -> Option<(u64, String)> {
@@ -176,97 +174,174 @@ fn scan_hashes(scan: &Path, wanted: &HashSet<&str>) -> HashMap<String, (u64, Str
     out
 }
 
-fn read_index(root: &Path) -> HashMap<String, Entry> {
-    let mut out = HashMap::new();
-    if let Ok(f) = std::fs::File::open(root.join(INDEX_FILE)) {
-        for line in BufReader::new(f).lines() {
-            let Ok(line) = line else { break };
-            if let Some(e) = Entry::from_line(&line) {
-                out.insert(e.path.clone(), e);
+/// The previous index, streamed in path order: one entry held at a time.
+struct OldIndex {
+    lines: Option<std::io::Lines<BufReader<std::fs::File>>>,
+    cur: Option<Entry>,
+    /// An entry was passed over because no wanted path matched it.
+    skipped: bool,
+    exists: bool,
+    /// `cur` was returned by `find`.
+    matched: bool,
+}
+
+impl OldIndex {
+    fn open(root: &Path) -> Self {
+        let f = std::fs::File::open(root.join(INDEX_FILE)).ok();
+        let exists = f.is_some();
+        let mut s = OldIndex {
+            lines: f.map(|f| BufReader::new(f).lines()),
+            cur: None,
+            skipped: false,
+            exists,
+            matched: false,
+        };
+        s.advance();
+        s
+    }
+
+    fn advance(&mut self) {
+        self.cur = None;
+        self.matched = false;
+        if let Some(lines) = self.lines.as_mut() {
+            for line in lines.by_ref() {
+                let Ok(line) = line else { break };
+                if let Some(e) = Entry::from_line(&line) {
+                    self.cur = Some(e);
+                    return;
+                }
             }
         }
     }
-    out
+
+    /// The entry for `rel`, if the index has one. `rel` must be asked for
+    /// in sorted order.
+    fn find(&mut self, rel: &str) -> Option<&Entry> {
+        while self.cur.as_ref().is_some_and(|e| e.path.as_str() < rel) {
+            self.skipped |= !self.matched;
+            self.advance();
+        }
+        self.matched = self.cur.as_ref().is_some_and(|e| e.path == rel);
+        self.cur.as_ref().filter(|e| e.path == rel)
+    }
+
+    /// Whether entries remain after the last wanted path.
+    fn has_rest(&mut self) -> bool {
+        if self.matched {
+            self.advance();
+        }
+        self.cur.is_some()
+    }
 }
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Write `entries` to `<root>/INDEX_FILE` through a temp file and a rename.
-pub fn write_index(root: &Path, entries: &[Entry]) -> std::io::Result<()> {
-    std::fs::create_dir_all(root)?;
-    let tmp = root.join(format!(
-        "{INDEX_FILE}.{}.{}.tmp",
-        std::process::id(),
-        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    {
-        let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        for e in entries {
-            writeln!(w, "{}", e.to_line())?;
-        }
-        w.flush()?;
-        w.get_ref().sync_all()?;
-    }
-    std::fs::rename(&tmp, root.join(INDEX_FILE))
-}
 
 /// Bring the index at `root` up to date for `rels` (library-relative paths).
 ///
 /// The library is only stat'ed and, for new or changed files with no
 /// reusable hash, read. `scan` is an M3 scan manifest whose hashes are reused
-/// when path, size and mtime match.
+/// when path, size and mtime match. The previous index is merged as a stream
+/// against the sorted paths, so memory does not grow with the index: a warm
+/// run makes one stat pass and writes nothing; otherwise the new index is
+/// streamed to a temp file and renamed over.
 pub fn refresh(library: &Path, rels: &[&str], root: &Path, scan: Option<&Path>) -> Refresh {
-    let old = read_index(root);
-    let wanted: HashSet<&str> = rels
-        .iter()
-        .copied()
-        .filter(|r| !old.contains_key(*r))
-        .collect();
-    let mut from_scan_map = match scan {
-        Some(s) if !wanted.is_empty() => scan_hashes(s, &wanted),
-        _ => HashMap::new(),
-    };
-    let mut out = Refresh::default();
     let mut sorted: Vec<&str> = rels.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    for rel in sorted {
+    let mut out = Refresh {
+        peak_held: 1,
+        ..Refresh::default()
+    };
+    // Pass 1: is everything unchanged? Stat only, nothing read or written.
+    let mut old = OldIndex::open(root);
+    let mut unchanged = old.exists;
+    for rel in &sorted {
+        if !unchanged {
+            break;
+        }
+        let st = stamp(&library.join(rel));
+        match (old.find(rel), st) {
+            (Some(e), Some((b, m))) if e.bytes == b && e.mtime_ns == m => {
+                out.from_index += 1;
+                if thumb_state(root, e) == "cached" {
+                    out.cached.insert(e.path.clone());
+                }
+            }
+            (None, None) => {}
+            _ => unchanged = false,
+        }
+    }
+    if unchanged && !old.skipped && !old.has_rest() {
+        out.entries = out.from_index;
+        return out;
+    }
+    // Pass 2: merge and stream the new index to a temp file.
+    out = Refresh {
+        peak_held: 1,
+        ..Refresh::default()
+    };
+    let mut old = OldIndex::open(root);
+    let mut scan_map: Option<HashMap<String, (u64, String, String)>> = None;
+    let tmp = root.join(format!(
+        "{INDEX_FILE}.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut w = match std::fs::create_dir_all(root).and_then(|_| std::fs::File::create(&tmp)) {
+        Ok(f) => Some(std::io::BufWriter::new(f)),
+        Err(_) => None,
+    };
+    let mut ok = w.is_some();
+    for rel in &sorted {
         let path = library.join(rel);
         let Some((bytes, mtime_ns)) = stamp(&path) else {
             continue;
         };
-        let sha256 = match old.get(rel) {
+        let sha256 = match old.find(rel) {
             Some(e) if e.bytes == bytes && e.mtime_ns == mtime_ns => {
                 out.from_index += 1;
                 e.sha256.clone()
             }
-            _ => match from_scan_map.remove(rel) {
-                Some((b, m, s)) if b == bytes && m == mtime_ns => {
-                    out.from_scan += 1;
-                    s
-                }
-                _ => match albumen_ingest::sha256_hex(&path) {
-                    Ok(s) => {
-                        out.hashed += 1;
+            _ => {
+                let map = scan_map.get_or_insert_with(|| match scan {
+                    Some(s) => scan_hashes(s, &sorted.iter().copied().collect()),
+                    None => HashMap::new(),
+                });
+                out.peak_held = out.peak_held.max(1 + map.len());
+                match map.remove(*rel) {
+                    Some((b, m, s)) if b == bytes && m == mtime_ns => {
+                        out.from_scan += 1;
                         s
                     }
-                    Err(_) => continue,
-                },
-            },
+                    _ => match albumen_ingest::sha256_hex(&path) {
+                        Ok(s) => {
+                            out.hashed += 1;
+                            s
+                        }
+                        Err(_) => continue,
+                    },
+                }
+            }
         };
-        out.entries.push(Entry {
+        let e = Entry {
             path: rel.to_string(),
             bytes,
             mtime_ns,
             key: content_key(&sha256),
             sha256,
-        });
+        };
+        out.entries += 1;
+        if thumb_state(root, &e) == "cached" {
+            out.cached.insert(e.path.clone());
+        }
+        if let Some(w) = w.as_mut() {
+            ok &= writeln!(w, "{}", e.to_line()).is_ok();
+        }
     }
-    let unchanged = old.len() == out.entries.len()
-        && out.entries.iter().all(|e| old.get(&e.path) == Some(e))
-        && root.join(INDEX_FILE).is_file();
-    if !unchanged {
-        out.written = write_index(root, &out.entries).is_ok();
+    if let Some(mut w) = w {
+        ok &= w.flush().is_ok() && w.get_ref().sync_all().is_ok();
+        drop(w);
+        out.written = ok && std::fs::rename(&tmp, root.join(INDEX_FILE)).is_ok();
     }
     out
 }
@@ -274,7 +349,7 @@ pub fn refresh(library: &Path, rels: &[&str], root: &Path, scan: Option<&Path>) 
 /// One page of the index, read line by line: entries `offset..offset+limit`
 /// and the number of lines read. Only `limit` entries are held.
 pub fn page(root: &Path, offset: usize, limit: usize) -> (Vec<Entry>, usize) {
-    let mut out = Vec::with_capacity(limit);
+    let mut out = Vec::with_capacity(limit.min(1024));
     let mut read = 0;
     let Ok(f) = std::fs::File::open(root.join(INDEX_FILE)) else {
         return (out, 0);
@@ -309,6 +384,15 @@ mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
 
+    /// Every entry in the index at `root` (tests only).
+    fn all(root: &Path) -> Vec<Entry> {
+        page(root, 0, usize::MAX).0
+    }
+
+    fn keys(entries: &[Entry]) -> HashSet<&str> {
+        entries.iter().map(|e| e.key.as_str()).collect()
+    }
+
     fn put(lib: &Path, rel: &str, bytes: &[u8]) {
         let p = lib.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -333,8 +417,9 @@ mod tests {
         let canon_home = home.clone();
         assert!(root.starts_with(canon_home.join("previews")));
         assert!(root.ends_with(Path::new("thumbs").join("v1")));
-        let r = refresh(&lib, &["a.heic"], &root, None);
-        let key = &r.entries[0].key;
+        refresh(&lib, &["a.heic"], &root, None);
+        let entries = all(&root);
+        let key = &entries[0].key;
         let p = thumb_path(&root, key);
         assert_eq!(p.parent().unwrap().file_name().unwrap(), &key[..2]);
         assert_eq!(
@@ -372,25 +457,23 @@ mod tests {
             &root,
             None,
         );
-        assert_eq!(r.entries.len(), 3);
-        assert_eq!(r.keys().len(), 2, "two identical files, one key");
-        assert_eq!(r.entries[0].key, r.entries[1].key);
-        let key = r.entries[2].key.clone();
+        let entries = all(&root);
+        assert_eq!((r.entries, entries.len()), (3, 3));
+        assert_eq!(keys(&entries).len(), 2, "two identical files, one key");
+        assert_eq!(entries[0].key, entries[1].key);
+        let key = entries[2].key.clone();
         // Rename (test fixture only, inside the temp library).
         std::fs::rename(lib.join("c/IMG_3.heif"), lib.join("c/renamed.heif")).unwrap();
-        let r2 = refresh(
+        refresh(
             &lib,
             &["a/IMG_1.heic", "b/IMG_2.HEIC", "c/renamed.heif"],
             &root,
             None,
         );
-        let e = r2
-            .entries
-            .iter()
-            .find(|e| e.path == "c/renamed.heif")
-            .unwrap();
+        let r2 = all(&root);
+        let e = r2.iter().find(|e| e.path == "c/renamed.heif").unwrap();
         assert_eq!(e.key, key, "renamed file keeps its key");
-        assert!(!r2.entries.iter().any(|e| e.path == "c/IMG_3.heif"));
+        assert!(!r2.iter().any(|e| e.path == "c/IMG_3.heif"));
         drop(d);
     }
 
@@ -403,12 +486,16 @@ mod tests {
         let root = thumbs_dir_in(&home, &lib).unwrap();
         let first = refresh(&lib, &["x.heic"], &root, None);
         assert_eq!(first.hashed, 1);
-        let old_key = first.entries[0].key.clone();
+        let first_e = all(&root).remove(0);
+        let old_key = first_e.key.clone();
         // Pretend a thumbnail exists for the old key (cache side only).
         let tp = thumb_path(&root, &old_key);
         std::fs::create_dir_all(tp.parent().unwrap()).unwrap();
         std::fs::write(&tp, b"not a real thumbnail").unwrap();
-        assert_eq!(thumb_state(&root, &first.entries[0]), "cached");
+        assert_eq!(thumb_state(&root, &first_e), "cached");
+        // A warm refresh reports it cached.
+        let again = refresh(&lib, &["x.heic"], &root, None);
+        assert!(again.cached.contains("x.heic") && !again.written);
 
         // mtime-only touch: re-hashed, same hash, same key.
         let f = std::fs::OpenOptions::new()
@@ -420,17 +507,20 @@ mod tests {
         drop(f);
         let touched = refresh(&lib, &["x.heic"], &root, None);
         assert_eq!(touched.hashed, 1, "mtime change re-hashes");
-        assert_eq!(touched.entries[0].key, old_key, "same bytes, entry kept");
-        assert_ne!(touched.entries[0].mtime_ns, first.entries[0].mtime_ns);
+        let touched_e = all(&root).remove(0);
+        assert_eq!(touched_e.key, old_key, "same bytes, entry kept");
+        assert_ne!(touched_e.mtime_ns, first_e.mtime_ns);
 
         // Byte change: new key; the old key is no longer referenced or served.
         put(&lib, "x.heic", b"version two, longer");
         let changed = refresh(&lib, &["x.heic"], &root, None);
         assert_eq!(changed.hashed, 1);
-        let new_key = changed.entries[0].key.clone();
+        assert!(changed.cached.is_empty());
+        let changed_e = all(&root);
+        let new_key = changed_e[0].key.clone();
         assert_ne!(new_key, old_key);
-        assert!(!changed.keys().contains(old_key.as_str()));
-        assert_eq!(thumb_state(&root, &changed.entries[0]), "none");
+        assert!(!keys(&changed_e).contains(old_key.as_str()));
+        assert_eq!(thumb_state(&root, &changed_e[0]), "none");
         let (pg, _) = page(&root, 0, 10);
         assert!(pg.iter().all(|e| e.key != old_key));
 
@@ -440,7 +530,7 @@ mod tests {
         let rebuilt = refresh(&lib, &["x.heic"], &root, None);
         assert!(rebuilt.written);
         assert_eq!(rebuilt.hashed, 1);
-        assert_eq!(rebuilt.entries[0].key, new_key);
+        assert_eq!(all(&root)[0].key, new_key);
         assert!(root.join(INDEX_FILE).is_file());
         // No temp file is left behind by the rename.
         let leftovers = std::fs::read_dir(&root)
@@ -492,14 +582,11 @@ mod tests {
         assert_eq!((after.hashed, after.from_scan), (1, 1));
     }
 
-    /// S-H6: 10,000 synthetic entries, no cap; a page reads only what it
-    /// returns, and the first page is inside the 300 ms first-thumbnail budget.
-    #[test]
-    fn sh6_ten_thousand_entries_paginate_flat() {
+    /// One S-H6 run at `n` entries: (peak held cold, peak held warm).
+    fn sh6_run(n: usize) -> (usize, usize) {
         let (_d, lib, home) = setup();
-        let n = 10_000;
         let rels: Vec<String> = (0..n)
-            .map(|i| format!("s/{:03}/IMG_{i:05}.heic", i / 100))
+            .map(|i| format!("s/{:04}/IMG_{i:06}.heic", i / 100))
             .collect();
         for (i, rel) in rels.iter().enumerate() {
             put(&lib, rel, format!("synthetic {i}").as_bytes());
@@ -507,12 +594,13 @@ mod tests {
         let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
         let root = thumbs_dir_in(&home, &lib).unwrap();
         let cold = refresh(&lib, &refs, &root, None);
-        assert_eq!(cold.entries.len(), n, "no cap");
+        assert_eq!(cold.entries as usize, n, "no cap");
         assert_eq!(cold.hashed as usize, n);
         let t = std::time::Instant::now();
         let warm = refresh(&lib, &refs, &root, None);
         let warm_ms = t.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(warm.hashed, 0, "warm refresh re-hashes nothing");
+        assert_eq!((warm.from_index as usize, warm.written), (n, false));
         let t = std::time::Instant::now();
         let (first, read) = page(&root, 0, 100);
         let first_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -527,11 +615,31 @@ mod tests {
         assert_eq!(last.last().unwrap().path, rels[n - 1]);
         let (past, _) = page(&root, n, 100);
         assert!(past.is_empty());
-        println!("sh6 entries={n} warm_refresh_ms={warm_ms:.1} first_page_ms={first_ms:.3}");
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        println!(
+            "sh6 profile={profile} entries={n} warm_refresh_ms={warm_ms:.1} first_page_ms={first_ms:.3} peak_held_cold={} peak_held_warm={}",
+            cold.peak_held, warm.peak_held
+        );
         assert!(
             first_ms <= 300.0,
             "first page {first_ms} ms > 300 ms budget"
         );
+        (cold.peak_held, warm.peak_held)
+    }
+
+    /// S-H6: 10,000 and 100,000 synthetic entries, no cap. A page reads only
+    /// what it returns, the first page is inside the 300 ms first-thumbnail
+    /// budget, and the entries held in memory by a refresh stay flat.
+    #[test]
+    fn sh6_ten_thousand_entries_paginate_flat() {
+        let small = sh6_run(10_000);
+        let large = sh6_run(100_000);
+        assert_eq!(small, large, "entries held stay flat from 10k to 100k");
+        assert_eq!(large, (1, 1));
     }
 
     #[test]
