@@ -462,9 +462,7 @@ impl LibraryIndex {
 /// all, while the old file is being swapped out. Those reads are tried
 /// again briefly (1 ms doubling, 8 tries) instead of being taken as "no
 /// index", which would make the caller walk the whole library. A missing
-/// file is tried 3 times (7 ms in all) even with no `<file>.partial-*` in
-/// sight, because the swap can outlive the partial's name; a library with
-/// no saved index pays only those 7 ms once.
+/// file with no writer mid-save is returned at once.
 fn read_index_bytes(file: &Path) -> std::io::Result<Vec<u8>> {
     with_open_retry(file, || std::fs::read(file))
 }
@@ -479,9 +477,7 @@ fn with_open_retry<T>(
         match op() {
             Err(err)
                 if tries < 8
-                    && (err.kind() != std::io::ErrorKind::NotFound
-                        || tries < 3
-                        || save_in_progress(file)) =>
+                    && (err.kind() != std::io::ErrorKind::NotFound || save_in_progress(file)) =>
             {
                 tries += 1;
                 std::thread::sleep(wait);
