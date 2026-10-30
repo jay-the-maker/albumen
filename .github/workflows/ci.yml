@@ -682,7 +682,7 @@ jobs:
       - name: Prove every local command and MCP tool makes no connections
         if: runner.os != 'Windows'
         shell: bash
-        run: scripts/zero-network.sh
+        run: bash scripts/zero-network.sh
 
       - name: Every command and MCP tool has a network proof
         if: runner.os == 'Linux'
