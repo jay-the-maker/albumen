@@ -131,10 +131,15 @@ try {
   const shown = await ev(`[...document.querySelectorAll('#cards .card .txt')].map(t=>t.innerText).join('\\n')+'\\n'+$('health-summary').innerText`);
   check('R2: no UTC stamp left on the health screen', !/ UTC\b/.test(shown), shown);
   check('R2: stale time shown in local zone', /\d{4}-\d\d-\d\d \d\d:\d\d P[DS]T/.test(shown), shown);
-  // R13: drives are named, never shown as a temp path.
+  // R13 / S1: backups show their folder name, never a temp path or an invented drive name.
   const names = await ev(`[...document.querySelectorAll('#side-dests span, #cards .card h3')].map(e=>e.textContent)`);
-  check('R13: sidebar and cards show drive names only', names.length == 8 && names.every(n => !/[\\/:]/.test(n) && !/temp|tmp/i.test(n)), names);
-  check('R13: the four demo drives are named', eq([...new Set(names)].sort(), ['Damaged Copy', 'Demo', 'New Drive', 'Old Drive']), names);
+  check('R13: sidebar and cards show folder names only', names.length == 8 && names.every(n => !/[\\/:]/.test(n) && !/temp|tmp/i.test(n)), names);
+  check('S1: the four demo backups show their folder names', eq([...new Set(names)].sort(), ['damaged-backup', 'demo-backup', 'new-backup', 'stale-backup']), names);
+  check('S1: no invented drive names', names.every(n => !/drive/i.test(n)), names);
+  // S2: the summary counts backups, and disabled toolbar buttons look disabled.
+  check("S2: summary says '4 backups'", /^4 backups: /.test(await ev(`$('health-summary').innerText`)), await ev(`$('health-summary').innerText`));
+  const dim = await ev(`['b-info','b-show'].map(id=>[$(id).disabled,getComputedStyle($(id)).opacity])`);
+  check('S2: disabled Info and Slideshow are dimmed', dim.every(([d, o]) => d && Number(o) < 0.6), dim);
   // R14: Info is closed on Backup health and Proof, and cannot be opened there.
   check('R14: Info closed on Backup health', await ev(`$('info').hidden`), false);
   check('R14: Info button disabled on Backup health', await ev(`$('b-info').disabled`), false);

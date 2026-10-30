@@ -273,7 +273,9 @@ pub fn build(work: &Path) -> Result<Demo, IngestError> {
     }
     let library = root.join("Synthetic Photos");
     let card = root.join("Camera Card");
-    let volumes = root.join("Volumes");
+    // Plain folders standing in for backup targets. They are not drives, so
+    // they get folder names, never invented drive or volume names.
+    let volumes = root.join("backup-folders");
     let state = root.join("albumen-state");
     for dir in [&library, &card.join("DCIM/100DEMO"), &volumes, &state] {
         dest::create_dir_all(dir)?;
@@ -292,10 +294,10 @@ pub fn build(work: &Path) -> Result<Demo, IngestError> {
             &png,
         )?;
     }
-    let demo = volumes.join("Demo");
-    let damaged = volumes.join("Damaged Copy");
-    let stale = volumes.join("Old Drive");
-    let never = volumes.join("New Drive");
+    let demo = volumes.join("demo-backup");
+    let damaged = volumes.join("damaged-backup");
+    let stale = volumes.join("stale-backup");
+    let never = volumes.join("new-backup");
     for d in [&demo, &damaged, &stale, &never] {
         dest::create_dir_all(d)?;
     }

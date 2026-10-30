@@ -29,6 +29,7 @@ h1{font-size:20px;font-weight:600;margin:0}.sub{color:var(--mute);margin:0 0 16p
 .primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 18px;font:inherit;font-weight:600;cursor:pointer}
 .primary:disabled{opacity:.5;cursor:default}
 .plain{background:#fff;color:var(--ink);border:1px solid #c9cdd4;border-radius:7px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
+.plain:disabled{opacity:.4;cursor:default;background:#e3e5e9;color:#7a7f88;border-style:dashed}
 select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:100%}
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
 .out{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;white-space:pre-wrap;min-height:20px;margin-bottom:10px}
@@ -137,7 +138,7 @@ const LIB_VIEWS=['events','photos'];
 // Backup health shares the library's dark chrome.
 const DARK_VIEWS=[...LIB_VIEWS,'health'];
 let dests=[],lib={images:[],events:[]},curEvent=null,selected=null,cur='photos';
-// Drive and folder names, never the full (often temp) path; Windows paths too.
+// Folder names, never the full (often temp) path; Windows paths too.
 const base=p=>p.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||p;
 const img=p=>'/img?p='+enc(p);
 document.querySelectorAll('aside button[data-s]').forEach(b=>b.onclick=()=>{if(b.dataset.s=='photos')curEvent=null;show(b.dataset.s);});
