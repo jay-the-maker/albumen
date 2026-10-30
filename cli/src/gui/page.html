@@ -256,8 +256,15 @@ function draw(){
  let total=0;for(const x of evs)total+=x.ps.length;
  gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
  if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
-  let busy=false;const more=()=>{if(busy||!b.isConnected)return;busy=true;gridLimit+=GRID_PAGE;let left=GRID_PAGE;
-   const step=()=>{if(!b.isConnected){busy=false;return;}addTiles(Math.min(GRID_STEP,left));left-=GRID_STEP;if(left>0&&gs.done<total){requestAnimationFrame(step);return;}busy=false;done();};step();};
+  // Edge stall (r8: stuck at 301,400 of 380,000): a page that never got its
+  // next frame callback left busy set forever. Each chunk now runs on the
+  // next frame or after 50 ms, whichever comes first, busy is always cleared
+  // (even if a chunk throws), and a page left busy for 2 s is retried.
+  let busy=0;const next=f=>{let d=false;const g=()=>{if(!d){d=true;f();}};requestAnimationFrame(g);setTimeout(g,50);};
+  const more=()=>{if(busy&&performance.now()-busy<2000||!b.isConnected)return;busy=performance.now();gridLimit+=GRID_PAGE;let left=GRID_PAGE;
+   const step=()=>{let again=false;try{if(!b.isConnected)return;busy=performance.now();addTiles(Math.min(GRID_STEP,left));left-=GRID_STEP;again=left>0&&gs.done<total;}
+    finally{if(again)next(step);else{busy=0;if(b.isConnected)done();}}};step();};
+  window.__gridBusy=()=>busy;
   const done=()=>{if(gs.done>=total){moreObs&&moreObs.disconnect();clearInterval(moreTimer);moreTimer=null;gridMore=null;b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';if(moreObs){moreObs.unobserve(b);moreObs.observe(b);}}};
   b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;$('grid').append(b);
   if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}
