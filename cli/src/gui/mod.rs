@@ -1271,7 +1271,8 @@ mod tests {
         assert!(PAGE.contains(
             "const CANT=\"Can't preview this file here. Your original is kept unchanged.\";"
         ));
-        assert!(PAGE.contains("'\\u00a0\\u2014 '+base(p)+'. '+CANT"));
+        assert!(PAGE.contains("m.textContent=base(p)+'. '+CANT;"));
+        assert!(!PAGE.contains("\\u2014 '+base(p)"));
         assert!(PAGE.contains("im.format+'. '+CANT"));
         assert!(!PAGE.contains("preview not available yet"));
     }
@@ -1316,5 +1317,30 @@ mod tests {
         assert_eq!(hevc["live_playable"], false);
         assert_eq!(hevc["live_codec"], "HEVC");
         assert!(PAGE.contains("if(im.live_playable===false){"));
+    }
+    /// Re-gate 2: header counts treat a Live pair (one item) as one photo
+    /// and a lone movie as a video, with singular and plural wording.
+    #[test]
+    fn header_counts_photos_and_videos_honestly() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
+        live_library(&lib);
+        let v = library_json_with(&lib, None);
+        let images = v["images"].as_array().unwrap();
+        let videos = images.iter().filter(|i| i["video"] == true).count();
+        // IMG_0005 pair = 1 item; IMG_0006 heic + mov unpaired; IMG_0007 lone.
+        assert_eq!((images.len() - videos, videos), (2, 2), "{v}");
+        for s in [
+            "function countText(ps){",
+            "if(ph||!v)t.push(ph+(ph==1?' photo':' photos'));",
+            "if(v)t.push(v+(v==1?' video':' videos'));return t.join(', ');}",
+            "$('photos-count').textContent=countText(",
+            "$('lib-count').textContent=countText(",
+            "countText(e.photos)",
+        ] {
+            assert!(PAGE.contains(s), "{s}");
+        }
+        assert!(!PAGE.contains("lib.images.length+' photos'"));
     }
 }

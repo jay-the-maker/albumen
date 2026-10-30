@@ -44,7 +44,8 @@ hevc.write('hvc1', hevc.indexOf('avc1'), 'latin1');
 writeFileSync(join(lib, 'roll', 'IMG_0010.MOV'), hevc);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const kids = [];
-const done = code => { for (const k of kids) k.kill(); process.exit(code); };
+let closeBrowser = async () => {};
+const done = async code => { try { await closeBrowser(); } catch {} await sleep(500); for (const k of kids) k.kill(); process.exit(code); };
 
 const env = {...process.env, ALBUMEN_HOME: join(work, 'home')};
 const gui = spawn(bin, ['gui', '--library', lib, '--no-open', '--port', '0', '--work', join(work, 'state')], {stdio: ['ignore', 'pipe', 'inherit'], env});
@@ -57,17 +58,22 @@ const url = await new Promise((res, rej) => {
 });
 
 const port = 9300 + Math.floor(Math.random() * 500);
-const chrome = spawn(process.env.CHROME || 'google-chrome', ['--headless=new', '--no-sandbox', '--hide-scrollbars',
+// HEADED=1: a normal visible window (used for the Edge run); the temp
+// --user-data-dir keeps the user's own profile and settings untouched.
+const headed = process.env.HEADED == '1';
+const chrome = spawn(process.env.CHROME || 'google-chrome', [...(headed ? [] : ['--headless=new', '--hide-scrollbars']), '--no-sandbox',
+  '--no-first-run', '--no-default-browser-check',
   '--remote-debugging-port=' + port, '--window-size=1280,800', '--user-data-dir=' + join(work, 'chrome'), 'about:blank'],
   {stdio: 'ignore'});
 kids.push(chrome);
 let tabs;
 for (let i = 0; i < 100 && !tabs; i++) { try { tabs = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); } catch { await sleep(200); } }
-if (!tabs) { console.error('browser did not start'); done(2); }
+if (!tabs) { console.error('browser did not start'); await done(2); }
 const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
 console.log('browser: ' + version.Browser);
 const ws = new WebSocket(tabs.find(t => t.type == 'page').webSocketDebuggerUrl);
 await new Promise(r => ws.onopen = r);
+console.log('mode: ' + (headed ? 'headed (visible window)' : 'headless'));
 let id = 0; const pend = {}; const errors = [];
 ws.onmessage = m => { const d = JSON.parse(m.data);
   if (d.method == 'Runtime.exceptionThrown') errors.push(d.params.exceptionDetails.exception?.description || d.params.exceptionDetails.text);
@@ -85,9 +91,14 @@ const click = async sel => {
   await cmd('Input.dispatchMouseEvent', {type: 'mouseReleased', x: b.x, y: b.y, button: 'left', clickCount: 1});
 };
 
+const hover = async sel => {
+  const b = await ev(`(()=>{const r=document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height-12};})()`);
+  await cmd('Input.dispatchMouseEvent', {type: 'mouseMoved', x: b.x, y: b.y}); await sleep(600);
+};
 let failed = 0;
 const check = (name, ok, got) => { console.log((ok ? 'ok   ' : 'FAIL ') + name + '  ' + JSON.stringify(got)); if (!ok) failed++; };
 
+closeBrowser = () => Promise.race([cmd('Browser.close'), sleep(2000)]);
 await cmd('Runtime.enable');
 await cmd('Page.enable');
 await cmd('Network.enable');
@@ -102,7 +113,7 @@ const snap = async name => { if (!shots) return;
   writeFileSync(join(shots, name + '.png'), Buffer.from(png.result.data, 'base64')); console.log('screenshot ' + name + '.png'); };
 const fig = name => ({js: `[...document.querySelectorAll('#grid figure')].find(f=>f.innerText.includes(${JSON.stringify(name)}))`});
 const badge = name => ({js: `${fig(name).js}?.querySelector('.live')`});
-await cmd('Emulation.setDeviceMetricsOverride', {width: 1280, height: 800, deviceScaleFactor: 1, mobile: false});
+if (!headed) await cmd('Emulation.setDeviceMetricsOverride', {width: 1280, height: 800, deviceScaleFactor: 1, mobile: false});
 await cmd('Page.navigate', {url: url + '/'});
 await until(`typeof lib!=='undefined'&&lib.images.length>0`, 'library loaded');
 
@@ -121,6 +132,11 @@ try {
   const tiles = await ev(`[...document.querySelectorAll('#grid figure')].map(f=>f.innerText.replace(/\s+/g,' ').trim())`);
   check('LIVE badges on the two ID-matched pairs only', await ev(`document.querySelectorAll('#grid figure .live').length`) == 2 &&
     (await ev(`${badge('IMG_0005').js}!=null&&${badge('IMG_0010').js}!=null&&${badge('IMG_0008').js}==null`)), tiles);
+  const heads = await ev(`({photos:document.getElementById('photos-count').textContent,lib:document.getElementById('lib-count').textContent})`);
+  check('header counts: Live pair is one photo, lone movie is a video', heads.photos == '3 photos, 1 video' && heads.lib == '3 photos, 1 video', heads);
+  const forms = await ev(`[countText(['roll/IMG_0005.HEIC']),countText(['roll/IMG_0008.MOV']),countText(['roll/IMG_0005.HEIC','roll/IMG_0008.MOV']),countText([]),countText(['roll/IMG_0005.HEIC','roll/IMG_0010.HEIC'])]`);
+  check('count wording singular/plural', JSON.stringify(forms) == JSON.stringify(['1 photo', '1 video', '1 photo, 1 video', '0 photos', '2 photos']), forms);
+  check('tile copy has no stray leading dash', !tiles.some(t => t.includes('\u2014')), tiles);
   await snap('badge');
 
   // The real click on the LIVE badge.
@@ -128,6 +144,7 @@ try {
   await until(`!!document.querySelector('#i-live video')`, 'video element');
   await snap('clicked');
   await until(`(()=>{const v=document.querySelector('#i-live video');return v.currentTime>0.15&&!v.paused;})()`, 'currentTime advances');
+  await hover('#i-live video');
   await snap('playing');
   const s1 = await ev(`(()=>{const v=document.querySelector('#i-live video');return {t:v.currentTime,muted:v.muted,paused:v.paused,controls:v.controls,w:v.videoWidth,h:v.videoHeight,src:v.currentSrc,err:v.error&&v.error.code};})()`);
   await sleep(250);
@@ -143,6 +160,10 @@ try {
     for(let i=0;i<40&&v.currentTime<at+0.15&&!v.ended;i++)await new Promise(r=>setTimeout(r,50));
     return {at,now:v.currentTime,ended:v.ended,paused:v.paused,seekable:v.seekable.length?[v.seekable.start(0),v.seekable.end(0)]:null};})()`);
   check('scrub to 0.5 s then plays on', sc.at >= 0.45 && sc.at <= 0.55 && (sc.now > sc.at + 0.1 || sc.ended), sc);
+  await ev(`document.querySelector('#i-live video').pause()`);
+  await hover('#i-live video');
+  const ro = await ev(`(()=>{const v=document.querySelector('#i-live video');return {t:v.currentTime,paused:v.paused,controls:v.controls};})()`);
+  check('after scrub: paused mid-clip with controls shown', ro.t > 0.5 && ro.paused && ro.controls, ro);
   await snap('scrubbed');
   console.log('browser /video responses: ' + JSON.stringify(videoResponses));
   check('browser fetched the movie with 206 ranges', videoResponses.some(r => r.status == 206 && r.range), videoResponses.length);
@@ -174,4 +195,4 @@ try {
 
 check('no script errors', errors.length == 0, errors);
 console.log(failed ? `${failed} check(s) failed` : 'all live behaviour checks passed');
-done(failed ? 1 : 0);
+await done(failed ? 1 : 0);

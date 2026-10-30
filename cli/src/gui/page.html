@@ -171,11 +171,15 @@ function visible(){const evs=curEvent?[curEvent]:lib.events;return evs.flatMap(e
 // show them yet, so they get a calm placeholder tile instead of an image.
 const canShow=p=>{const m=byPath(p);return !m||m.preview!==false;};
 // Plain words for any file the browser cannot show (spec AC3).
+// Header counts: a Live Photo pair or RAW + JPEG is one item, so one photo;
+// a lone movie is a video and is counted as one, never as a photo.
+function countText(ps){const v=ps.filter(p=>{const im=byPath(p);return im&&im.video;}).length,ph=ps.length-v;
+ const t=[];if(ph||!v)t.push(ph+(ph==1?' photo':' photos'));if(v)t.push(v+(v==1?' video':' videos'));return t.join(', ');}
 const CANT="Can't preview this file here. Your original is kept unchanged.";
 const fmt=p=>{const m=byPath(p);return (m&&m.format)||'';};
 function figure(p,cap,sub){const f=document.createElement('figure');let i;
  if(canShow(p)){i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);}
- else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent='\u00a0\u2014 '+base(p)+'. '+CANT;i.append(b,m);}
+ else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent=base(p)+'. '+CANT;i.append(b,m);}
  const lm=byPath(p);if(lm&&lm.live){const l=document.createElement('button');l.type='button';l.className='live';l.textContent='LIVE';l.title='Play the Live Photo';l.onclick=e=>{e.stopPropagation();selected=p;setInfo(true);draw();playLive();};f.append(l);}
  const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
 function draw(){
@@ -185,12 +189,11 @@ function draw(){
   const g=document.createElement('div');g.className='grid';
   for(const p of ps){const f=figure(p,stem(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
   $('grid').append(g);}
- const n=evs.reduce((a,x)=>a+x.ps.length,0);
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
- $('photos-count').textContent=n+(n==1?' photo':' photos');
+ $('photos-count').textContent=countText(evs.flatMap(x=>x.ps));
  $('event-grid').innerHTML='';
  for(const e of lib.events){const ps=e.photos.filter(match);if(!ps.length)continue;
-  const f=figure(e.key,e.title,e.count+(e.count==1?' photo':' photos'));const im=f.querySelector('img');
+  const f=figure(e.key,e.title,countText(e.photos));const im=f.querySelector('img');
   const shown=ps.filter(canShow);
   if(im&&shown.length){f.onmousemove=ev=>{const r=im.getBoundingClientRect();const k=Math.min(shown.length-1,Math.max(0,Math.floor((ev.clientX-r.left)/r.width*shown.length)));im.src=img(shown[k]);};
   f.onmouseleave=()=>{im.src=img(e.key);};}
@@ -262,7 +265,7 @@ function sideDests(st){$('side-dests').innerHTML='';
   b.append(dot,s);b.onclick=()=>{pick(d.dest);show('health');};$('side-dests').append(b);}}
 async function init(){
  lib=await j('/api/library');$('lib').textContent='Folder: '+lib.library;
- $('lib-count').textContent=lib.images.length+' photos';
+ $('lib-count').textContent=countText(lib.images.map(i=>i.path));
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);sideDests(st);
  for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=base(d);o.title=d;$(sel).append(o);}}
  $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';
