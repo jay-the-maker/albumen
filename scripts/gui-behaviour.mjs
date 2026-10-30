@@ -148,6 +148,20 @@ try {
   check('R14: Info closed on Proof', await ev(`$('info').hidden`), false);
   check('R14: Info button disabled on Proof', await ev(`$('b-info').disabled`), false);
   await click('aside button[data-s="health"]');
+
+  // M4 AC7/AC8: the Family row opens a read-only view with the CLI's words.
+  await click('aside button[data-s="family"]');
+  await until(`document.querySelectorAll('#family-members .fam').length==12`, 'family members');
+  check('AC7: Family view open and lit', eq(await visibleView(), ['family']) && eq(await sideLit(), ['Family']), [await visibleView(), await sideLit()]);
+  const fam = await ev(`(async()=>{const f=await (await fetch('/api/family')).json();const shown=[$('family-summary').innerText,...[...document.querySelectorAll('#family-members .fam')].map(d=>d.innerText)].join('\\n');return [f.text.trimEnd(),shown];})()`);
+  check('AC8: Family view text equals the CLI summary', fam[0] == fam[1], fam);
+  check('AC8: revoked copy says their photos stay', /member-12 \(.*revoked; their photos stay/.test(fam[1]) && !/removed|deleted/i.test(fam[1]), fam[1]);
+  check('AC7: no buttons or inputs in the Family view', await ev(`document.querySelectorAll('#family button,#family input').length`) == 0, null);
+  if (process.env.SHOT) {
+    const shot = await cmd('Page.captureScreenshot', {format: 'png'});
+    (await import('node:fs')).writeFileSync(process.env.SHOT, Buffer.from(shot.result.data, 'base64'));
+    console.log('screenshot ' + process.env.SHOT);
+  }
 } catch (e) { console.error(e); failed++; }
 
 check('no script errors', errors.length == 0, errors);

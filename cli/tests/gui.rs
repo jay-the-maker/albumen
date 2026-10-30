@@ -572,3 +572,65 @@ fn product_lead_asks_after_fix_7_are_in_the_page() {
     // 7. Search matches a pair's RAW name.
     assert!(page.contains("[p,m&&m.raw]"));
 }
+
+/// M4 AC7/AC8: the read-only Family view shows the same words as
+/// `albumen family manifest --summary`, and offers no way to change anything.
+#[test]
+fn family_view_matches_the_cli_word_for_word_and_is_read_only() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (code, body) = get(&addr, "/api/family");
+    assert_eq!(code, 200, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let library = json["library"].as_str().expect("demo has a family library");
+    let text = json["text"].as_str().unwrap_or_else(|| panic!("{json}"));
+    let out = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .args(["family", "manifest", "--library", library, "--summary"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(text, String::from_utf8(out.stdout).unwrap());
+    assert!(
+        text.contains("12 members: 11 active, 1 revoked\n"),
+        "{text}"
+    );
+    assert!(text.contains("member-12 ("), "{text}");
+    assert_eq!(text.matches(": 2 photos").count(), 12, "{text}");
+    assert_eq!(
+        text.matches(", revoked; their photos stay\n").count(),
+        1,
+        "{text}"
+    );
+    for word in ["removed", "deleted", "Removed", "Deleted"] {
+        assert!(!text.contains(word), "{word}: {text}");
+    }
+
+    let (_, page) = get(&addr, "/");
+    assert!(
+        page.contains("<h2>FAMILY</h2>\n<button data-s=\"family\"><span>Family</span></button>")
+    );
+    let at = page.find("<section id=\"family\"").expect("family section");
+    let section = &page[at..at + page[at..].find("</section>").unwrap()];
+    assert!(
+        !section.contains("<button"),
+        "family view has a button: {section}"
+    );
+    assert!(
+        !section.contains("<input"),
+        "family view has an input: {section}"
+    );
+    let lower = section.to_ascii_lowercase();
+    for word in ["removed", "deleted"] {
+        assert!(!lower.contains(word), "{word} in {section}");
+    }
+    // The page only reads the family; no POST names it.
+    let script = &page[page.rfind("<script>").unwrap()..];
+    let fam = &script[script.find("async function family()").unwrap()..];
+    let fam = &fam[..fam.find('\n').unwrap_or(fam.len())];
+    assert!(!fam.contains("POST"), "{fam}");
+    let (code, _) = request(
+        &addr,
+        &format!("POST /api/family HTTP/1.1\r\nHost: {addr}\r\nX-Albumen: 1\r\nContent-Length: 0\r\n\r\n"),
+    );
+    assert_ne!(code, 200);
+}
