@@ -85,6 +85,18 @@ impl LibraryIndex {
     /// Load the saved index for `library` from `index_dir`, or build it, then
     /// bring it current. `None` keeps the index in memory only.
     pub fn open(library: &Path, index_dir: Option<&Path>) -> Result<Self, IngestError> {
+        Self::open_with_progress(library, index_dir, &mut |_| {})
+    }
+
+    /// [`LibraryIndex::open`], calling `on_file` with each file a directory
+    /// listing finds, as it is found, so a caller can show progress while a
+    /// first build walks the tree. Directories that are still fresh in a
+    /// saved index are not listed, so they report nothing.
+    pub fn open_with_progress(
+        library: &Path,
+        index_dir: Option<&Path>,
+        on_file: &mut dyn FnMut(&str),
+    ) -> Result<Self, IngestError> {
         let began = Instant::now();
         let root = SourceRoot::open(library)?;
         let file = match index_dir {
@@ -117,7 +129,7 @@ impl LibraryIndex {
             index.dirs = saved;
             index.loaded = true;
         }
-        index.refresh()?;
+        index.refresh_with(on_file)?;
         index.open_ms = began.elapsed().as_secs_f64() * 1000.0;
         Ok(index)
     }
@@ -130,9 +142,13 @@ impl LibraryIndex {
 
     /// Stat every indexed directory and list again the ones that changed.
     pub fn refresh(&mut self) -> Result<RefreshStats, IngestError> {
+        self.refresh_with(&mut |_| {})
+    }
+
+    fn refresh_with(&mut self, on_file: &mut dyn FnMut(&str)) -> Result<RefreshStats, IngestError> {
         let mut stats = RefreshStats::default();
         let now = now_ns();
-        let changed = self.sync_dir(String::new(), now, &mut stats)?;
+        let changed = self.sync_dir(String::new(), now, &mut stats, on_file)?;
         // Drop records for directories that are no longer reachable.
         let mut reachable = std::collections::BTreeSet::new();
         let mut stack = vec![String::new()];
@@ -166,6 +182,7 @@ impl LibraryIndex {
         relative: String,
         now: u64,
         stats: &mut RefreshStats,
+        on_file: &mut dyn FnMut(&str),
     ) -> Result<bool, IngestError> {
         let path = self.absolute(&relative);
         stats.dirs_checked += 1;
@@ -180,6 +197,11 @@ impl LibraryIndex {
         if !fresh {
             stats.dirs_listed += 1;
             let entries = list_dir(&self.root, &path)?;
+            for (name, is_dir) in &entries {
+                if !is_dir {
+                    on_file(&join(&relative, name));
+                }
+            }
             let record = DirRecord {
                 mtime_ns,
                 listed_ns: now,
@@ -199,7 +221,7 @@ impl LibraryIndex {
             .map(|(name, _)| join(&relative, name))
             .collect();
         for child in children {
-            changed |= self.sync_dir(child, now, stats)?;
+            changed |= self.sync_dir(child, now, stats, on_file)?;
         }
         Ok(changed)
     }

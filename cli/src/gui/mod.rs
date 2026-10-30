@@ -98,6 +98,9 @@ struct Server {
     /// The last built /api/library answer (one walk per refresh, not per
     /// request); None until the first refresh finishes.
     library: Mutex<Option<Arc<LibraryView>>>,
+    /// Photos the running walk has found so far, shown while indexing so a
+    /// first open (no saved index) never sits at 0.
+    found: std::sync::atomic::AtomicUsize,
 }
 
 /// One library walk, kept compact so /api/library never walks per request:
@@ -116,6 +119,9 @@ struct LibraryView {
     paths: Vec<u8>,
     path_ends: Vec<u32>,
     events: Vec<EventIdx>,
+    /// While indexing: photos found so far by the running walk (set from the
+    /// server just before answering). Never below the images already here.
+    found: std::sync::atomic::AtomicUsize,
 }
 
 struct EventIdx {
@@ -205,13 +211,18 @@ impl LibraryView {
         let js = |s: &str| serde_json::Value::from(s).to_string();
         write!(
             w,
-            "{{\"library\":{},\"files\":{},\"image_bytes\":{},\"thumbs_generation\":{},\"status\":\"{}\",\"total_images\":{},\"offset\":{}",
+            "{{\"library\":{},\"files\":{},\"image_bytes\":{},\"thumbs_generation\":{},\"status\":\"{}\",\"total_images\":{},\"found\":{},\"offset\":{}",
             js(&self.library),
             self.files,
             self.image_bytes,
             self.generation,
             if self.ready { "ready" } else { "indexing" },
             n,
+            if self.ready {
+                n
+            } else {
+                n.max(self.found.load(std::sync::atomic::Ordering::Relaxed))
+            },
             a
         )?;
         if page.is_none() {
@@ -329,7 +340,7 @@ fn refresh_thumbs(server: &Arc<Server>) {
         let files = if s.config.demo {
             library_files(lib)
         } else {
-            library_files_indexed(lib)
+            library_files_indexed(lib, &s.found)
         };
         let Some(cache) = live::cache_dir(lib) else {
             publish_library(&s, gen, files, &Default::default());
@@ -464,6 +475,7 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
         thumbs: Mutex::new(ThumbView::default()),
         thumb_gen: Default::default(),
         library: Mutex::new(None),
+        found: Default::default(),
     });
     if server.config.demo {
         // The demo library is tiny: have it ready before the first request.
@@ -546,10 +558,17 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
                     .unwrap_or(500);
                 (o.parse().unwrap_or(0), limit)
             });
+            let found = server.found.load(std::sync::atomic::Ordering::Relaxed);
             match cur {
-                Some(v) => v.respond(&mut stream, page),
+                Some(v) => {
+                    if !v.ready {
+                        v.found.store(found, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    v.respond(&mut stream, page)
+                }
                 None => LibraryView {
                     library: server.config.library.display().to_string(),
+                    found: found.into(),
                     ..Default::default()
                 }
                 .respond(&mut stream, page),
@@ -687,12 +706,29 @@ fn library_files(library: &Path) -> Vec<String> {
 /// again only the changed ones, save. A cold open with a saved index never
 /// walks the whole tree. No index dir, or any index error: a plain walk.
 /// Sorted like [`library_files`], so both give the same listing.
-fn library_files_indexed(library: &Path) -> Vec<String> {
+/// `found` counts the photos a first build (no saved index) lists, as it
+/// lists them, for the "photos so far" line.
+fn library_files_indexed(library: &Path, found: &std::sync::atomic::AtomicUsize) -> Vec<String> {
+    use std::sync::atomic::Ordering;
     let dir = albumen_ingest::index::default_index_dir();
-    match albumen_ingest::index::LibraryIndex::open(library, dir.as_deref()) {
+    let mut n = 0usize;
+    found.store(0, Ordering::Relaxed);
+    let opened = albumen_ingest::index::LibraryIndex::open_with_progress(
+        library,
+        dir.as_deref(),
+        &mut |rel| {
+            if is_photo(rel) {
+                n += 1;
+                found.store(n, Ordering::Relaxed);
+            }
+        },
+    );
+    match opened {
         Ok(index) => {
             let mut paths = index.into_paths();
             paths.sort();
+            let photos = paths.iter().filter(|p| is_photo(p)).count();
+            found.fetch_max(photos, Ordering::Relaxed);
             paths
         }
         Err(_) => library_files(library),
@@ -1257,6 +1293,7 @@ mod tests {
             thumbs: Mutex::new(ThumbView::default()),
             thumb_gen: Default::default(),
             library: Mutex::new(None),
+            found: Default::default(),
         };
         let mut early = 0;
         let files = library_files(&built.library);

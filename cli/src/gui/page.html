@@ -266,7 +266,7 @@ function sideDests(st){$('side-dests').innerHTML='';
   b.append(dot,s);b.onclick=()=>{pick(d.dest);show('health');};$('side-dests').append(b);}}
 async function init(){
  lib=await j('/api/library');
- while(lib.status==='indexing'){$('lib-count').textContent='Reading the folder… '+lib.total_images+' photos so far';await new Promise(r=>setTimeout(r,500));lib=await j('/api/library');}
+ while(lib.status==='indexing'){$('lib-count').textContent='Reading the folder… '+Math.max(lib.total_images,lib.found||0)+' photos so far';await new Promise(r=>setTimeout(r,200));lib=await j('/api/library');}
  $('lib').textContent='Folder: '+lib.library;
  $('lib-count').textContent=countText(lib.images.map(i=>i.path));
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);sideDests(st);
