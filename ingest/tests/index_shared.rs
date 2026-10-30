@@ -154,14 +154,21 @@ fn gui_and_search_tool_share_one_index() {
         );
         std::thread::spawn(move || {
             let mut times_us = Vec::new();
+            // (start offset ms from the reader's start, UTC epoch ms, duration us)
+            let mut slow_at = Vec::new();
+            let start = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 let t = Instant::now();
+                let wall = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis());
                 let checked = check_saved_file(&file);
                 let us = t.elapsed().as_micros() as u64;
                 times_us.push(us);
                 max_read_us.fetch_max(us, Ordering::Relaxed);
                 if us > 100_000 {
                     slow_reads.fetch_add(1, Ordering::Relaxed);
+                    slow_at.push(((t - start).as_millis(), wall, us));
                 }
                 reads.fetch_add(1, Ordering::Relaxed);
                 if let Err(err) = checked {
@@ -169,7 +176,7 @@ fn gui_and_search_tool_share_one_index() {
                     first_failure.lock().unwrap().get_or_insert(err);
                 }
             }
-            times_us
+            (times_us, slow_at)
         })
     };
 
@@ -214,14 +221,35 @@ fn gui_and_search_tool_share_one_index() {
     }
     merges += search.merges;
     stop.store(true, Ordering::Relaxed);
-    let mut times_us = reader.join().unwrap();
+    let (mut times_us, slow_at) = reader.join().unwrap();
     times_us.sort_unstable();
     let pct = |q: f64| {
         times_us
             .get(((times_us.len() as f64 * q) as usize).min(times_us.len().saturating_sub(1)))
             .map_or(0.0, |&us| us as f64 / 1000.0)
     };
-    let (p50, p95) = (pct(0.50), pct(0.95));
+    let (p50, p95, p99) = (pct(0.50), pct(0.95), pct(0.99));
+    // Read-duration histogram, upper bounds in ms (last bucket is open).
+    let bounds = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0];
+    let mut buckets = vec![0u64; bounds.len() + 1];
+    for &us in &times_us {
+        let ms = us as f64 / 1000.0;
+        buckets[bounds.iter().position(|&b| ms <= b).unwrap_or(bounds.len())] += 1;
+    }
+    let histogram: Vec<String> = bounds
+        .iter()
+        .map(|b| format!("le{b}"))
+        .chain(std::iter::once("gt200".to_string()))
+        .zip(&buckets)
+        .map(|(k, n)| format!("{k}:{n}"))
+        .collect();
+    println!("M6 X2 HISTOGRAM seed={seed} {}", histogram.join(" "));
+    for (offset_ms, wall_ms, us) in &slow_at {
+        println!(
+            "M6 X2 SLOW_READ seed={seed} at_ms={offset_ms} utc_epoch_ms={wall_ms} read_ms={:.2}",
+            *us as f64 / 1000.0
+        );
+    }
     let fresh = LibraryIndex::open(library.path(), None).unwrap();
     let (_, saved) = read_saved_file(&file).unwrap();
     let byte_identical = saved == fresh.paths();
@@ -234,7 +262,7 @@ fn gui_and_search_tool_share_one_index() {
     let bars_met = p95 <= 20.0 && max_ms <= 100.0;
     println!(
         "M6 X2 RESULT seed={seed} iters={iters} files={files} reads={} parse_failures={} \
-         read_p50_ms={p50:.2} read_p95_ms={p95:.2} max_read_ms={max_ms:.2} \
+         read_p50_ms={p50:.2} read_p95_ms={p95:.2} read_p99_ms={p99:.2} max_read_ms={max_ms:.2} \
          slow_reads_over_100ms={slow} read_bars_met={bars_met} \
          regressions={regressions} merges={merges} final_generation={last_generation} \
          equals_fresh_walk={byte_identical} stale_partials={} first_failure={:?}",
