@@ -312,6 +312,9 @@ pub fn reserve_blocks(file: &std::fs::File, len: u64) -> std::io::Result<()> {
 /// that year's DST rules via `SystemTimeToTzSpecificLocalTimeEx`; `TZ` has
 /// no effect there.
 #[cfg(unix)]
+// time_t and tm_gmtoff are i64 on 64-bit Linux and macOS but narrower on
+// some targets, so these conversions are only useless on some platforms.
+#[allow(clippy::useless_conversion)]
 pub fn utc_offset_minutes(unix: i64) -> Option<i64> {
     extern "C" {
         fn tzset();

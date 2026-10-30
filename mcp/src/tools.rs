@@ -683,6 +683,8 @@ fn local_text(ns: i128) -> String {
         tm
     };
     // Real offsets are within +-14 h; anything else means a bad conversion.
+    // tm_gmtoff is i64 on 64-bit Linux and macOS but narrower on some targets.
+    #[allow(clippy::useless_conversion)]
     let offset_min = i64::from(tm.tm_gmtoff).div_euclid(60);
     if offset_min.abs() > 14 * 60 {
         return utc_minutes(ns);
