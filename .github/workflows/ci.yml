@@ -110,6 +110,15 @@ jobs:
         shell: bash
         run: scripts/with-minio.sh cargo test --locked --all-targets
 
+      # status.rs on its own, so a filter or rename cannot drop it silently:
+      # the step fails unless all 6 tests really ran and passed.
+      - name: albumen status on synthetic backups (status.rs, all 6 ran)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p albumen --test status 2>&1 | tee status.log
+          grep -E "^test result: ok\. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;" status.log
+
       # CI only: runners are throwaway VMs. Never run tzutil on a dev PC.
       - name: Search labels under India Standard Time (UTC+5:30)
         if: runner.os == 'Windows'
