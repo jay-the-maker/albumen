@@ -172,7 +172,17 @@ const GRID_PAGE=600;let gridLimit=GRID_PAGE,moreObs=null,moreTimer=null,gridMore
 // Next page when the end is near: IntersectionObserver first, and a scroll
 // and timer check too, since an observer alone can stop firing (seen in Edge).
 function nearEnd(){const b=$('grid-more');if(!b||!gridMore)return;const v=$('photos').getBoundingClientRect(),r=b.getBoundingClientRect();if(r.top<v.bottom+800&&r.bottom>v.top-800)gridMore();}
-let nearQ=false;$('photos').addEventListener('scroll',()=>{if(nearQ)return;nearQ=true;requestAnimationFrame(()=>{nearQ=false;nearEnd();});},{passive:true});
+// Headless Edge can go quiet on frame callbacks (and so on intersection
+// callbacks) for long spells while scrolling still happens. Work that must
+// not wait on a frame runs on the next frame or after 50 ms, whichever is
+// first, and the scroll handler also refills/empties blocks itself.
+const next=f=>{let d=false;const g=()=>{if(!d){d=true;f();}};requestAnimationFrame(g);setTimeout(g,50);};
+let nearQ=false;$('photos').addEventListener('scroll',()=>{if(nearQ)return;nearQ=true;next(()=>{nearQ=false;nearEnd();sweep();});},{passive:true});
+// Blocks are in page order, so a binary search finds the ones near view.
+function sweep(){if(!gs||!gs.blocks||!gs.blocks.length)return;const P=$('photos'),top=P.scrollTop-4000,bot=P.scrollTop+P.clientHeight+4000,B=gs.blocks;
+ let lo=0,hi=B.length-1;while(lo<hi){const mid=(lo+hi)>>1;const g=B[mid];if(g.offsetTop+g.offsetHeight<top)lo=mid+1;else hi=mid;}
+ const keep=new Set();for(let i=lo;i<B.length&&B[i].offsetTop<=bot;i++){keep.add(B[i]);if(B[i]._empty)fillBlock(B[i]);}
+ for(const g of gs.live)if(!keep.has(g))emptyBlock(g,g.offsetHeight);gs.live=keep;}
 // Search matches the shown file and, for a RAW + JPEG pair, the RAW's name.
 function match(p){const t=$('search').value.trim().toLowerCase();if(!t)return true;const m=byPath(p);
  return [p,m&&m.raw].filter(Boolean).some(x=>base(x).toLowerCase().includes(t));}
@@ -223,7 +233,7 @@ let gs=null;
 // Blocks far from view give up their tiles and keep only their height, and
 // get them back on the way into view, so the page holds a few thousand
 // tiles at most and scrolling 380k never grows the page without bound.
-function fillBlock(g){for(const p of g._ps){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.dataset.p=p;g.append(f);}g._empty=false;g.style.height='';}
+function fillBlock(g){for(const p of g._ps){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.dataset.p=p;g.append(f);}g._empty=false;g.style.height='';if(gs&&gs.live)gs.live.add(g);}
 function emptyBlock(g,h){if(g._empty||!h)return;g.style.height=h+'px';g.textContent='';g._empty=true;}
 let bObs=null;
 function blockObs(){if(!bObs)bObs=new IntersectionObserver(es=>{for(const x of es){const g=x.target;if(x.isIntersecting){if(g._empty)fillBlock(g);}else emptyBlock(g,x.boundingClientRect.height);}},{root:$('photos'),rootMargin:'4000px 0px'});return bObs;}
@@ -240,7 +250,7 @@ function addTiles(n){const more=$('grid-more');
   const g=document.createElement('div');g.className='grid';g.style.contentVisibility='auto';g.style.containIntrinsicSize='auto 1200px';
   const k=Math.min(n,ps.length-gs.gj);
   g._ps=ps.slice(gs.gj,gs.gj+k);fillBlock(g);
-  more?more.before(g):$('grid').append(g);blockObs().observe(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
+  more?more.before(g):$('grid').append(g);blockObs().observe(g);gs.blocks.push(g);gs.live.add(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
 // G3: one calm, dismissible line per view instead of the copy on every tile.
 const npGone=new Set();let npKey='';
 const plural=(n,one,many)=>n+' '+(n==1?one:many);
@@ -254,13 +264,13 @@ function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
  if(bObs){bObs.disconnect();bObs=null;}if(pObs){pObs.disconnect();pObs=null;}pq.length=0;$('grid').innerHTML='';early=null;if(moreObs){moreObs.disconnect();moreObs=null;}clearInterval(moreTimer);moreTimer=null;gridMore=null;
  let total=0;for(const x of evs)total+=x.ps.length;
- gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
+ gs={evs,gi:0,gj:0,done:0,total,blocks:[],live:new Set()};addTiles(gridLimit);
  if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
   // Edge stall (r8: stuck at 301,400 of 380,000): a page that never got its
   // next frame callback left busy set forever. Each chunk now runs on the
   // next frame or after 50 ms, whichever comes first, busy is always cleared
   // (even if a chunk throws), and a page left busy for 2 s is retried.
-  let busy=0;const next=f=>{let d=false;const g=()=>{if(!d){d=true;f();}};requestAnimationFrame(g);setTimeout(g,50);};
+  let busy=0;
   const more=()=>{if(busy&&performance.now()-busy<2000||!b.isConnected)return;busy=performance.now();gridLimit+=GRID_PAGE;let left=GRID_PAGE;
    const step=()=>{let again=false;try{if(!b.isConnected)return;busy=performance.now();addTiles(Math.min(GRID_STEP,left));left-=GRID_STEP;again=left>0&&gs.done<total;}
     finally{if(again)next(step);else{busy=0;if(b.isConnected)done();}}};step();};
