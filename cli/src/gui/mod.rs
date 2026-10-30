@@ -554,12 +554,7 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
         ("GET", "/api/found") => {
             // While a first walk runs: the photos found so far, in the order
             // found (append-only, so tiles already shown never move).
-            let paths = server.found_paths.lock().unwrap().clone();
-            let body = serde_json::json!({
-                "found": server.found.load(std::sync::atomic::Ordering::Relaxed),
-                "paths": paths,
-            })
-            .to_string();
+            let body = found_json(server).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/library") => {
@@ -731,14 +726,33 @@ fn library_files_indexed(
     found: &std::sync::atomic::AtomicUsize,
     found_paths: &Mutex<Vec<String>>,
 ) -> Vec<String> {
-    use std::sync::atomic::Ordering;
     let dir = albumen_ingest::index::default_index_dir();
+    library_files_indexed_in(library, dir.as_deref(), found, found_paths)
+}
+
+/// The `/api/found` answer: the running count and the photos found so far.
+fn found_json(server: &Server) -> serde_json::Value {
+    let paths = server.found_paths.lock().unwrap().clone();
+    serde_json::json!({
+        "found": server.found.load(std::sync::atomic::Ordering::Relaxed),
+        "paths": paths,
+    })
+}
+
+/// [`library_files_indexed`] with an explicit index directory.
+fn library_files_indexed_in(
+    library: &Path,
+    dir: Option<&Path>,
+    found: &std::sync::atomic::AtomicUsize,
+    found_paths: &Mutex<Vec<String>>,
+) -> Vec<String> {
+    use std::sync::atomic::Ordering;
     let mut n = 0usize;
     found.store(0, Ordering::Relaxed);
     found_paths.lock().unwrap().clear();
     let opened = albumen_ingest::index::LibraryIndex::open_with_progress(
         library,
-        dir.as_deref(),
+        dir,
         &mut |rel| {
             if is_photo(rel) {
                 n += 1;
@@ -1301,6 +1315,62 @@ mod tests {
 
     /// F1: the compact listing streams the same images and events as the
     /// per-request listing did, and a page is a slice of it.
+    /// /api/found: a first walk (no saved index) records the photos it
+    /// finds, at most one page, never other files; a second open from the
+    /// saved index lists the same files.
+    #[test]
+    fn api_found_lists_photos_found_by_a_first_walk() {
+        let lib = tempfile::tempdir().unwrap();
+        let idx = tempfile::tempdir().unwrap();
+        let sub = lib.path().join("2024");
+        std::fs::create_dir_all(&sub).unwrap();
+        for k in 0..FOUND_SHOWN + 5 {
+            std::fs::write(sub.join(format!("p{k:04}.jpg")), b"synthetic").unwrap();
+        }
+        std::fs::write(lib.path().join("notes.txt"), b"not a photo").unwrap();
+        let found = std::sync::atomic::AtomicUsize::default();
+        let found_paths = Mutex::new(Vec::new());
+        let files = library_files_indexed_in(lib.path(), Some(idx.path()), &found, &found_paths);
+        let server = Server {
+            config: Config {
+                library: lib.path().to_path_buf(),
+                backups: Vec::new(),
+                card: None,
+                state: lib.path().to_path_buf(),
+                max_age_secs: 0,
+                demo: false,
+            },
+            jobs: Mutex::new(Vec::new()),
+            last_scan: Mutex::new(None),
+            thumbs: Mutex::new(ThumbView::default()),
+            thumb_gen: Default::default(),
+            library: Mutex::new(None),
+            found,
+            found_paths,
+        };
+        let v = found_json(&server);
+        assert_eq!(v["found"], FOUND_SHOWN + 5);
+        let paths: Vec<&str> = v["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap())
+            .collect();
+        assert_eq!(paths.len(), FOUND_SHOWN);
+        assert!(paths.iter().all(|p| p.starts_with("2024/") && p.ends_with(".jpg")));
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), FOUND_SHOWN);
+        assert!(paths.iter().all(|p| files.iter().any(|f| f == p)));
+        // A second open from the saved index lists the same files.
+        let again = library_files_indexed_in(
+            lib.path(),
+            Some(idx.path()),
+            &Default::default(),
+            &Mutex::new(Vec::new()),
+        );
+        assert_eq!(again, files);
+    }
+
     #[test]
     fn compact_listing_matches_library_json() {
         let work = tempfile::tempdir().unwrap();
