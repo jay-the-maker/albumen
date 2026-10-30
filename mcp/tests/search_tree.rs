@@ -57,7 +57,13 @@ fn settle() {
 
 /// T pinned for every label: 2026-10-29 17:42 PDT = 2026-10-30T00:42:00Z.
 const PINNED_NS: &str = "1793320920000000000";
+/// Labels use local time from `TZ` on Linux and macOS. On Windows the
+/// server has no zone database and names UTC instead (see `local_text`),
+/// so `TZ` has no effect there and the label is the UTC minute.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const T: &str = "2026-10-29 17:42 PDT";
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const T: &str = "2026-10-30 00:42 UTC";
 const T_UTC: &str = "2026-10-30T00:42:00Z";
 
 fn open(root: &Path, index_dir: &Path) -> Library {
@@ -521,7 +527,7 @@ fn freshness_spec_v1_acceptance_checks_word_for_word() {
             "state": "fresh",
             "checked_at": T_UTC,
             "folders_not_rechecked": 0,
-            "label": "search: 3 matches, checked against disk at 2026-10-29 17:42 PDT",
+            "label": format!("search: 3 matches, checked against disk at {T}"),
             "next": null,
         })
     );
@@ -532,7 +538,7 @@ fn freshness_spec_v1_acceptance_checks_word_for_word() {
     let answer = search(&library, "alpha-01").freshness;
     assert_eq!(
         answer["label"],
-        "search: 3 matches, checked against disk at 2026-10-29 17:42 PDT; 1 folder not rechecked"
+        format!("search: 3 matches, checked against disk at {T}; 1 folder not rechecked")
     );
     assert_eq!(
         answer["next"],
@@ -553,7 +559,7 @@ fn freshness_spec_v1_acceptance_checks_word_for_word() {
     let answer = search(&library, "solo-01").freshness;
     assert_eq!(
         answer["label"],
-        "search: 1 match, checked against disk at 2026-10-29 17:42 PDT; 4 folders not rechecked"
+        format!("search: 1 match, checked against disk at {T}; 4 folders not rechecked")
     );
     assert_eq!(
         answer["next"],
@@ -573,7 +579,7 @@ fn freshness_spec_v1_acceptance_checks_word_for_word() {
             "state": "rebuilt",
             "checked_at": T_UTC,
             "folders_not_rechecked": 0,
-            "label": "search: 0 matches, read every folder at 2026-10-29 17:42 PDT (the saved index was rebuilt)",
+            "label": format!("search: 0 matches, read every folder at {T} (the saved index was rebuilt)"),
             "next": null,
         })
     );
@@ -655,7 +661,7 @@ fn freshness_spec_v1_acceptance_checks_word_for_word() {
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(
         page["freshness"]["label"],
-        "search: 2 matches, checked against disk at 2026-10-29 17:42 PDT"
+        format!("search: 2 matches, checked against disk at {T}")
     );
     assert_consistent(&page["freshness"], 0);
     fs::rename(&wire, tmp.path().join("wire-unplugged")).unwrap();
