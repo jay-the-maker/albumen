@@ -74,8 +74,11 @@ jobs:
 
       - name: X1 GUI + readers under one writer, 10,000 files x 10,000 cycles
         run: |
-          ALBUMEN_M6_FILES=10000 ALBUMEN_M6_CYCLES=10000 \
-            M6_PKG=albumen M6_TEST=gui_index_x1 M6_RESULT_MAX=index_read_max_ms=100 \
+          # Peak RSS bar on the gui child by its own pid (XO 20:58Z); the
+          # tree peak (harness included) is printed as a diagnostic only.
+          ALBUMEN_M6_FILES=10000 ALBUMEN_M6_CYCLES=10000 ALBUMEN_M6_SEED=1 M6_TREE_RSS=diag \
+            M6_PKG=albumen M6_TEST=gui_index_x1 \
+            M6_RESULT_MAX="index_read_max_ms=100 gui_child_peak_rss_kb=339968" \
             bash .github/m6-one.sh readers_keep_answering_while_one_writer_saves X1
 
       - name: The rest of the index tests

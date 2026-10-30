@@ -22,7 +22,11 @@ if [ -z "$rss" ]; then
   exit 1
 fi
 echo "M6 $tag PEAK_RSS_KB=$rss bar_kb=$max_kb"
-if [ "$rss" -gt "$max_kb" ]; then
+# M6_TREE_RSS=diag (X1, XO 20:58Z): the tree peak is printed but the bar is
+# on the product process, asserted in the test and via M6_RESULT_MAX.
+if [ "${M6_TREE_RSS:-bar}" = diag ]; then
+  echo "M6 $tag tree peak RSS is a diagnostic here (bar is on the product child)"
+elif [ "$rss" -gt "$max_kb" ]; then
   echo "::error::$name peak RSS ${rss} kB over ${max_kb} kB (332 MiB)"
   exit 1
 fi
@@ -34,12 +38,13 @@ if ! grep -q "M6 $tag RESULT" "$log"; then
   echo "::error::$name printed no 'M6 $tag RESULT' line"
   exit 1
 fi
-# Optional extra bar on one RESULT field, e.g. M6_RESULT_MAX="index_read_max_ms=100".
-if [ -n "${M6_RESULT_MAX:-}" ]; then
-  key=${M6_RESULT_MAX%%=*} lim=${M6_RESULT_MAX#*=}
+# Optional extra bars on RESULT fields, space-separated key=limit pairs,
+# e.g. M6_RESULT_MAX="index_read_max_ms=100 gui_child_peak_rss_kb=339968".
+for bar in ${M6_RESULT_MAX:-}; do
+  key=${bar%%=*} lim=${bar#*=}
   val=$(grep "M6 $tag RESULT" "$log" | tail -1 | tr ' ' '\n' | sed -n "s/^$key=//p")
   [ -n "$val" ] || { echo "::error::no $key in the M6 $tag RESULT line"; exit 1; }
   echo "M6 $tag $key=$val bar=$lim"
-  awk -v v="$val" -v l="$lim" 'BEGIN{exit !(v+0 <= l+0)}' \
+  awk -v v="$val" -v l="$lim" 'BEGIN{exit !(v ~ /^[0-9.]+$/ && v+0 <= l+0)}' \
     || { echo "::error::$key $val over $lim"; exit 1; }
-fi
+done

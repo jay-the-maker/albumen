@@ -5,7 +5,10 @@
 //! longer than the writer's own count for that generation). GUI page
 //! latency during writes is compared with a same-run, spaced, no-writer
 //! control (Product Lead X1 ruling, 20:31Z): p50 within 10% of it, and
-//! /api/library max under write <= 16.7 ms.
+//! /api/library max under write <= 16.7 ms. XO 20:58Z: the base and
+//! under-write windows are interleaved in rounds in the same run
+//! (ALBUMEN_M6_ROUNDS, ALBUMEN_M6_SEED), and peak RSS <= 332 MiB is asserted
+//! on the gui child process by its own pid (not the harness or rustc).
 //! Synthetic files only.
 //!
 //! Env: ALBUMEN_M6_FILES (default 2000), ALBUMEN_M6_CYCLES (save/read
@@ -89,6 +92,31 @@ fn wait_ready(addr: &str) -> serde_json::Value {
     panic!("library never ready");
 }
 
+/// Peak resident memory of one process, by its own pid, in kB (XO 20:58Z:
+/// the 332 MiB budget is the product's, so X1 measures the gui child only,
+/// not the test harness or rustc). Linux: VmHWM. Windows: PeakWorkingSet64
+/// from the inbox PowerShell. Elsewhere: not measured (None).
+fn peak_rss_kb(pid: u32) -> Option<u64> {
+    if cfg!(target_os = "linux") {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        line.split_whitespace().nth(1)?.parse().ok()
+    } else if cfg!(windows) {
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command"])
+            .arg(format!("(Get-Process -Id {pid}).PeakWorkingSet64"))
+            .output()
+            .ok()?;
+        let bytes: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        Some(bytes / 1024)
+    } else {
+        None
+    }
+}
+
+/// Peak RSS bar for the gui child: 332 MiB.
+const MAX_CHILD_RSS_KB: u64 = 339_968;
+
 fn env_num(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -133,7 +161,7 @@ fn readers_keep_answering_while_one_writer_saves() {
     let file = writer.file().unwrap().to_path_buf();
 
     let began = Instant::now();
-    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    let (gui, addr) = start(library.path(), work.path(), index.path(), home.path());
     let first = wait_ready(&addr);
     let first_ms = began.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(first["images"].as_array().unwrap().len() as u64, files);
@@ -209,49 +237,80 @@ fn readers_keep_answering_while_one_writer_saves() {
     // running and no writer.
     let mut warm = gui_pages(&addr, 300);
     let (warm_p50, warm_max) = (pct(&mut warm, 0.50), pct(&mut warm, 1.0));
-    // The X1 base (the bar): single requests spaced out like the
-    // write-phase samples, the same index readers running, no writer.
-    let mut spaced: Vec<f64> = (0..300)
-        .flat_map(|_| {
-            std::thread::sleep(Duration::from_millis(5));
-            gui_pages(&addr, 1)
-        })
-        .collect();
+    // The X1 base (the bar) is the same-run, spaced, no-writer control
+    // (59a96c4). XO 20:58Z: interleave it with the under-write windows so
+    // drift and noise land on both sides. The run is split into `rounds`;
+    // each round has one write window (cycles/rounds writer refreshes, a
+    // GUI sample every 4th) and one base window (as many single samples,
+    // spaced like that round's write samples, the same readers running, no
+    // writer). ALBUMEN_M6_SEED picks which window goes first in each round
+    // and where the writer's edits start.
+    let rounds = env_num("ALBUMEN_M6_ROUNDS", 20).clamp(1, cycles.max(1));
+    let seed = env_num("ALBUMEN_M6_SEED", 1);
+    let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next_bit = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng & 1 == 1
+    };
+    println!("M6 X1 seed={seed} rounds={rounds}");
+    let mut spaced: Vec<f64> = Vec::new();
+    let mut windows: Vec<(f64, f64)> = Vec::new();
+    let mut during = Vec::new();
+    let mut serial = seed % 50;
+    let mut save_errors = 0u64;
+    let mut cycle = 0u64;
+    let mut base_gap = Duration::from_millis(5);
+    for round in 0..rounds {
+        let round_cycles = cycles / rounds + u64::from(round < cycles % rounds);
+        let base_first = next_bit();
+        for phase in 0..2 {
+            if (phase == 0) == base_first {
+                let n = round_cycles.div_ceil(4).max(1);
+                for _ in 0..n {
+                    std::thread::sleep(base_gap);
+                    spaced.extend(gui_pages(&addr, 1));
+                }
+                continue;
+            }
+            let w_began = Instant::now();
+            let mut samples = 0u32;
+            for _ in 0..round_cycles {
+                serial += 1;
+                let dir = format!("d{:02}", serial % 50);
+                if cycle.is_multiple_of(2) {
+                    let rel = format!("{dir}/new{serial:07}.jpg");
+                    std::fs::write(library.path().join(&rel), b"").unwrap();
+                    all.insert(rel);
+                } else if let Some(rel) = all.iter().find(|r| r.starts_with(&dir)).cloned() {
+                    std::fs::remove_file(library.path().join(&rel)).unwrap();
+                    all.remove(&rel);
+                }
+                let w0 = (Instant::now() - t0).as_secs_f64() * 1000.0;
+                writer.refresh().unwrap();
+                windows.push((w0, (Instant::now() - t0).as_secs_f64() * 1000.0));
+                if writer.save_error.is_some() {
+                    save_errors += 1;
+                }
+                let g = writer.generation().unwrap();
+                counts.lock().unwrap().insert(g, writer.paths().len());
+                if cycle.is_multiple_of(4) {
+                    during.extend(gui_pages(&addr, 1));
+                    samples += 1;
+                }
+                cycle += 1;
+            }
+            if samples > 0 {
+                base_gap = (w_began.elapsed() / samples).min(Duration::from_millis(100));
+            }
+        }
+    }
     let (base_p50, base_p95, base_max) = (
         pct(&mut spaced, 0.50),
         pct(&mut spaced, 0.95),
         pct(&mut spaced, 1.0),
     );
-    let mut windows: Vec<(f64, f64)> = Vec::new();
-
-    let mut during = Vec::new();
-    let mut serial = 0u64;
-    let mut save_errors = 0u64;
-    for cycle in 0..cycles {
-        serial += 1;
-        let dir = format!("d{:02}", serial % 50);
-        if cycle % 2 == 0 {
-            let rel = format!("{dir}/new{serial:07}.jpg");
-            std::fs::write(library.path().join(&rel), b"").unwrap();
-            all.insert(rel);
-        } else if let Some(rel) = all.iter().find(|r| r.starts_with(&dir)).cloned() {
-            std::fs::remove_file(library.path().join(&rel)).unwrap();
-            all.remove(&rel);
-        }
-        let w0 = (Instant::now() - t0).as_secs_f64() * 1000.0;
-        writer.refresh().unwrap();
-        windows.push((w0, (Instant::now() - t0).as_secs_f64() * 1000.0));
-        if writer.save_error.is_some() {
-            save_errors += 1;
-        }
-        let g = writer.generation().unwrap();
-        counts.lock().unwrap().insert(g, writer.paths().len());
-        if cycle % 4 == 0 {
-            during.extend(gui_pages(&addr, 1));
-        }
-    }
-    let more = gui_pages(&addr, 300usize.saturating_sub(during.len()));
-    during.extend(more);
     stop.store(true, Ordering::Relaxed);
     for r in readers {
         r.join().unwrap();
@@ -271,9 +330,10 @@ fn readers_keep_answering_while_one_writer_saves() {
     }
     println!(
         "M6 X1 DIAG gui_warm_p50_ms={warm_p50:.2} gui_warm_max_ms={warm_max:.2} gui_base_max_ms={base_max:.2} \
-         gui_write_samples={} writer_refresh_p50_ms={rf50:.2} writer_refresh_max_ms={rfmax:.2} \
+         gui_write_samples={} gui_base_samples={} writer_refresh_p50_ms={rf50:.2} writer_refresh_max_ms={rfmax:.2} \
          slow_reads_over_50ms={} slow_reads_overlapping_a_writer_refresh={overlapping}",
         during.len(),
+        spaced.len(),
         slow.len()
     );
     let mut rm = read_ms.lock().unwrap().clone();
@@ -284,6 +344,9 @@ fn readers_keep_answering_while_one_writer_saves() {
         fallbacks.load(Ordering::Relaxed),
         partials.load(Ordering::Relaxed),
     );
+    // Read the child's peak while it is still alive.
+    let child_peak = peak_rss_kb(gui.0.id());
+    let child_peak_txt = child_peak.map_or("unmeasured".to_string(), |k| k.to_string());
     let (_, saved) = read_saved_file(&file).unwrap();
     let equals_walk = saved.into_iter().collect::<BTreeSet<_>>() == all;
     println!(
@@ -292,9 +355,11 @@ fn readers_keep_answering_while_one_writer_saves() {
          index_read_p50_ms={r50:.2} index_read_p95_ms={r95:.2} index_read_max_ms={rmax:.2} \
          gui_base_p50_ms={base_p50:.2} gui_base_p95_ms={base_p95:.2} \
          gui_write_p50_ms={p50:.2} gui_write_p95_ms={p95:.2} gui_write_max_ms={write_max:.2} gui_p50_ratio={:.3} \
-         first_listing_ms={first_ms:.1} final_equals_walk={equals_walk}",
+         first_listing_ms={first_ms:.1} final_equals_walk={equals_walk} \
+         gui_child_peak_rss_kb={child_peak_txt} gui_child_pid={}",
         checked.load(Ordering::Relaxed),
-        p50 / base_p50
+        p50 / base_p50,
+        gui.0.id()
     );
     assert_eq!(parse_failures, 0);
     assert_eq!(fallbacks, 0);
@@ -314,6 +379,14 @@ fn readers_keep_answering_while_one_writer_saves() {
         write_max <= 16.7,
         "/api/library max under write {write_max:.2} ms over 16.7 ms"
     );
+    if let Some(kb) = child_peak {
+        assert!(
+            kb <= MAX_CHILD_RSS_KB,
+            "gui child peak RSS {kb} kB over {MAX_CHILD_RSS_KB} kB (332 MiB)"
+        );
+    } else if cfg!(any(target_os = "linux", windows)) {
+        panic!("could not read the gui child's peak RSS");
+    }
     assert!(
         first_ms <= 2000.0,
         "first listing {first_ms:.1} ms over 2 s"
