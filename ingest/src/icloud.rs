@@ -2445,7 +2445,18 @@ mod tests {
         fs::create_dir(&from).unwrap();
         let outside = tmp.path().join("outside.HEIC");
         fs::write(&outside, b"outside").unwrap();
-        symlink_file(&outside, &from.join("link.HEIC")).unwrap();
+        if let Err(err) = symlink_file(&outside, &from.join("link.HEIC")) {
+            // Windows needs Developer Mode (or an elevated shell) to create
+            // symlinks: OS error 1314. See CONTRIBUTING.md, Testing on Windows.
+            if cfg!(windows) && err.raw_os_error() == Some(1314) {
+                eprintln!(
+                    "skipped: needs symlink privilege. Turn on Windows Developer \
+                     Mode (or run elevated); see CONTRIBUTING.md, Testing on Windows."
+                );
+                return;
+            }
+            panic!("symlink: {err}");
+        }
         write_stamped(&from.join("IMG_0001.HEIC"), b"kept");
         let to = tmp.path().join("library");
         let err = import_icloud(&from, &to, &tmp.path().join("report.jsonl")).unwrap_err();

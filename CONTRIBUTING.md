@@ -97,6 +97,26 @@ scripts/with-minio.sh cargo test --locked
 
 ExifTool and MinIO are pinned by exact version and SHA-256 in those scripts. Do not replace the gate with an unpinned distro package.
 
+## Testing on Windows
+
+`cargo test --workspace` runs on Windows, with three things to know:
+
+- **bash.** Tests that generate fixtures with a shell script
+  (`iptc_core`, `synthetic_live_photo`, and the receiver's
+  `synthetic_live_photo_survives_the_webdav_receiver`) need Git Bash from
+  [Git for Windows](https://gitforwindows.org/) at
+  `C:\Program Files\Git`. Without it they print `skipped: needs bash` and
+  pass; they never fall back to `C:\Windows\System32\bash.exe`, which is the
+  WSL launcher. On Linux and macOS bash is required and they always run.
+- **Symlinks.** `icloud::tests::symlink_is_not_followed` must create a
+  symlink. Windows allows that only with Developer Mode on (Settings >
+  System > For developers > Developer Mode) or from an elevated shell.
+  Without it the test prints `skipped: needs symlink privilege` (OS error
+  1314) and passes.
+- **MinIO and rclone.** The S3 and rclone round trips need MinIO
+  (`scripts/with-minio.sh`) and rclone, as on every platform; without them
+  they fail with a message saying so.
+
 ## Real-device corpus
 
 This check is local. CI does not set `ALBUMEN_REAL_CORPUS`. When the variable is unset, `real_device_corpus_round_trip` prints a skip message and passes. The CC0 files under `fixtures/` are a different corpus and stay as they are.

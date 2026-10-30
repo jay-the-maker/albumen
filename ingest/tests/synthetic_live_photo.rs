@@ -42,7 +42,9 @@ fn synthetic_live_photo_survives_import_and_export() {
     assert!(licenses.contains("MakerNoteApple"));
 
     let generated = tempfile::tempdir().unwrap();
-    let tag = generate(generated.path());
+    let Some(tag) = generate(generated.path()) else {
+        return;
+    };
     assert_eq!(tag, HEIC_TAG);
     let heic = generated.path().join(HEIC_NAME);
     let mov = generated.path().join(MOV_NAME);
@@ -137,7 +139,9 @@ fn synthetic_live_photo_survives_import_and_export() {
 #[test]
 fn icloud_flags_a_live_pair_whose_content_identifiers_differ() {
     let generated = tempfile::tempdir().unwrap();
-    generate(generated.path());
+    if generate(generated.path()).is_none() {
+        return;
+    }
     let staged = tempfile::tempdir().unwrap();
     let from = staged.path().join("icloud");
     let originals = from.join("originals").join("0");
@@ -200,9 +204,9 @@ fn copy_stamped(source: &Path, dest: &Path) {
     stamp(dest);
 }
 
-fn generate(dir: &Path) -> String {
+fn generate(dir: &Path) -> Option<String> {
     let script = repo_path("scripts/synthetic-live-photo.sh");
-    let bash = bash_program();
+    let bash = bash_program()?;
     let output = Command::new(&bash)
         .arg(&script)
         .arg(dir)
@@ -216,20 +220,23 @@ fn generate(dir: &Path) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next_back()
-        .unwrap_or("")
-        .trim()
-        .to_string()
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next_back()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    )
 }
 
-/// Git for Windows, not `C:\Windows\System32\bash.exe`.
+/// Git for Windows, not `C:\\Windows\\System32\\bash.exe`.
 ///
 /// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
 /// Bash when the test process is a Windows binary, and it exits before the
-/// generator runs.
-fn bash_program() -> PathBuf {
+/// writer runs. On Windows without Git Bash this returns `None` and the test
+/// skips with a "needs bash" message; everywhere else bash is required.
+fn bash_program() -> Option<PathBuf> {
     if cfg!(windows) {
         for candidate in [
             r"C:\Program Files\Git\bin\bash.exe",
@@ -237,11 +244,16 @@ fn bash_program() -> PathBuf {
         ] {
             let path = PathBuf::from(candidate);
             if path.is_file() {
-                return path;
+                return Some(path);
             }
         }
+        eprintln!(
+            "skipped: needs bash. Install Git for Windows (Git Bash) to run this \
+             test; see CONTRIBUTING.md, Testing on Windows."
+        );
+        return None;
     }
-    PathBuf::from("bash")
+    Some(PathBuf::from("bash"))
 }
 
 fn repo_path(relative: &str) -> PathBuf {

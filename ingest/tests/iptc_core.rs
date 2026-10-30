@@ -38,7 +38,9 @@ fn iptc_core_is_deterministic_and_survives_ingest_and_export() {
 
     let generated = tempfile::tempdir().unwrap();
     let script = repo_path("scripts/write-iptc-core.sh");
-    let bash = bash_program();
+    let Some(bash) = bash_program() else {
+        return;
+    };
     let output = Command::new(&bash)
         .arg(&script)
         .arg(generated.path())
@@ -128,12 +130,13 @@ fn require_iptc_core(dump: &Value, path: &Path) {
     assert_eq!(map["XMP-iptcCore:Location"], "Synthetic location");
 }
 
-/// Git for Windows, not `C:\Windows\System32\bash.exe`.
+/// Git for Windows, not `C:\\Windows\\System32\\bash.exe`.
 ///
 /// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
 /// Bash when the test process is a Windows binary, and it exits before the
-/// writer runs.
-fn bash_program() -> PathBuf {
+/// writer runs. On Windows without Git Bash this returns `None` and the test
+/// skips with a "needs bash" message; everywhere else bash is required.
+fn bash_program() -> Option<PathBuf> {
     if cfg!(windows) {
         for candidate in [
             r"C:\Program Files\Git\bin\bash.exe",
@@ -141,11 +144,16 @@ fn bash_program() -> PathBuf {
         ] {
             let path = PathBuf::from(candidate);
             if path.is_file() {
-                return path;
+                return Some(path);
             }
         }
+        eprintln!(
+            "skipped: needs bash. Install Git for Windows (Git Bash) to run this \
+             test; see CONTRIBUTING.md, Testing on Windows."
+        );
+        return None;
     }
-    PathBuf::from("bash")
+    Some(PathBuf::from("bash"))
 }
 
 fn repo_path(relative: &str) -> PathBuf {
