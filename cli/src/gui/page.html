@@ -20,6 +20,7 @@ h1{font-size:20px;font-weight:600;margin:0}.sub{color:var(--mute);margin:0 0 16p
 .back{border:0;background:none;color:inherit;font:inherit;cursor:pointer;opacity:.8}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--thumb),1fr));gap:14px;margin-bottom:20px}
 .grid figure{margin:0;cursor:default}.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:3px;display:block;background:#555;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.grid .ph{width:100%;aspect-ratio:4/3;border-radius:3px;background:#4a4c52;color:#ccc;display:flex;align-items:center;justify-content:center;text-align:center;font-size:12px;padding:6px;box-sizing:border-box}.grid figure.sel .ph{outline:3px solid #f2c94c;outline-offset:2px}
 .grid figure.sel img{outline:3px solid #f2c94c;outline-offset:2px}
 .grid figcaption{font-size:12px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;opacity:.85}
 .grid figcaption small{display:block;opacity:.7}
@@ -151,26 +152,33 @@ function q(s){return /[\s"'$`\\]/.test(s)?'"'+s.replace(/(["\\$`])/g,'\\$1')+'"'
 const byPath=p=>lib.images.find(i=>i.path==p);
 function match(p){const t=$('search').value.trim().toLowerCase();return !t||base(p).toLowerCase().includes(t);}
 function visible(){const evs=curEvent?[curEvent]:lib.events;return evs.flatMap(e=>e.photos).filter(match);}
-function figure(p,cap,sub){const f=document.createElement('figure');const i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);
+// HEIC and RAW are listed and counted like any photo; the browser cannot
+// show them yet, so they get a calm placeholder tile instead of an image.
+const canShow=p=>{const m=byPath(p);return !m||m.preview!==false;};
+const fmt=p=>{const m=byPath(p);return (m&&m.format)||'';};
+function figure(p,cap,sub){const f=document.createElement('figure');let i;
+ if(canShow(p)){i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);}
+ else{i=document.createElement('div');i.className='ph';i.textContent=fmt(p)+' \u2014 preview not available yet';}
  const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
  $('grid').innerHTML='';
  for(const {e,ps} of evs){if(!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;$('grid').append(h);}
   const g=document.createElement('div');g.className='grid';
-  for(const p of ps){const f=figure(p,base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;draw();infoPhoto();};g.append(f);}
+  for(const p of ps){const f=figure(p,base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
   $('grid').append(g);}
  const n=evs.reduce((a,x)=>a+x.ps.length,0);
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
  $('photos-count').textContent=n+(n==1?' photo':' photos');
- $('curEvent-grid').innerHTML='';
+ $('event-grid').innerHTML='';
  for(const e of lib.events){const ps=e.photos.filter(match);if(!ps.length)continue;
   const f=figure(e.key,e.title,e.count+(e.count==1?' photo':' photos'));const im=f.querySelector('img');
-  f.onmousemove=ev=>{const r=im.getBoundingClientRect();const k=Math.min(ps.length-1,Math.max(0,Math.floor((ev.clientX-r.left)/r.width*ps.length)));im.src=img(ps[k]);};
-  f.onmouseleave=()=>{im.src=img(e.key);};
+  const shown=ps.filter(canShow);
+  if(im&&shown.length){f.onmousemove=ev=>{const r=im.getBoundingClientRect();const k=Math.min(shown.length-1,Math.max(0,Math.floor((ev.clientX-r.left)/r.width*shown.length)));im.src=img(shown[k]);};
+  f.onmouseleave=()=>{im.src=img(e.key);};}
   f.ondblclick=()=>{curEvent=e;show('photos');};
-  $('curEvent-grid').append(f);}
- $('events-count').textContent=lib.events.length+(lib.events.length==1?' curEvent':' events');}
+  $('event-grid').append(f);}
+ $('events-count').textContent=lib.events.length+(lib.events.length==1?' event':' events');}
 $('to-events').onclick=()=>show('events');
 $('search').oninput=draw;
 function zoom(v){document.documentElement.style.setProperty('--thumb',v+'px');try{localStorage.setItem('albumen-zoom',v);}catch(e){}}
@@ -179,7 +187,7 @@ try{const z=localStorage.getItem('albumen-zoom');if(z){$('zoom').value=z;zoom(z)
 function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=!im;if(!im)return;
  $('i-name').textContent=base(im.path);
  $('i-taken').textContent=im.taken?'Taken '+im.taken.replace('T',' ')+' (from '+im.taken_from+')':'Date taken: not known';
- $('i-size').textContent=im.bytes+' bytes';}
+ $('i-size').textContent=im.bytes+' bytes'+(im.preview===false?' \u00b7 '+im.format+', preview not available yet':'');}
 $('b-info').onclick=()=>{$('info').hidden=!$('info').hidden;infoPhoto();};
 let timer=null;
 function stopShow(){clearInterval(timer);timer=null;$('show').hidden=true;}

@@ -24,7 +24,13 @@ pub mod taken;
 const PAGE: &str = include_str!("page.html");
 
 /// Image types the grid shows as thumbnails.
+/// Formats a browser shows directly.
 const IMAGE_EXT: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "avif"];
+/// Photos a browser cannot show yet: listed, counted and dated, with a
+/// placeholder tile. Never silently dropped.
+const PLACEHOLDER_EXT: &[&str] = &[
+    "heic", "heif", "tif", "tiff", "dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf",
+];
 
 pub struct GuiArgs {
     pub library: Option<PathBuf>,
@@ -276,9 +282,18 @@ fn library_files(library: &Path) -> Vec<String> {
     out
 }
 
+fn ext(rel: &str) -> Option<String> {
+    rel.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())
+}
+
+/// A format the browser can show, so `/img` serves it.
 fn is_image(rel: &str) -> bool {
-    let ext = rel.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    ext.is_some_and(|e| IMAGE_EXT.contains(&e.as_str()))
+    ext(rel).is_some_and(|e| IMAGE_EXT.contains(&e.as_str()))
+}
+
+/// Any photo in the library, previewable or not.
+fn is_photo(rel: &str) -> bool {
+    is_image(rel) || ext(rel).is_some_and(|e| PLACEHOLDER_EXT.contains(&e.as_str()))
 }
 
 pub fn library_json(library: &Path) -> serde_json::Value {
@@ -286,7 +301,7 @@ pub fn library_json(library: &Path) -> serde_json::Value {
     let mut bytes = 0u64;
     let items: Vec<serde_json::Value> = files
         .iter()
-        .filter(|rel| is_image(rel))
+        .filter(|rel| is_photo(rel))
         .map(|rel| {
             let len = std::fs::metadata(library.join(rel))
                 .map(|m| m.len())
@@ -298,6 +313,8 @@ pub fn library_json(library: &Path) -> serde_json::Value {
                 "bytes": len,
                 "taken": when.as_ref().map(|t| t.when.clone()),
                 "taken_from": when.as_ref().map(|t| t.source),
+                "preview": is_image(rel),
+                "format": ext(rel).unwrap_or_default().to_ascii_uppercase(),
             })
         })
         .collect();
@@ -665,5 +682,47 @@ mod tests {
         assert_eq!(titles, ["Oct 3, 2026", "Oct 4, 2026", "No date"]);
         assert_eq!(ev[0]["key"], "a1.png");
         assert_eq!(ev[0]["count"], 2);
+    }
+
+    #[test]
+    fn heic_and_raw_are_listed_counted_and_dated_never_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+        let copy = |from: &str, to: &str| {
+            let bytes = std::fs::read(fixtures.join(from)).unwrap();
+            let mut f = albumen_ingest::dest::create_file(&lib.join(to)).unwrap();
+            f.write_all(&bytes).unwrap();
+        };
+        copy("heic/IMG_0002.heic", "IMG_0002.HEIC");
+        copy("raw-jpeg/IMG_0003.dng", "IMG_0003.dng");
+        for name in [
+            "a.cr2", "b.cr3", "c.nef", "d.arw", "e.orf", "f.rw2", "g.raf", "h.heif",
+        ] {
+            let mut f = albumen_ingest::dest::create_file(&lib.join(name)).unwrap();
+            f.write_all(b"not a real raw").unwrap();
+        }
+        let v = library_json(lib);
+        let images = v["images"].as_array().unwrap();
+        assert_eq!(images.len(), 10, "{v}");
+        assert!(images.iter().all(|i| i["preview"] == false), "{v}");
+        let heic = images
+            .iter()
+            .find(|i| i["path"] == "IMG_0002.HEIC")
+            .unwrap();
+        assert_eq!(heic["taken"], "2018-04-01T12:00:00");
+        assert_eq!(heic["format"], "HEIC");
+        let dng = images.iter().find(|i| i["path"] == "IMG_0003.dng").unwrap();
+        assert_eq!(dng["taken"], "2015-09-03T18:45:12");
+        let ev = v["events"].as_array().unwrap();
+        let total: u64 = ev.iter().map(|e| e["count"].as_u64().unwrap()).sum();
+        assert_eq!(total, 10);
+        let last = ev.last().unwrap();
+        assert_eq!(
+            (last["title"].as_str(), last["count"].as_u64()),
+            (Some("No date"), Some(8))
+        );
+        // Listed, but /img still only serves what a browser can show.
+        assert!(read_image(lib, "IMG_0002.HEIC").is_none());
     }
 }

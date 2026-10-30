@@ -165,8 +165,8 @@ pub fn build(work: &Path) -> Result<Demo, IngestError> {
     for dir in [&library, &card.join("DCIM/100DEMO"), &volumes, &state] {
         dest::create_dir_all(dir)?;
     }
-    for i in 0..DEMO_PHOTOS as usize {
-        let png = synthetic_png_taken(480, 360, i as u32 + 1, TAKEN[i]);
+    for (i, when) in TAKEN.iter().enumerate().take(DEMO_PHOTOS as usize) {
+        let png = synthetic_png_taken(480, 360, i as u32 + 1, when);
         write_new(&library.join(demo_name(i)), &png)?;
     }
     for i in 0..3u32 {
