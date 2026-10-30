@@ -122,6 +122,8 @@ struct LibraryView {
     image_bytes: u64,
     records: Vec<u8>,
     record_ends: Vec<u32>,
+    /// Length of the full answer once ready, counted on first request.
+    full_len: std::sync::OnceLock<usize>,
     paths: Vec<u8>,
     path_ends: Vec<u32>,
     events: Vec<EventIdx>,
@@ -249,7 +251,9 @@ impl LibraryView {
                     if j > 0 {
                         w.write_all(b",")?;
                     }
-                    w.write_all(js(self.path(p)).as_bytes())?;
+                    // Straight into the stream: no String per path (380k
+                    // of them per answer made R2 slower than its baseline).
+                    serde_json::to_writer(&mut *w, self.path(p))?;
                 }
                 w.write_all(b"]}")?;
             }
@@ -277,12 +281,25 @@ impl LibraryView {
                 Ok(())
             }
         }
-        let mut c = Count(0);
-        self.write_json(&mut c, page)?;
+        let count = || -> std::io::Result<usize> {
+            let mut c = Count(0);
+            self.write_json(&mut c, page)?;
+            Ok(c.0)
+        };
+        // A ready listing never changes, so its full length is counted once.
+        let len = match (page, self.ready, self.full_len.get()) {
+            (None, true, Some(&n)) => n,
+            (None, true, None) => {
+                let n = count()?;
+                let _ = self.full_len.set(n);
+                n
+            }
+            _ => count()?,
+        };
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-            c.0
+            len
         )?;
         let mut w = std::io::BufWriter::with_capacity(1 << 16, &mut *stream);
         self.write_json(&mut w, page)?;
