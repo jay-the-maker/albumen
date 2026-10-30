@@ -25,7 +25,9 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
     let generated = tempfile::tempdir().unwrap();
     let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../scripts/synthetic-live-photo.sh");
-    let bash = bash_program();
+    let Some(bash) = bash_program() else {
+        return;
+    };
     let output = std::process::Command::new(&bash)
         .arg(&script)
         .arg(generated.path())
@@ -98,7 +100,13 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
     );
 }
 
-fn bash_program() -> std::path::PathBuf {
+/// Git for Windows, not `C:\\Windows\\System32\\bash.exe`.
+///
+/// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
+/// Bash when the test process is a Windows binary, and it exits before the
+/// writer runs. On Windows without Git Bash this returns `None` and the test
+/// skips with a "needs bash" message; everywhere else bash is required.
+fn bash_program() -> Option<std::path::PathBuf> {
     if cfg!(windows) {
         for candidate in [
             r"C:\Program Files\Git\bin\bash.exe",
@@ -106,11 +114,16 @@ fn bash_program() -> std::path::PathBuf {
         ] {
             let path = std::path::PathBuf::from(candidate);
             if path.is_file() {
-                return path;
+                return Some(path);
             }
         }
+        eprintln!(
+            "skipped: needs bash. Install Git for Windows (Git Bash) to run this \
+             test; see CONTRIBUTING.md, Testing on Windows."
+        );
+        return None;
     }
-    std::path::PathBuf::from("bash")
+    Some(std::path::PathBuf::from("bash"))
 }
 
 fn identifier(path: &std::path::Path, key: &str) -> Option<String> {
