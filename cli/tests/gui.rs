@@ -517,7 +517,7 @@ fn times_are_labelled_honestly_and_health_is_dark() {
     let (_, page) = get(&addr, "/");
     assert!(page.contains("(camera clock, no time zone)"));
     assert!(!page.contains("camera time, no time zone recorded"));
-    assert!(page.contains("const DARK_VIEWS=[...LIB_VIEWS,'health'];"));
+    assert!(page.contains("const DARK_VIEWS=[...LIB_VIEWS,'health','family'];"));
     assert!(page.contains(".dark .card{"));
     assert!(page.contains("#info{overflow:auto;min-height:0;background:#2f3136;"));
     assert!(!page.contains("#info{overflow:auto;min-height:0;background:#fff"));
@@ -595,6 +595,15 @@ fn family_view_matches_the_cli_word_for_word_and_is_read_only() {
         "{text}"
     );
     assert!(text.contains("member-12 ("), "{text}");
+    let names: Vec<&str> = text
+        .lines()
+        .skip(3)
+        .map(|l| l.split(" (").next().unwrap())
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "{text}");
+    assert_eq!(names.len(), 12, "{text}");
     assert_eq!(text.matches(": 2 photos").count(), 12, "{text}");
     assert_eq!(
         text.matches(", revoked; their photos stay\n").count(),

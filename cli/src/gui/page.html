@@ -41,6 +41,7 @@ select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:
 .card h3{margin:0 0 2px;font-size:15px}.card .txt{white-space:pre-wrap}.card .w{font-weight:700;text-transform:none}.card .act{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .summary{margin:0 0 12px;white-space:pre-wrap}
 .fam{padding:6px 12px;border-left:4px solid var(--ok);margin:0 0 6px;background:#fff}.fam.revoked{border-left-color:var(--none);color:var(--mute)}
+.dark .fam{background:#2f3136;color:#e8e9ec;border:1px solid #4a4d54;border-left:4px solid var(--ok);border-radius:10px}.dark .fam.revoked{border-left-color:var(--none);color:#a9adb5}
 .s-ok{border-left-color:var(--ok)}.s-ok .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
 .s-damaged{border-left-color:var(--bad)}.s-damaged .w{color:var(--bad)}.s-none .w{color:var(--none)}
 .badge{display:inline-flex;align-items:center;gap:8px;background:#e9f6ee;color:var(--ok);border:1px solid #bfe0cb;border-radius:22px;padding:6px 16px;font-weight:700;font-size:17px}
@@ -146,7 +147,7 @@ const H={'X-Albumen':'1'};
 const enc=encodeURIComponent;
 const LIB_VIEWS=['events','photos'];
 // Backup health shares the library's dark chrome.
-const DARK_VIEWS=[...LIB_VIEWS,'health'];
+const DARK_VIEWS=[...LIB_VIEWS,'health','family'];
 let dests=[],lib={images:[],events:[]},curEvent=null,selected=null,cur='photos';
 // Folder names, never the full (often temp) path; Windows paths too.
 const base=p=>p.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||p;
@@ -165,7 +166,7 @@ function show(s){cur=s;document.querySelectorAll('aside button').forEach(b=>b.cl
 // Family: the CLI's own lines, word for word. Nothing here writes.
 async function family(){const f=await j('/api/family');const box=$('family-members');box.innerHTML='';
  if(!f.text){$('family-summary').textContent=f.error||'No family library was given. Start with --family DIR.';$('family-raw').textContent='';return;}
- const lines=f.text.trimEnd().split('\n');$('family-summary').textContent=lines.slice(0,3).join('\n');
+ const lines=f.text.trimEnd().split('\n');$('family-summary').textContent=lines.slice(1,3).join('\n');
  for(const l of lines.slice(3)){const d=document.createElement('div');d.className='fam'+(/, revoked; their photos stay$/.test(l)?' revoked':'');d.textContent=l;box.append(d);}
  $('runs-family').textContent='runs: albumen family manifest --library '+q(f.library)+' --summary';$('family-raw').textContent=f.text;}
 async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(await r.text());return r.json();}

@@ -153,8 +153,11 @@ try {
   await click('aside button[data-s="family"]');
   await until(`document.querySelectorAll('#family-members .fam').length==12`, 'family members');
   check('AC7: Family view open and lit', eq(await visibleView(), ['family']) && eq(await sideLit(), ['Family']), [await visibleView(), await sideLit()]);
-  const fam = await ev(`(async()=>{const f=await (await fetch('/api/family')).json();const shown=[$('family-summary').innerText,...[...document.querySelectorAll('#family-members .fam')].map(d=>d.innerText)].join('\\n');return [f.text.trimEnd(),shown];})()`);
-  check('AC8: Family view text equals the CLI summary', fam[0] == fam[1], fam);
+  const fam = await ev(`(async()=>{const f=await (await fetch('/api/family')).json();const shown=[$('family-summary').innerText,...[...document.querySelectorAll('#family-members .fam')].map(d=>d.innerText)].join('\\n');return [f.text.trimEnd().split('\\n').slice(1).join('\\n'),shown,f.text,$('family-raw').textContent,f.text.split('\\n')[0],document.querySelector('#family').innerText.split('Show details')[0]];})()`);
+  check('AC8: Family view text equals the CLI summary', fam[0] == fam[1], fam.slice(0,2));
+  check('AC8: Show details carries the CLI summary in full', fam[2] == fam[3], fam.slice(2,4));
+  check('M4 polish: 64-character library id only under Show details', /^family library [0-9a-f]{64}$/.test(fam[4]) && !fam[5].includes(fam[4].slice(15)), fam.slice(4));
+  check('M4 polish: Family cards use the dark card style', await ev(`getComputedStyle(document.querySelector('#family-members .fam')).backgroundColor`) == 'rgb(47, 49, 54)', await ev(`getComputedStyle(document.querySelector('#family-members .fam')).backgroundColor`));
   check('AC8: revoked copy says their photos stay', /member-12 \(.*revoked; their photos stay/.test(fam[1]) && !/removed|deleted/i.test(fam[1]), fam[1]);
   check('AC7: no buttons or inputs in the Family view', await ev(`document.querySelectorAll('#family button,#family input').length`) == 0, null);
   if (process.env.SHOT) {
