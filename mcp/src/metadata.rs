@@ -2,9 +2,11 @@
 
 //! Metadata read from the files in front of us.
 //!
-//! There is no catalog on disk. A process-local cache remembers a file only
-//! while its SHA-256 and length still match, and a search that misses
-//! re-reads that file with ExifTool. Sidecar metadata is joined in memory.
+//! The cache remembers a file only while its stat key and SHA-256 still
+//! match, and a search that misses re-reads that file with ExifTool. Sidecar
+//! metadata is joined in memory. Search persists the cache as a checksummed
+//! search tree beside the index (see [`crate::search_tree`]); nothing else
+//! reads it.
 
 use albumen_ingest::{exiftool_command, sha256_hex};
 use serde_json::{Map, Value};
@@ -14,13 +16,13 @@ use std::path::{Path, PathBuf};
 /// Capture time as written in the file, without converting time zones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WallTime {
-    year: i32,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: u8,
-    nanos: u32,
+    pub(crate) year: i32,
+    pub(crate) month: u8,
+    pub(crate) day: u8,
+    pub(crate) hour: u8,
+    pub(crate) minute: u8,
+    pub(crate) second: u8,
+    pub(crate) nanos: u32,
 }
 
 impl WallTime {
@@ -194,12 +196,12 @@ impl StatKey {
 
     /// A hash taken within `RACY_NANOS` of the file's last change cannot rule
     /// out a same-second write after it, so it is not trusted next time.
-    fn settled_at(&self, hashed_ns: i128, racy_ns: i128) -> bool {
+    pub(crate) fn settled_at(&self, hashed_ns: i128, racy_ns: i128) -> bool {
         self.mtime_ns >= 0 && hashed_ns - self.mtime_ns.max(self.ctime_ns) >= racy_ns
     }
 }
 
-fn now_ns() -> i128 {
+pub(crate) fn now_ns() -> i128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as i128)
@@ -216,12 +218,22 @@ struct DirSidecars {
 }
 
 #[derive(Debug, Clone)]
-struct Entry {
-    sha: String,
-    stat: StatKey,
+pub(crate) struct Entry {
+    pub(crate) sha: String,
+    pub(crate) stat: StatKey,
     /// True when the hash was taken at least `RACY_NANOS` after the change.
-    settled: bool,
-    record: Record,
+    pub(crate) settled: bool,
+    pub(crate) record: Record,
+    /// When this entry's stat key was last compared with the disk (ns).
+    pub(crate) checked_ns: i128,
+}
+
+/// A cached file whose stat was not compared with the disk this search
+/// because the recheck budget ran out.
+#[derive(Debug, Clone)]
+pub struct Unchecked {
+    pub path: String,
+    pub checked_ns: i128,
 }
 
 /// Memory of ExifTool reads, keyed by SHA-256 and the file's stat.
@@ -231,10 +243,14 @@ struct Entry {
 /// close to the last write, means a fresh SHA-256. Dropping it drops the only copy.
 #[derive(Debug)]
 pub struct Cache {
-    entries: HashMap<String, Entry>,
+    pub(crate) entries: HashMap<String, Entry>,
     dirs: HashMap<String, DirSidecars>,
     racy_ns: i128,
     hashed: u64,
+    /// Entries changed since the search tree was last written.
+    pub(crate) dirty: bool,
+    /// The search tree file this cache was loaded from, once tried.
+    pub(crate) tree: Option<std::path::PathBuf>,
 }
 
 impl Default for Cache {
@@ -244,6 +260,8 @@ impl Default for Cache {
             dirs: HashMap::new(),
             racy_ns: i128::from(albumen_ingest::index::RACY_NANOS),
             hashed: 0,
+            dirty: false,
+            tree: None,
         }
     }
 }
@@ -268,7 +286,7 @@ impl Cache {
     /// Re-list `parent` when its mtime moved or its listing was taken inside
     /// the racy window. Call once per directory per batch, then
     /// [`Cache::listed_sidecars`] for each file in it.
-    pub fn refresh_dir(&mut self, root: &Path, parent: &str) {
+    pub fn refresh_dir(&mut self, root: &Path, parent: &str) -> bool {
         let dir = if parent.is_empty() {
             root.to_path_buf()
         } else {
@@ -276,7 +294,7 @@ impl Cache {
         };
         let Ok(meta) = std::fs::metadata(&dir) else {
             self.dirs.remove(parent);
-            return;
+            return false;
         };
         let mtime_ns = StatKey::of(&meta).mtime_ns;
         let fresh = match self.dirs.get(parent) {
@@ -309,6 +327,9 @@ impl Cache {
                 },
             );
         }
+        self.dirs
+            .get(parent)
+            .is_some_and(|dir| !dir.names.is_empty())
     }
 
     /// Sidecars of `relative` from the listing [`Cache::refresh_dir`] took.
@@ -321,6 +342,9 @@ impl Cache {
         let Some(listing) = self.dirs.get(parent) else {
             return Vec::new();
         };
+        if listing.names.is_empty() {
+            return Vec::new();
+        }
         let mut found = Vec::new();
         for candidate in [
             format!("{stem}.xmp"),
@@ -384,17 +408,71 @@ impl Cache {
         root: &Path,
         relative_paths: &[String],
     ) -> Result<HashMap<String, Record>, String> {
-        let mut digests = HashMap::new();
+        let stats = stat_all(root, relative_paths, None);
+        let mut unkept = HashMap::new();
+        self.refresh_stated(
+            root,
+            relative_paths,
+            stats,
+            &mut unkept,
+            &mut Vec::new(),
+            &|_, _| None,
+            &mut Vec::new(),
+        )?;
+        Ok(unkept)
+    }
+
+    /// [`Cache::refresh`] with each path's stat already taken by
+    /// [`stat_all`]. A `None` stat (budget ran out) keeps a cached entry as
+    /// it is and reports it in `unchecked`; a path with no entry is stat'd
+    /// here. Returns each path's length.
+    ///
+    /// `judge(i, record)` runs on each entry that needed no rehash, while
+    /// it is in hand, and its answer goes in `verdicts[i]` (`None` for the
+    /// rest), so a caller filtering records need not look them up again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_stated<S: AsRef<str>>(
+        &mut self,
+        root: &Path,
+        relative_paths: &[S],
+        stats: Vec<Option<Result<StatKey, String>>>,
+        unkept: &mut HashMap<String, Record>,
+        unchecked: &mut Vec<Unchecked>,
+        judge: &dyn Fn(usize, &Record) -> Option<bool>,
+        verdicts: &mut Vec<Option<bool>>,
+    ) -> Result<Vec<u64>, String> {
+        let mut lengths = Vec::with_capacity(relative_paths.len());
+        verdicts.clear();
+        verdicts.reserve(relative_paths.len());
         let mut missing = Vec::new();
-        for relative in relative_paths {
-            let full = root.join(PathBuf::from_iter(relative.split('/')));
-            let stat =
-                StatKey::of(&std::fs::metadata(&full).map_err(|err| format!("{relative}: {err}"))?);
-            if let Some(entry) = self.entries.get(relative) {
+        let checked_ns = now_ns();
+        for (i, (relative, stat)) in relative_paths.iter().zip(stats).enumerate() {
+            let relative = relative.as_ref();
+            let stat = match stat {
+                Some(stat) => stat?,
+                None => {
+                    if let Some(entry) = self.entries.get(relative) {
+                        lengths.push(entry.stat.size);
+                        verdicts.push(judge(i, &entry.record));
+                        unchecked.push(Unchecked {
+                            path: relative.to_string(),
+                            checked_ns: entry.checked_ns,
+                        });
+                        continue;
+                    }
+                    stat_one(root, relative)?
+                }
+            };
+            lengths.push(stat.size);
+            if let Some(entry) = self.entries.get_mut(relative) {
                 if entry.settled && entry.stat == stat {
+                    entry.checked_ns = checked_ns;
+                    verdicts.push(judge(i, &entry.record));
                     continue;
                 }
             }
+            verdicts.push(None);
+            let full = root.join(PathBuf::from_iter(relative.split('/')));
             let hashed_ns = now_ns();
             self.hashed += 1;
             let sha = sha256_hex(&full).map_err(|err| err.to_string())?;
@@ -403,20 +481,22 @@ impl Cache {
                 if entry.sha == sha && entry.stat.size == stat.size {
                     entry.stat = stat;
                     entry.settled = settled;
+                    entry.checked_ns = hashed_ns;
+                    self.dirty = true;
                     continue;
                 }
             }
-            missing.push((relative.clone(), sha, stat, settled));
+            missing.push((relative.to_string(), sha, stat, settled, hashed_ns));
         }
         if !missing.is_empty() {
             let fresh = read_exiftool(
                 root,
                 &missing
                     .iter()
-                    .map(|(path, _, _, _)| path.clone())
+                    .map(|(path, ..)| path.clone())
                     .collect::<Vec<_>>(),
             )?;
-            for (relative, sha, stat, settled) in missing {
+            for (relative, sha, stat, settled, hashed_ns) in missing {
                 let record = fresh.get(&relative).cloned().unwrap_or_else(Record::empty);
                 if !self.remember(
                     relative.clone(),
@@ -425,13 +505,14 @@ impl Cache {
                         stat,
                         settled,
                         record: record.clone(),
+                        checked_ns: hashed_ns,
                     },
                 ) {
-                    digests.insert(relative, record);
+                    unkept.insert(relative, record);
                 }
             }
         }
-        Ok(digests)
+        Ok(lengths)
     }
 
     /// The record for `relative`: from `unkept` (what [`Cache::refresh`]
@@ -446,6 +527,51 @@ impl Cache {
             .or_else(|| self.entries.get(relative).map(|entry| &entry.record))
     }
 
+    /// Use the search tree at `file` for this cache: load it the first time
+    /// (whole or not at all), and remember it so [`Cache::save_tree`] can
+    /// rewrite it. Returns what happened, for diagnostics.
+    pub fn open_tree(&mut self, file: PathBuf, root_id: &str) -> String {
+        if self.tree.as_ref() == Some(&file) {
+            return "in memory".to_string();
+        }
+        self.tree = Some(file.clone());
+        match crate::search_tree::load(&file, root_id) {
+            Ok(entries) => {
+                let limit = cache_item_limit().unwrap_or(usize::MAX);
+                for (path, entry) in entries {
+                    if self.entries.len() >= limit {
+                        break;
+                    }
+                    self.entries.entry(path).or_insert(entry);
+                }
+                "loaded".to_string()
+            }
+            Err(why) => {
+                self.dirty = true;
+                format!("discarded: {why}")
+            }
+        }
+    }
+
+    /// Write the search tree if anything changed, keeping only paths
+    /// `exists` still knows.
+    pub fn save_tree(
+        &mut self,
+        root_id: &str,
+        exists: impl Fn(&str) -> bool,
+    ) -> std::io::Result<()> {
+        let Some(file) = self.tree.clone() else {
+            return Ok(());
+        };
+        if !self.dirty {
+            return Ok(());
+        }
+        self.entries.retain(|path, _| exists(path));
+        crate::search_tree::save(&file, root_id, self.entries.iter())?;
+        self.dirty = false;
+        Ok(())
+    }
+
     /// Keep `entry`. False when the item limit left it out.
     fn remember(&mut self, relative: String, entry: Entry) -> bool {
         let replacing = self.entries.contains_key(&relative);
@@ -455,8 +581,54 @@ impl Cache {
             }
         }
         self.entries.insert(relative, entry);
+        self.dirty = true;
         true
     }
+}
+
+fn stat_one(root: &Path, relative: &str) -> Result<StatKey, String> {
+    // Index paths always use '/', which is also the separator here.
+    #[cfg(unix)]
+    let full = root.join(relative);
+    #[cfg(not(unix))]
+    let full = root.join(PathBuf::from_iter(relative.split('/')));
+    std::fs::metadata(&full)
+        .map(|meta| StatKey::of(&meta))
+        .map_err(|err| format!("{relative}: {err}"))
+}
+
+/// Stat every path on a small thread pool, in order. A path not reached
+/// before `deadline` is `None`.
+pub fn stat_all<S: AsRef<str> + Sync>(
+    root: &Path,
+    relative_paths: &[S],
+    deadline: Option<std::time::Instant>,
+) -> Vec<Option<Result<StatKey, String>>> {
+    let mut out: Vec<Option<Result<StatKey, String>>> = Vec::new();
+    out.resize_with(relative_paths.len(), || None);
+    let run = |paths: &[S], slots: &mut [Option<Result<StatKey, String>>]| {
+        for (relative, slot) in paths.iter().zip(slots.iter_mut()) {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                return;
+            }
+            *slot = Some(stat_one(root, relative.as_ref()));
+        }
+    };
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8);
+    if threads == 1 || relative_paths.len() < 512 {
+        run(relative_paths, &mut out);
+        return out;
+    }
+    let chunk = relative_paths.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (paths, slots) in relative_paths.chunks(chunk).zip(out.chunks_mut(chunk)) {
+            scope.spawn(move || run(paths, slots));
+        }
+    });
+    out
 }
 
 /// How many files one ExifTool process reads.

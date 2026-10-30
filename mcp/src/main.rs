@@ -160,7 +160,16 @@ fn call_tool(library: &Library, params: &Value) -> Value {
         .unwrap_or_else(|| json!({}));
     match library.call(name, &arguments) {
         Ok(value) => tool_ok(value),
-        Err(err) => tool_error(err),
+        Err(err) => match library.error_freshness(name, &err) {
+            // Search state D: the text is line 1 and the next: line, and
+            // the freshness object says "unreachable".
+            Some(freshness) => {
+                let mut error = tool_error(err);
+                error["structuredContent"] = json!({ "freshness": freshness });
+                error
+            }
+            None => tool_error(err),
+        },
     }
 }
 

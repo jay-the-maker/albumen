@@ -29,6 +29,7 @@ pub struct Library {
     index_dir: Option<PathBuf>,
     index: Mutex<Option<LibraryIndex>>,
     thumbnail_dir: Option<PathBuf>,
+    recheck_budget: std::time::Duration,
 }
 
 impl Library {
@@ -68,12 +69,27 @@ impl Library {
             index_dir: albumen_ingest::index::default_index_dir(),
             index: Mutex::new(None),
             thumbnail_dir: crate::thumbnail::default_thumbnail_dir(),
+            recheck_budget: std::time::Duration::from_millis(
+                std::env::var("ALBUMEN_SEARCH_RECHECK_MS")
+                    .ok()
+                    .and_then(|text| text.parse().ok())
+                    .unwrap_or(10_000),
+            ),
         })
     }
 
     /// Save the search index in `dir` instead of the platform data directory.
     /// `None` keeps it in memory only. A directory inside the library is
     /// refused when the index is opened.
+    /// How long one search may spend comparing known files with the disk
+    /// before it answers from the search tree with a "checked against disk
+    /// at T; N folders not rechecked" label. `ALBUMEN_SEARCH_RECHECK_MS`
+    /// sets it for the binary; the default is 10 s.
+    pub fn with_recheck_budget(mut self, budget: std::time::Duration) -> Self {
+        self.recheck_budget = budget;
+        self
+    }
+
     pub fn with_index_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.index_dir = dir;
         self
@@ -120,6 +136,13 @@ impl Library {
             }
         }
         Ok(slot.as_ref().expect("index set above"))
+    }
+
+    /// The `freshness` object for a tool error, when the error is search's
+    /// state D (the library root could not be read).
+    pub fn error_freshness(&self, name: &str, err: &str) -> Option<Value> {
+        (name == "search" && err == unreachable_text(&self.root))
+            .then(|| unreachable_freshness(&self.root))
     }
 
     pub fn tool_defs(&self) -> Vec<Value> {
@@ -190,26 +213,67 @@ impl Library {
         let query = query.map(str::to_lowercase);
         let limit = optional_limit(arguments)?.unwrap_or(default_page("ALBUMEN_SEARCH_PAGE", 1000));
         let after = optional_cursor(arguments)?;
+        let began = std::time::Instant::now();
+        let deadline = began.checked_add(self.recheck_budget);
         let mut page = Page::default();
-        let mut pending: Vec<(String, u64)> = Vec::new();
-        let batch = metadata::exiftool_batch();
+        // Borrowed from the index: no per-file copy until a hit.
+        let mut pending: Vec<&str> = Vec::new();
+        // One stat pool run per flush; ExifTool batches inside it.
+        let flush_at = metadata::exiftool_batch().max(65_536);
+        // State D: a library root that cannot be listed (an unmounted drive,
+        // a removed folder) gives a tool error, never an empty answer.
+        if fs::read_dir(&self.root).is_err() {
+            return Err(unreachable_text(&self.root));
+        }
         let mut cache = self.metadata.lock().unwrap_or_else(|err| err.into_inner());
         let hashed_before = cache.hashed();
+        let mut unchecked: Vec<metadata::Unchecked> = Vec::new();
         let mut failed: Option<String> = None;
         let mut index_slot = self.index.lock().unwrap_or_else(|err| err.into_inner());
         let index = self.current_index(&mut index_slot)?;
+        let root_id = crate::search_tree::root_id(&self.root);
+        let mut tree_status = "none".to_string();
+        if filters.is_some() {
+            if let Some(file) = index.file() {
+                tree_status = cache.open_tree(crate::search_tree::path_for(file), &root_id);
+            }
+        }
+        let flush = |cache: &mut metadata::Cache,
+                     pending: &mut Vec<&str>,
+                     page: &mut Page,
+                     unchecked: &mut Vec<metadata::Unchecked>|
+         -> Result<(), String> {
+            flush_metadata(
+                &self.root,
+                cache,
+                filters.as_ref().expect("metadata search"),
+                limit,
+                pending,
+                page,
+                deadline,
+                unchecked,
+            )
+        };
+        let paths = index.paths();
+        let mut next = after
+            .as_deref()
+            .map(|after| paths.partition_point(|path| path.as_str() <= after))
+            .unwrap_or(0);
         index.visit_after(after.as_deref(), &mut |relative, lower| {
+            // visit_after walks paths[start..] in order; keep the borrow.
+            let slot = next;
+            next += 1;
             if query.as_ref().is_some_and(|query| !lower.contains(query)) {
                 return true;
             }
-            let bytes = match file_len(&self.root, relative) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    failed = Some(err);
-                    return false;
-                }
-            };
             if filters.is_none() {
+                let bytes = match file_len(&self.root, relative) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        failed = Some(err);
+                        return false;
+                    }
+                };
                 let stop = page.consider(
                     limit,
                     Hit {
@@ -220,16 +284,16 @@ impl Library {
                 );
                 return !stop;
             }
-            pending.push((relative.to_string(), bytes));
-            if pending.len() >= batch {
-                if let Err(err) = flush_metadata(
-                    &self.root,
-                    &mut cache,
-                    filters.as_ref().unwrap(),
-                    limit,
-                    &mut pending,
-                    &mut page,
-                ) {
+            let relative: &str = match paths.get(slot) {
+                Some(path) if std::ptr::eq(path.as_str(), relative) => path,
+                _ => {
+                    failed = Some("index walk out of step".to_string());
+                    return false;
+                }
+            };
+            pending.push(relative);
+            if pending.len() >= flush_at {
+                if let Err(err) = flush(&mut cache, &mut pending, &mut page, &mut unchecked) {
                     failed = Some(err);
                     return false;
                 }
@@ -239,26 +303,37 @@ impl Library {
             }
             true
         });
-        drop(index_slot);
         if let Some(err) = failed {
             return Err(err);
         }
-        if !pending.is_empty() && !page.truncated {
-            if let Some(filters) = filters.as_ref() {
-                flush_metadata(
-                    &self.root,
-                    &mut cache,
-                    filters,
-                    limit,
-                    &mut pending,
-                    &mut page,
-                )?;
+        if !pending.is_empty() && !page.truncated && filters.is_some() {
+            flush(&mut cache, &mut pending, &mut page, &mut unchecked)?;
+        }
+        if filters.is_some() {
+            let known: std::collections::HashSet<&str> = if cache.dirty {
+                index.paths().iter().map(String::as_str).collect()
+            } else {
+                Default::default()
+            };
+            if let Err(err) = cache.save_tree(&root_id, |path| known.contains(path)) {
+                eprintln!("albumen-mcp: search tree kept in memory only: {err}");
             }
         }
+        drop(index_slot);
         let mut value = page_value(&page);
+        // Every answer carries freshness; nothing is returned unlabeled.
+        // A page cut by `limit`, or reached with a cursor, is one page of
+        // an uncounted total: the label says so.
+        let paginated = page.truncated || after.is_some();
+        value["freshness"] = freshness(page.hits.len(), paginated, &unchecked, &tree_status);
         if std::env::var("ALBUMEN_SEARCH_STATS").is_ok_and(|v| v == "1") {
-            // Diagnostics for library-scale.py: files re-hashed by this call.
-            value["stats"] = json!({"hashed": cache.hashed() - hashed_before});
+            // Diagnostics for library-scale.py and tests.
+            value["stats"] = json!({
+                "hashed": cache.hashed() - hashed_before,
+                "unchecked_files": unchecked.len(),
+                "tree": tree_status,
+                "ms": began.elapsed().as_secs_f64() * 1000.0,
+            });
         }
         Ok(value)
     }
@@ -458,26 +533,225 @@ fn under_prefix(path: &str, prefix: &str) -> bool {
     prefix.is_empty() || path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
+/// Test hook: `ALBUMEN_SEARCH_CLOCK_NS` (nanoseconds since the epoch) pins
+/// the time T shown in every freshness label and in `checked_at`. It does not
+/// change the clock used for hashing or the racy window.
+const CLOCK_ENV: &str = "ALBUMEN_SEARCH_CLOCK_NS";
+
+fn pinned_clock_ns() -> Option<i128> {
+    std::env::var(CLOCK_ENV).ok()?.parse().ok()
+}
+
+/// "3 matches", "1 match", "0 matches"; on one page of a paginated answer
+/// "3 matches on this page". The total is not counted: search stops at
+/// `limit`, so counting it would mean reading every later page.
+fn matches_text(matches: usize, paginated: bool) -> String {
+    let count = if matches == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{matches} matches")
+    };
+    if paginated {
+        format!("{count} on this page")
+    } else {
+        count
+    }
+}
+
+/// The `freshness` object every search answer carries (freshness label copy
+/// spec v1, states A to C). `label` is line 1 and `next` the next: line, word
+/// for word; T in `label` is local time with the zone abbreviation, and
+/// `checked_at` is the same instant in RFC 3339 UTC.
+///
+/// - partial (B): some files were not compared with the disk; T is the
+///   oldest check among them.
+/// - rebuilt (C): the saved search tree was missing ("no saved index yet")
+///   or damaged, another version or for another root ("the saved index was
+///   rebuilt"), so every folder was read; T is now. Partial wins over it.
+/// - fresh (A): every folder was compared with the disk; T is now. This
+///   includes a memory-only index: every file is stat'ed unless the budget
+///   runs out, and then the answer is partial.
+///
+/// `tree` is the search tree status ("discarded: missing", "loaded", ...).
+pub fn freshness(
+    matches: usize,
+    paginated: bool,
+    unchecked: &[metadata::Unchecked],
+    tree: &str,
+) -> Value {
+    let pinned = pinned_clock_ns();
+    let m = matches_text(matches, paginated);
+    if let Some(oldest) = unchecked.iter().map(|item| item.checked_ns).min() {
+        let at = pinned.unwrap_or(oldest);
+        let folders: std::collections::BTreeSet<&str> = unchecked
+            .iter()
+            .map(|item| item.path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(""))
+            .collect();
+        let n = folders.len();
+        let (count, which) = if n == 1 {
+            ("1 folder".to_string(), "that folder")
+        } else {
+            (format!("{n} folders"), "those folders")
+        };
+        return json!({
+            "state": "partial",
+            "checked_at": utc_text(at),
+            "folders_not_rechecked": n,
+            "label": format!(
+                "search: {m}, checked against disk at {}; {count} not rechecked",
+                local_text(at)
+            ),
+            "next": format!("next: run the same search again to recheck {which}"),
+        });
+    }
+    let at = pinned.unwrap_or_else(metadata::now_ns);
+    let (state, label) = if tree.starts_with("discarded") {
+        let why = if tree == "discarded: missing" {
+            "no saved index yet"
+        } else {
+            "the saved index was rebuilt"
+        };
+        (
+            "rebuilt",
+            format!(
+                "search: {m}, read every folder at {} ({why})",
+                local_text(at)
+            ),
+        )
+    } else {
+        (
+            "fresh",
+            format!("search: {m}, checked against disk at {}", local_text(at)),
+        )
+    };
+    json!({
+        "state": state,
+        "checked_at": utc_text(at),
+        "folders_not_rechecked": 0,
+        "label": label,
+        "next": null,
+    })
+}
+
+/// State D: the library root cannot be read. Search answers with a tool
+/// error whose text is line 1 and the next: line.
+pub fn unreachable_lines(root: &Path) -> (String, String) {
+    (
+        format!(
+            "search: could not read {}; no results shown",
+            root.display()
+        ),
+        "next: connect the drive or check the path, then search again".to_string(),
+    )
+}
+
+pub fn unreachable_text(root: &Path) -> String {
+    let (label, next) = unreachable_lines(root);
+    format!("{label}\n{next}")
+}
+
+pub fn unreachable_freshness(root: &Path) -> Value {
+    let (label, next) = unreachable_lines(root);
+    json!({
+        "state": "unreachable",
+        "checked_at": null,
+        "folders_not_rechecked": 0,
+        "label": label,
+        "next": next,
+    })
+}
+
+/// "2026-10-29 17:42 PDT": local time with the zone abbreviation (honours
+/// `TZ`). Elsewhere (Windows) "2026-10-30 00:42 UTC": chrono is not a
+/// dependency and none is added, so UTC is shown and named. Never a bare
+/// time without a zone.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_text(ns: i128) -> String {
+    extern "C" {
+        fn tzset();
+    }
+    let secs = ns.div_euclid(1_000_000_000) as libc::time_t;
+    // SAFETY: tzset only re-reads TZ; localtime_r writes into `tm`, which we
+    // own, and returns null on failure. tm_zone points at static zone data.
+    unsafe {
+        tzset();
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&secs, &mut tm).is_null() || tm.tm_zone.is_null() {
+            return utc_minutes(ns);
+        }
+        let zone = std::ffi::CStr::from_ptr(tm.tm_zone).to_string_lossy();
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02} {zone}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min
+        )
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn local_text(ns: i128) -> String {
+    utc_minutes(ns)
+}
+
+/// "2026-10-30 00:42 UTC".
+fn utc_minutes(ns: i128) -> String {
+    let full = utc_text(ns);
+    format!("{} {} UTC", &full[..10], &full[11..16])
+}
+
+fn utc_text(ns: i128) -> String {
+    let secs = ns.div_euclid(1_000_000_000) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn flush_metadata(
     root: &Path,
     cache: &mut metadata::Cache,
     filters: &Filters,
     limit: u64,
-    pending: &mut Vec<(String, u64)>,
+    pending: &mut Vec<&str>,
     page: &mut Page,
+    deadline: Option<std::time::Instant>,
+    unchecked: &mut Vec<metadata::Unchecked>,
 ) -> Result<(), String> {
-    let mut load_paths: Vec<String> = pending.iter().map(|(path, _)| path.clone()).collect();
+    let stats = metadata::stat_all(root, pending, deadline);
     let mut extra: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut found = Vec::with_capacity(pending.len());
-    let mut last_parent: Option<String> = None;
-    for (path, _) in pending.iter() {
+    let mut last_parent: Option<&str> = None;
+    let mut dir_has_sidecars = false;
+    for path in pending.iter() {
         let parent = path
             .rsplit_once('/')
             .map(|(parent, _)| parent)
             .unwrap_or("");
-        if last_parent.as_deref() != Some(parent) {
-            cache.refresh_dir(root, parent);
-            last_parent = Some(parent.to_string());
+        if last_parent != Some(parent) {
+            dir_has_sidecars = cache.refresh_dir(root, parent);
+            last_parent = Some(parent);
+        }
+        if !dir_has_sidecars {
+            found.push(Vec::new());
+            continue;
         }
         let sidecars = cache.listed_sidecars(root, path);
         for sidecar in &sidecars {
@@ -485,23 +759,39 @@ fn flush_metadata(
         }
         found.push(sidecars);
     }
+    let mut unkept = std::collections::HashMap::new();
+    let mut verdicts = Vec::new();
+    let lengths = cache.refresh_stated(
+        root,
+        pending,
+        stats,
+        &mut unkept,
+        unchecked,
+        &|i, record| found[i].is_empty().then(|| filters.matches(record)),
+        &mut verdicts,
+    )?;
     if !extra.is_empty() {
-        let primary: std::collections::HashSet<&str> =
-            pending.iter().map(|(path, _)| path.as_str()).collect();
+        let primary: std::collections::HashSet<&str> = pending.iter().copied().collect();
         let mut extra: Vec<String> = extra
             .into_iter()
             .filter(|path| !primary.contains(path.as_str()))
             .collect();
         extra.sort();
-        load_paths.extend(extra);
+        unkept.extend(cache.refresh(root, &extra)?);
     }
-    let unkept = cache.refresh(root, &load_paths)?;
     let cache = &*cache;
-    for ((path, bytes), sidecars) in pending.drain(..).zip(found) {
-        let Some(own) = cache.record(&unkept, &path) else {
+    for (((path, bytes), sidecars), verdict) in
+        pending.drain(..).zip(lengths).zip(found).zip(verdicts)
+    {
+        if verdict == Some(false) {
+            continue;
+        }
+        let Some(own) = cache.record(&unkept, path) else {
             continue;
         };
-        let matched = if sidecars.is_empty() {
+        let matched = if verdict == Some(true) {
+            Some(own.clone())
+        } else if sidecars.is_empty() {
             filters.matches(own).then(|| own.clone())
         } else {
             let merged =
@@ -514,7 +804,7 @@ fn flush_metadata(
         if page.consider(
             limit,
             Hit {
-                path,
+                path: path.to_string(),
                 bytes,
                 record: Some(merged),
             },
@@ -748,7 +1038,7 @@ fn required_f64(map: &serde_json::Map<String, Value>, key: &str) -> Result<f64, 
 fn search_def() -> Value {
     json!({
         "name": "search",
-        "description": "Find library files by path, capture date, camera, lens, GPS box, keyword, or caption. Metadata is read from the files and their XMP/AAE sidecars. Results are one page. Pass next_cursor to read the next page. Nothing is written.",
+        "description": "Find library files by path, capture date, camera, lens, GPS box, keyword, or caption. Metadata is read from the files and their XMP/AAE sidecars. Results are one page. Pass next_cursor to read the next page. Every answer carries freshness {state, checked_at, folders_not_rechecked, label, next}: label and next are the exact lines to show. Nothing is written.",
         "inputSchema": {
             "type": "object",
             "properties": {
