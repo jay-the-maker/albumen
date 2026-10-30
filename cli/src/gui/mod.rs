@@ -153,6 +153,7 @@ impl LibraryView {
     fn build(
         server: &Server,
         generation: u64,
+        files: Vec<String>,
         cached: &std::collections::HashSet<String>,
         partial: &mut dyn FnMut(LibraryView),
     ) -> Self {
@@ -165,7 +166,7 @@ impl LibraryView {
             ..Default::default()
         };
         let mut when: Vec<(Option<Box<str>>, bool)> = Vec::new();
-        let (files, bytes) = library_items(lib, cache.as_deref(), cached, &mut |files, item| {
+        let (files, bytes) = library_items(lib, files, cache.as_deref(), cached, &mut |files, item| {
             v.push(&item);
             when.push((
                 item["taken"].as_str().map(Into::into),
@@ -323,8 +324,14 @@ fn refresh_thumbs(server: &Arc<Server>) {
     let s = Arc::clone(server);
     std::thread::spawn(move || {
         let lib = &s.config.library;
+        // One listing for the thumbnails and the page, from the M3 index.
+        let files = if s.config.demo {
+            library_files(lib)
+        } else {
+            library_files_indexed(lib)
+        };
         let Some(cache) = live::cache_dir(lib) else {
-            publish_library(&s, gen, &Default::default());
+            publish_library(&s, gen, files, &Default::default());
             return;
         };
         let scan = s
@@ -333,14 +340,13 @@ fn refresh_thumbs(server: &Arc<Server>) {
             .unwrap()
             .clone()
             .or_else(|| newest_scan(&s.config.state));
-        let files = library_files(lib);
         let heics: Vec<&str> = files
             .iter()
             .map(String::as_str)
             .filter(|r| thumbs::is_heic(r))
             .collect();
         let r = thumbs::refresh(lib, &heics, &thumbs::thumbs_root(&cache), scan.as_deref());
-        publish_library(&s, gen, &r.cached);
+        publish_library(&s, gen, files, &r.cached);
         {
             let mut view = s.thumbs.lock().unwrap();
             if gen > view.generation {
@@ -353,7 +359,12 @@ fn refresh_thumbs(server: &Arc<Server>) {
 /// Build the listing for `gen` and publish it: an early first page while
 /// indexing, then the whole thing. An older generation never replaces a
 /// newer finished one.
-fn publish_library(s: &Arc<Server>, gen: u64, cached: &std::collections::HashSet<String>) {
+fn publish_library(
+    s: &Arc<Server>,
+    gen: u64,
+    files: Vec<String>,
+    cached: &std::collections::HashSet<String>,
+) {
     let put = |v: LibraryView| {
         let mut lv = s.library.lock().unwrap();
         let newer = lv
@@ -363,7 +374,7 @@ fn publish_library(s: &Arc<Server>, gen: u64, cached: &std::collections::HashSet
             *lv = Some(Arc::new(v));
         }
     };
-    let full = LibraryView::build(s, gen, cached, &mut |early| put(early));
+    let full = LibraryView::build(s, gen, files, cached, &mut |early| put(early));
     put(full);
 }
 
@@ -455,7 +466,12 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
     });
     if server.config.demo {
         // The demo library is tiny: have it ready before the first request.
-        publish_library(&server, 0, &Default::default());
+        publish_library(
+            &server,
+            0,
+            library_files(&server.config.library),
+            &Default::default(),
+        );
     }
     refresh_thumbs(&server);
     for stream in listener.incoming().flatten() {
@@ -665,6 +681,23 @@ fn library_files(library: &Path) -> Vec<String> {
     out
 }
 
+/// The library's files from the persisted M3 path index (the one search
+/// keeps outside the library): load it, stat each indexed directory, list
+/// again only the changed ones, save. A cold open with a saved index never
+/// walks the whole tree. No index dir, or any index error: a plain walk.
+/// Sorted like [`library_files`], so both give the same listing.
+fn library_files_indexed(library: &Path) -> Vec<String> {
+    let dir = albumen_ingest::index::default_index_dir();
+    match albumen_ingest::index::LibraryIndex::open(library, dir.as_deref()) {
+        Ok(index) => {
+            let mut paths = index.into_paths();
+            paths.sort();
+            paths
+        }
+        Err(_) => library_files(library),
+    }
+}
+
 fn ext(rel: &str) -> Option<String> {
     rel.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())
 }
@@ -714,7 +747,13 @@ pub fn library_json_scan(
     thumbs_cached: &std::collections::HashSet<String>,
 ) -> serde_json::Value {
     let mut items = Vec::new();
-    let (files, bytes) = library_items(library, cache, thumbs_cached, &mut |_, i| items.push(i));
+    let (files, bytes) = library_items(
+        library,
+        library_files(library),
+        cache,
+        thumbs_cached,
+        &mut |_, i| items.push(i),
+    );
     serde_json::json!({
         "library": library.display().to_string(),
         "files": files,
@@ -729,11 +768,11 @@ pub fn library_json_scan(
 /// them all. Returns (files, image bytes).
 fn library_items(
     library: &Path,
+    files: Vec<String>,
     cache: Option<&Path>,
     thumbs_cached: &std::collections::HashSet<String>,
     sink: &mut dyn FnMut(usize, serde_json::Value),
 ) -> (usize, u64) {
-    let files = library_files(library);
     // Live Photos: a still and a movie with the same folder and stem AND the
     // same ContentIdentifier are one photo. Same stem without a matching ID
     // stays two items, each with an Info line saying why.
@@ -1219,7 +1258,8 @@ mod tests {
             library: Mutex::new(None),
         };
         let mut early = 0;
-        let view = LibraryView::build(&server, 7, &Default::default(), &mut |_| early += 1);
+        let files = library_files(&built.library);
+        let view = LibraryView::build(&server, 7, files, &Default::default(), &mut |_| early += 1);
         let want = library_json(&built.library);
         let mut out = Vec::new();
         view.write_json(&mut out, None).unwrap();

@@ -265,6 +265,11 @@ impl LibraryIndex {
         &self.paths
     }
 
+    /// Every file, in walk order, without keeping the rest of the index.
+    pub fn into_paths(self) -> Vec<String> {
+        self.paths
+    }
+
     /// Visit files that sort after `after`, in walk order, with each path's
     /// lowercase form. Return `false` to stop.
     pub fn visit_after(&self, after: Option<&str>, visit: &mut dyn FnMut(&str, &str) -> bool) {
