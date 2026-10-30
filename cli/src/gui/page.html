@@ -205,9 +205,13 @@ function human(n){return n<1024?n+' bytes':n<1048576?Math.round(n/1024)+' KB':(n
 // A moment as local time with a numeric offset, the same label albumen
 // status prints (albumen_ingest::clock): "2026-10-18 09:00 UTC-7",
 // "UTC+5:30" for part-hour zones, "UTC" at zero; never an abbreviation.
-function local(d){const p=n=>String(n).padStart(2,'0');const o=-d.getTimezoneOffset(),a=Math.abs(o);
+// off: minutes east of UTC; omitted means this computer's zone. gui-behaviour
+// passes it to check this copy against the Rust formatter (clock::stamp_at).
+function local(d,off){const p=n=>String(n).padStart(2,'0');const fixed=off!==undefined;
+ const o=fixed?off:-d.getTimezoneOffset(),a=Math.abs(o);
+ const t=fixed?new Date(d.getTime()+o*60000):d,g=k=>fixed?t['getUTC'+k]():t['get'+k]();
  const z=o==0?'UTC':'UTC'+(o<0?'-':'+')+Math.floor(a/60)+(a%60?':'+p(a%60):'');
- return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+' '+z;}
+ return g('FullYear')+'-'+p(g('Month')+1)+'-'+p(g('Date'))+' '+p(g('Hours'))+':'+p(g('Minutes'))+' '+z;}
 // Capture times: only a time that carries an offset is a real moment, shown
 // in this computer's zone. A camera clock reading has no zone, so it is shown
 // as written and says so; no zone is invented for it.

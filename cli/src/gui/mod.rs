@@ -70,6 +70,9 @@ pub struct Config {
     /// Folder for scan manifests and backup state, outside the library.
     pub state: PathBuf,
     pub max_age_secs: u64,
+    /// `--demo` only: also serves /api/demo/clock, a fixture hook that lets
+    /// gui-behaviour compare the page's local() with the Rust formatter.
+    pub demo: bool,
 }
 
 #[derive(Default)]
@@ -103,6 +106,7 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
             card: Some(built.card),
             state: built.state,
             max_age_secs,
+            demo: true,
         }
     } else {
         let library = args.library.clone().ok_or_else(|| IngestError::Usage {
@@ -118,6 +122,7 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
             card: args.card.clone(),
             state,
             max_age_secs,
+            demo: false,
         }
     };
     SourceRoot::open(&config.library)?.refuse_destination(&config.state)?;
@@ -282,6 +287,26 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
                     http::respond(&mut stream, 200, "application/json", body.as_bytes())
                 }
                 Err(message) => http::respond(&mut stream, 400, "text/plain", message.as_bytes()),
+            }
+        }
+        ("GET", "/api/demo/clock") if server.config.demo => {
+            // Demo-only parity hook: the shared Rust formatter at an explicit
+            // offset, so the page's local() can be checked against it.
+            let num =
+                |k: &str| http::query_param(&req.target, k).and_then(|v| v.parse::<i64>().ok());
+            match (num("unix"), num("offset")) {
+                (Some(unix), Some(offset)) if offset.abs() <= 14 * 60 => {
+                    let body = serde_json::json!({
+                        "stamp": albumen_ingest::clock::stamp_at(unix, offset),
+                    });
+                    http::respond(
+                        &mut stream,
+                        200,
+                        "application/json",
+                        body.to_string().as_bytes(),
+                    )
+                }
+                _ => http::respond(&mut stream, 400, "text/plain", b"unix and offset needed"),
             }
         }
         _ => http::respond(&mut stream, 404, "text/plain", b"not found"),
@@ -730,6 +755,7 @@ mod tests {
             card: None,
             state: "/state".into(),
             max_age_secs: 1,
+            demo: false,
         };
         assert!(job_args(&config, "rm", None, None).is_err());
         assert!(job_args(&config, "backup", Some("/elsewhere"), None).is_err());

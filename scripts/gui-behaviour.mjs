@@ -132,6 +132,23 @@ try {
   const shown = await ev(`[...document.querySelectorAll('#cards .card .txt')].map(t=>t.innerText).join('\\n')+'\\n'+$('health-summary').innerText`);
   check('R2: no zone abbreviation on the health screen', !/\b[A-Z]{2,4}T\b/.test(shown), shown);
   check('R2: stale time shown with a numeric offset', /\d{4}-\d\d-\d\d \d\d:\d\d UTC-[78]\b/.test(shown), shown);
+  // Parity: the page's local() and the Rust formatter (clock::stamp_at, via
+  // the demo-only /api/demo/clock) give the same text at the same explicit
+  // offset, including part-hour zones, plain UTC and US DST edges.
+  const T = 1793320920; // 2026-10-30T00:42:00Z
+  const cases = [
+    [T, -420, '2026-10-29 17:42 UTC-7'], [T, 330, '2026-10-30 06:12 UTC+5:30'], [T, 0, '2026-10-30 00:42 UTC'],
+    [T, -480], [T, 345], [T, -570], [T, 840], [T, -720], [-1, 0], [951782400, 0],
+    // US spring forward 2026-03-08 10:00Z and fall back 2026-11-01 09:00Z, either side.
+    [1772963999, -480], [1772964000, -420], [1793523599, -420], [1793523600, -480],
+    // India crosses midnight at 18:30Z.
+    [1793298599, 330], [1793298600, 330],
+  ];
+  for (const [unix, off, want] of cases) {
+    const rust = (await (await fetch(`${url}/api/demo/clock?unix=${unix}&offset=${off}`)).json()).stamp;
+    const js = await ev(`local(new Date(${unix}*1000),${off})`);
+    check(`parity ${unix}@${off}: ${js}`, rust == js && (!want || js == want), {rust, js, want});
+  }
   // R13 / S1: backups show their folder name, never a temp path or an invented drive name.
   const names = await ev(`[...document.querySelectorAll('#side-dests span, #cards .card h3')].map(e=>e.textContent)`);
   check('R13: sidebar and cards show folder names only', names.length == 8 && names.every(n => !/[\\/:]/.test(n) && !/temp|tmp/i.test(n)), names);
