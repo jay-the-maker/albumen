@@ -88,11 +88,8 @@ await cmd('Runtime.enable');
 await cmd('Page.navigate', {url: url + '/'});
 try {
   await until(`typeof lib!=='undefined'&&lib.status=='ready'&&lib.images.length==${N + 1}`, 'library of ' + (N + 1) + ' loaded');
-  // The line lives in the Info panel's Library section; open it with a real click.
-  const b = await ev(`(()=>{const r=document.getElementById('b-info').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
-  await cmd('Input.dispatchMouseEvent', {type: 'mousePressed', x: b.x, y: b.y, button: 'left', clickCount: 1});
-  await cmd('Input.dispatchMouseEvent', {type: 'mouseReleased', x: b.x, y: b.y, button: 'left', clickCount: 1});
-  await until(`!document.getElementById('info').hidden`, 'Info panel opened', 50);
+  // D1(a): a quiet status line on the Photos view, visible without opening Info.
+  check('Info panel is closed', await ev(`document.getElementById('info').hidden`), 'info open');
   await until(`!document.getElementById('index-note').hidden`, '#index-note shown while the save is pending', 100);
   const shown = await ev(note);
   check('#index-note is shown while the index save is pending', !!shown && shown.shown, shown);
