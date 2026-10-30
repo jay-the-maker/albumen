@@ -12,6 +12,7 @@
 //!
 //! Synthetic files only; originals are checked bit-exact (bytes + mtime).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -876,4 +877,131 @@ fn a_family_log_entry_with_a_bad_signature_hides_every_family_object() {
 #[test]
 fn a_family_log_entry_out_of_sequence_hides_every_family_object() {
     break_entry_before_a_later_hide(Break::Mismatch);
+}
+
+#[test]
+fn a_filled_hole_clears_the_note_and_only_real_hides_stay_hidden() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = family(tmp.path());
+    let mut objects = Vec::new();
+    let mut shas = Vec::new();
+    for name in ["one.jpg", "two.jpg", "three.jpg", "four.jpg"] {
+        let src = tmp.path().join(name);
+        fs::write(&src, format!("synthetic-m7-recover-{name}")).unwrap();
+        let (r, sha) = family_add(&f, &src);
+        objects.push(r);
+        shas.push(sha);
+    }
+    // bea: hide one, hide two (the later hide), tombstone four (everyone).
+    family_mark(&f, "hide", &shas[0]);
+    family_mark(&f, "hide", &shas[1]);
+    family_mark(&f, "tombstone", &shas[3]);
+    let real = |viewer: Option<&str>| -> BTreeSet<String> {
+        let mut want = BTreeSet::from([objects[3].clone()]);
+        if viewer == Some(f.member_b.as_str()) {
+            want.insert(objects[0].clone());
+            want.insert(objects[1].clone());
+        }
+        want
+    };
+    let viewers = [Some(f.member_a.as_str()), Some(f.member_b.as_str()), None];
+    for viewer in viewers {
+        let h = hidden_paths(&f.library, &objects, viewer);
+        assert!(h.errors.is_empty(), "{viewer:?}: {:?}", h.errors);
+        assert_eq!(
+            h.paths.iter().cloned().collect::<BTreeSet<String>>(),
+            real(viewer),
+            "{viewer:?} before the hole"
+        );
+    }
+    // Hole: bea's "hide one" entry goes missing while later entries exist.
+    let mut files = Vec::new();
+    files_under(&f.library.join("members").join(&f.member_b), &mut files);
+    let mut logs: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|p| p.parent().is_some_and(|d| d.ends_with("log")))
+        .collect();
+    logs.sort_by_key(|p| {
+        p.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+    });
+    let hole = logs[logs.len() - 2].clone();
+    let saved = fs::read(&hole).unwrap();
+    fs::remove_file(&hole).unwrap();
+    let want_note = format!(
+        "Family photos hidden: a family log entry is missing: {}",
+        hole.display()
+    );
+    for viewer in viewers {
+        let h = hidden_paths(&f.library, &objects, viewer);
+        let all: BTreeSet<String> = objects.iter().cloned().collect();
+        assert_eq!(
+            h.paths.iter().cloned().collect::<BTreeSet<String>>(),
+            all,
+            "{viewer:?} with the hole"
+        );
+        assert_eq!(h.errors, std::slice::from_ref(&want_note), "{viewer:?}");
+    }
+    let work = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let gui_index = tempfile::tempdir().unwrap();
+    let (gui, addr) = start(&f.library, work.path(), gui_index.path(), home.path());
+    let found = ready_found(&addr);
+    assert_eq!(
+        found["hide_note"].as_str(),
+        Some(want_note.as_str()),
+        "{found}"
+    );
+    // Fill the hole (same bytes back; synthetic temp fixture).
+    fs::write(&hole, &saved).unwrap();
+    for viewer in viewers {
+        let h = hidden_paths(&f.library, &objects, viewer);
+        assert!(
+            h.errors.is_empty(),
+            "{viewer:?} after refill: {:?}",
+            h.errors
+        );
+        assert_eq!(
+            h.paths,
+            real(viewer),
+            "{viewer:?} after refill: a fail-closed hide stuck"
+        );
+    }
+    // Next poll on the same GUI: the line clears.
+    let after = found_page(&addr);
+    println!(
+        "M7 recover note with hole: {want_note}; after refill: {}",
+        after["hide_note"]
+    );
+    assert!(
+        after["hide_note"].is_null() || after["hide_note"] == "",
+        "note stuck after refill: {after}"
+    );
+    drop(gui);
+    // Next listing: a fresh GUI on the same files has no line, and the index
+    // listing (scan, then rescan from the saved index) shows every family
+    // photo the files don't hide for that viewer. The GUI grid itself lists
+    // no family objects (extensionless sha256 names), so the listing check
+    // uses the index path hides are applied on.
+    let (_gui2, addr2) = start(&f.library, work.path(), gui_index.path(), home.path());
+    let relisted = ready_found(&addr2);
+    assert!(
+        relisted["hide_note"].is_null() || relisted["hide_note"] == "",
+        "note stuck at the next listing: {relisted}"
+    );
+    let index = tempfile::tempdir().unwrap();
+    for pass in ["scan", "rescan"] {
+        for viewer in viewers {
+            let v = visible(&f.library, index.path(), viewer);
+            for o in &objects {
+                assert_eq!(
+                    v.contains(o),
+                    !real(viewer).contains(o),
+                    "{pass} {viewer:?}: {o} after the hole was filled"
+                );
+            }
+        }
+    }
+    println!("M7 recover listing ok for ada, bea, none");
 }
