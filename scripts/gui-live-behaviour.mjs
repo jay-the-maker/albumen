@@ -129,7 +129,7 @@ try {
     [part.status, part.headers.get('content-range'), pb.length]);
   const bad = await fetch(url + '/video?p=' + encodeURIComponent('roll/IMG_0005.MOV'), {headers: {Range: `bytes=${movie.length}-`}});
   check('Range past the end gives 416', bad.status == 416 && bad.headers.get('content-range') == `bytes */${movie.length}`, [bad.status, bad.headers.get('content-range')]);
-  const tiles = await ev(`[...document.querySelectorAll('#grid figure')].map(f=>f.innerText.replace(/\s+/g,' ').trim())`);
+  const tiles = await ev(`[...document.querySelectorAll('#grid figure')].map(f=>f.innerText.replace(/\\s+/g,' ').trim())`);
   check('LIVE badges on the two ID-matched pairs only', await ev(`document.querySelectorAll('#grid figure .live').length`) == 2 &&
     (await ev(`${badge('IMG_0005').js}!=null&&${badge('IMG_0010').js}!=null&&${badge('IMG_0008').js}==null`)), tiles);
   const heads = await ev(`({photos:document.getElementById('photos-count').textContent,lib:document.getElementById('lib-count').textContent})`);
