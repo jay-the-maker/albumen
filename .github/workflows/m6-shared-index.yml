@@ -9,7 +9,7 @@ name: m6 shared index
 
 on:
   push:
-    branches: [m6-shared-index]
+    branches: [m6-shared-index, m7-hide-persist]
   workflow_dispatch:
     inputs:
       files:
@@ -51,6 +51,7 @@ jobs:
         run: |
           cargo test --release --locked -p albumen-ingest --test index_shared --no-run
           cargo test --release --locked -p albumen --test gui_index_x1 --no-run
+          cargo test --release --locked -p albumen --test m7_hide_persist --no-run
 
       - name: X2 at 10,000 files, seeds 1-3 (read bars)
         run: |
@@ -80,6 +81,17 @@ jobs:
             M6_PKG=albumen M6_TEST=gui_index_x1 \
             M6_RESULT_MAX="index_read_max_ms=100 gui_child_peak_rss_kb=339968" \
             bash .github/m6-one.sh readers_keep_answering_while_one_writer_saves X1
+
+      - name: M7 hidden photos stay hidden at ${{ github.event.inputs.files || '380000' }} files (M6 bars)
+        run: |
+          # First tile <= 2 s and gui child peak RSS <= 332 MiB, with no hidden photo shown.
+          ALBUMEN_M7_FILES=$FILES ALBUMEN_M7_BARS=1 M6_TREE_RSS=diag \
+            M6_PKG=albumen M6_TEST=m7_hide_persist \
+            M6_RESULT_MAX="first_tile_ms=2000 gui_child_peak_rss_kb=339968 hidden_shown=0" \
+            bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7
+
+      - name: The rest of the M7 hide tests
+        run: cargo test --release --locked -p albumen --test m7_hide_persist
 
       - name: The rest of the index tests
         run: |

@@ -22,6 +22,7 @@ pub mod family;
 mod family_export;
 mod family_source;
 mod family_sync;
+pub mod hides;
 mod icloud;
 pub mod index;
 pub mod ledger;
