@@ -662,9 +662,8 @@ pub fn unreachable_freshness(root: &Path) -> Value {
 }
 
 /// "2026-10-29 17:42 PDT": local time with the zone abbreviation (honours
-/// `TZ`). Elsewhere (Windows) "2026-10-30 00:42 UTC": chrono is not a
-/// dependency and none is added, so UTC is shown and named. Never a bare
-/// time without a zone.
+/// `TZ`). On Windows see the `cfg(windows)` version below: local time with a
+/// numeric offset. Never a bare time without a zone.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_text(ns: i128) -> String {
     extern "C" {
@@ -691,9 +690,98 @@ fn local_text(ns: i128) -> String {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows: "2026-10-29 17:42 UTC-7": local time with the numeric offset
+/// the OS applies at that instant (its current zone and that year's DST
+/// rules), "UTC+5:30" when the offset is not whole hours. Zone names and
+/// abbreviations such as PDT are never printed. If the OS cannot convert,
+/// "2026-10-30 00:42 UTC".
+#[cfg(windows)]
+fn local_text(ns: i128) -> String {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::{
+        GetDynamicTimeZoneInformation, SystemTimeToTzSpecificLocalTimeEx,
+        DYNAMIC_TIME_ZONE_INFORMATION, TIME_ZONE_ID_INVALID,
+    };
+    let secs = ns.div_euclid(1_000_000_000) as i64;
+    let full = utc_text(ns);
+    let num = |a: usize, b: usize| full[a..b].parse::<u16>().unwrap_or(0);
+    let utc = SYSTEMTIME {
+        wYear: num(0, 4),
+        wMonth: num(5, 7),
+        wDayOfWeek: 0,
+        wDay: num(8, 10),
+        wHour: num(11, 13),
+        wMinute: num(14, 16),
+        wSecond: num(17, 19),
+        wMilliseconds: 0,
+    };
+    // SAFETY: both structs are plain data we own; the calls only write into
+    // them and report failure through their return values.
+    let local = unsafe {
+        let mut zone: DYNAMIC_TIME_ZONE_INFORMATION = std::mem::zeroed();
+        if GetDynamicTimeZoneInformation(&mut zone) == TIME_ZONE_ID_INVALID {
+            return utc_minutes(ns);
+        }
+        let mut local: SYSTEMTIME = std::mem::zeroed();
+        if SystemTimeToTzSpecificLocalTimeEx(&zone, &utc, &mut local) == 0 {
+            return utc_minutes(ns);
+        }
+        local
+    };
+    let local_secs = days_from_civil(
+        i64::from(local.wYear),
+        i64::from(local.wMonth),
+        i64::from(local.wDay),
+    ) * 86_400
+        + i64::from(local.wHour) * 3600
+        + i64::from(local.wMinute) * 60
+        + i64::from(local.wSecond);
+    // Real offsets are within +-14 h; anything else means a bad conversion.
+    let offset_min = (local_secs - secs).div_euclid(60);
+    if offset_min.abs() > 14 * 60 {
+        return utc_minutes(ns);
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} {}",
+        local.wYear,
+        local.wMonth,
+        local.wDay,
+        local.wHour,
+        local.wMinute,
+        offset_text(offset_min)
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn local_text(ns: i128) -> String {
     utc_minutes(ns)
+}
+
+/// "UTC", "UTC-7", "UTC+5:30", "UTC-9:30" from minutes east of UTC.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn offset_text(minutes: i64) -> String {
+    if minutes == 0 {
+        return "UTC".to_string();
+    }
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
+    if m == 0 {
+        format!("UTC{sign}{h}")
+    } else {
+        format!("UTC{sign}{h}:{m:02}")
+    }
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// "2026-10-30 00:42 UTC".
@@ -1146,6 +1234,21 @@ fn upload_def() -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offsets_are_numeric_never_abbreviations() {
+        use super::{days_from_civil, offset_text};
+        assert_eq!(offset_text(-420), "UTC-7");
+        assert_eq!(offset_text(-480), "UTC-8");
+        assert_eq!(offset_text(0), "UTC");
+        assert_eq!(offset_text(60), "UTC+1");
+        assert_eq!(offset_text(330), "UTC+5:30");
+        assert_eq!(offset_text(-570), "UTC-9:30");
+        assert_eq!(offset_text(345), "UTC+5:45");
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2026, 10, 30), 1_793_320_920 / 86_400);
+        assert_eq!(days_from_civil(2000, 2, 29), 11_016);
+    }
+
     use super::*;
 
     #[test]
