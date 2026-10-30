@@ -96,9 +96,9 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
-          # 9 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
-          grep -Eq '^test result: ok\. 9 passed; 0 failed; 0 ignored' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 9 tests green"; exit 1; }
+          # 12 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
+          grep -Eq '^test result: ok\. 12 passed; 0 failed; 0 ignored' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 12 tests green"; exit 1; }
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
         run: |
