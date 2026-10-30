@@ -193,8 +193,8 @@ fn fresh_stale_damaged_never_and_unreadable() {
             "  changed: roll/IMG_0001.jpg",
             "  missing: roll/IMG_0004.jpg",
             &format!(
-                "next: move the changed copy aside, for example: mv {0}/roll/IMG_0001.jpg {0}/roll/IMG_0001.jpg.changed",
-                p(&damaged)
+                "next: move the changed copy aside, for example: mv {0} {0}.changed",
+                p(&damaged.join("roll").join("IMG_0001.jpg"))
             ),
         ]
     );
@@ -263,9 +263,14 @@ fn several_destinations_report_each_and_exit_with_the_worst() {
     assert_next_rules(code, &text);
 }
 
-/// Single-quoted for a shell, as status prints destinations in next: lines.
+/// Quoted as status prints destinations in next: lines: POSIX single
+/// quotes, or PowerShell single quotes on Windows.
 fn q(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
+    if cfg!(windows) {
+        format!("'{}'", text.replace('\'', "''"))
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
 }
 
 #[test]
@@ -298,7 +303,7 @@ fn next_lines_quote_the_destination_and_changed_copies_are_moved_aside() {
     let before = snapshot(&dest);
     let (code, text) = status(&[&d]);
     assert_eq!(code, 1, "{text}");
-    let first = format!("{d}/roll/IMG_0000.jpg");
+    let first = p(&dest.join("roll").join("IMG_0000.jpg")).to_string();
     assert_eq!(
         text.lines().last().unwrap(),
         format!(

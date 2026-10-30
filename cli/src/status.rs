@@ -73,12 +73,29 @@ pub struct Report {
     pub next: Option<String>,
 }
 
-use crate::proof::shell_quote;
+/// Quote a path for the `next:` line so it pastes into the user's shell:
+/// POSIX single quotes elsewhere, PowerShell single quotes (`''` for a quote)
+/// with native backslashes on Windows. Plain paths stay unquoted.
+fn cmd_quote(text: &str) -> String {
+    if cfg!(windows) {
+        if !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "\\/._-:=+@".contains(c))
+        {
+            text.to_string()
+        } else {
+            format!("'{}'", text.replace('\'', "''"))
+        }
+    } else {
+        crate::proof::shell_quote(text)
+    }
+}
 
 fn export_next(dest: &str) -> String {
     format!(
         "next: albumen backup --from <your photos folder> --to {}",
-        shell_quote(dest)
+        cmd_quote(dest)
     )
 }
 
@@ -86,7 +103,11 @@ fn export_next(dest: &str) -> String {
 /// copy as a conflict, so the next step is to move it aside (nothing is
 /// deleted). Names the first changed file and counts the others.
 fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
-    let path = Path::new(dest).join(first_changed).display().to_string();
+    let path = first_changed
+        .split('/')
+        .fold(Path::new(dest).to_path_buf(), |path, part| path.join(part))
+        .display()
+        .to_string();
     let aside = format!("{path}.changed");
     let more = if changed > 1 {
         let others = changed - 1;
@@ -97,8 +118,8 @@ fn move_aside_next(dest: &str, first_changed: &str, changed: usize) -> String {
     };
     format!(
         "next: move the changed copy aside{more}, for example: mv {} {}",
-        shell_quote(&path),
-        shell_quote(&aside)
+        cmd_quote(&path),
+        cmd_quote(&aside)
     )
 }
 
@@ -173,7 +194,7 @@ pub fn check(dest: &str, max_age_secs: u64, now: SystemTime) -> Report {
     let unreadable = |why: String| {
         let next = format!(
             "next: check that {dest} is connected and readable, then run albumen status {} again",
-            shell_quote(dest)
+            cmd_quote(dest)
         );
         Report {
             state: State::Unreadable,
