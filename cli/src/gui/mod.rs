@@ -101,7 +101,13 @@ struct Server {
     /// Photos the running walk has found so far, shown while indexing so a
     /// first open (no saved index) never sits at 0.
     found: std::sync::atomic::AtomicUsize,
+    /// The first photos a first-ever walk finds, in the order found (at most
+    /// [`FOUND_SHOWN`]), so the grid has tiles before the listing is ready.
+    found_paths: Mutex<Vec<String>>,
 }
+
+/// How many walk-order photos the page may show while a first walk runs.
+const FOUND_SHOWN: usize = 600;
 
 /// One library walk, kept compact so /api/library never walks per request:
 /// each image's JSON record in one byte arena, each path in another, and
@@ -340,7 +346,7 @@ fn refresh_thumbs(server: &Arc<Server>) {
         let files = if s.config.demo {
             library_files(lib)
         } else {
-            library_files_indexed(lib, &s.found)
+            library_files_indexed(lib, &s.found, &s.found_paths)
         };
         let Some(cache) = live::cache_dir(lib) else {
             publish_library(&s, gen, files, &Default::default());
@@ -476,6 +482,7 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
         thumb_gen: Default::default(),
         library: Mutex::new(None),
         found: Default::default(),
+        found_paths: Default::default(),
     });
     if server.config.demo {
         // The demo library is tiny: have it ready before the first request.
@@ -542,6 +549,17 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
                 })
                 .unwrap_or_default();
             let body = serde_json::json!({ "offset": offset, "entries": rows }).to_string();
+            http::respond(&mut stream, 200, "application/json", body.as_bytes())
+        }
+        ("GET", "/api/found") => {
+            // While a first walk runs: the photos found so far, in the order
+            // found (append-only, so tiles already shown never move).
+            let paths = server.found_paths.lock().unwrap().clone();
+            let body = serde_json::json!({
+                "found": server.found.load(std::sync::atomic::Ordering::Relaxed),
+                "paths": paths,
+            })
+            .to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/library") => {
@@ -708,17 +726,25 @@ fn library_files(library: &Path) -> Vec<String> {
 /// Sorted like [`library_files`], so both give the same listing.
 /// `found` counts the photos a first build (no saved index) lists, as it
 /// lists them, for the "photos so far" line.
-fn library_files_indexed(library: &Path, found: &std::sync::atomic::AtomicUsize) -> Vec<String> {
+fn library_files_indexed(
+    library: &Path,
+    found: &std::sync::atomic::AtomicUsize,
+    found_paths: &Mutex<Vec<String>>,
+) -> Vec<String> {
     use std::sync::atomic::Ordering;
     let dir = albumen_ingest::index::default_index_dir();
     let mut n = 0usize;
     found.store(0, Ordering::Relaxed);
+    found_paths.lock().unwrap().clear();
     let opened = albumen_ingest::index::LibraryIndex::open_with_progress(
         library,
         dir.as_deref(),
         &mut |rel| {
             if is_photo(rel) {
                 n += 1;
+                if n <= FOUND_SHOWN {
+                    found_paths.lock().unwrap().push(rel.to_string());
+                }
                 found.store(n, Ordering::Relaxed);
             }
         },
@@ -1294,6 +1320,7 @@ mod tests {
             thumb_gen: Default::default(),
             library: Mutex::new(None),
             found: Default::default(),
+            found_paths: Default::default(),
         };
         let mut early = 0;
         let files = library_files(&built.library);

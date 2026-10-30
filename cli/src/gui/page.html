@@ -165,7 +165,11 @@ let bpSrc=null,bpMap=null;
 const byPath=p=>{if(bpSrc!==lib.images){bpSrc=lib.images;bpMap=new Map();for(const i of lib.images)if(!bpMap.has(i.path))bpMap.set(i.path,i);}return bpMap.get(p);};
 // The grid is paged: only the first gridLimit tiles are in the page, and
 // more are added as the end of the grid scrolls into view.
-const GRID_PAGE=600;let gridLimit=GRID_PAGE,moreObs=null;
+const GRID_PAGE=600;let gridLimit=GRID_PAGE,moreObs=null,moreTimer=null,gridMore=null;
+// Next page when the end is near: IntersectionObserver first, and a scroll
+// and timer check too, since an observer alone can stop firing (seen in Edge).
+function nearEnd(){const b=$('grid-more');if(!b||!gridMore)return;const v=$('photos').getBoundingClientRect(),r=b.getBoundingClientRect();if(r.top<v.bottom+800&&r.bottom>v.top-800)gridMore();}
+let nearQ=false;$('photos').addEventListener('scroll',()=>{if(nearQ)return;nearQ=true;requestAnimationFrame(()=>{nearQ=false;nearEnd();});},{passive:true});
 // Search matches the shown file and, for a RAW + JPEG pair, the RAW's name.
 function match(p){const t=$('search').value.trim().toLowerCase();if(!t)return true;const m=byPath(p);
  return [p,m&&m.raw].filter(Boolean).some(x=>base(x).toLowerCase().includes(t));}
@@ -175,14 +179,14 @@ function visible(){const evs=curEvent?[curEvent]:lib.events;return evs.flatMap(e
 // HEIC and RAW are listed and counted like any photo; the browser cannot
 // show them yet, so they get a calm placeholder tile instead of an image.
 // The file name is shown once, as the caption.
-const canShow=p=>{const m=byPath(p);return !m||m.preview!==false;};
+const canShow=p=>{const m=byPath(p);return m?m.preview!==false:/\.(jpe?g|png|gif|webp|avif)$/i.test(p);};
 // Plain words for any file the browser cannot show (spec AC3).
 // Header counts: a Live Photo pair or RAW + JPEG is one item, so one photo;
 // a lone movie is a video and is counted as one, never as a photo.
 function countText(ps){const v=ps.filter(p=>{const im=byPath(p);return im&&im.video;}).length,ph=ps.length-v;
  const t=[];if(ph||!v)t.push(ph+(ph==1?' photo':' photos'));if(v)t.push(v+(v==1?' video':' videos'));return t.join(', ');}
 const CANT="Can't preview this file here. Your original is kept unchanged.";
-const fmt=p=>{const m=byPath(p);return (m&&m.format)||'';};
+const fmt=p=>{const m=byPath(p);return (m&&m.format)||((p.match(/\.([^./]+)$/)||[])[1]||'').toUpperCase();};
 function figure(p,cap,sub){const f=document.createElement('figure');let i;
  if(canShow(p)){i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);}
  else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent=CANT;i.append(b,m);}
@@ -201,13 +205,14 @@ function addTiles(n){const more=$('grid-more');
   more?more.before(g):$('grid').append(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
- $('grid').innerHTML='';if(moreObs){moreObs.disconnect();moreObs=null;}
+ $('grid').innerHTML='';early=null;if(moreObs){moreObs.disconnect();moreObs=null;}clearInterval(moreTimer);moreTimer=null;gridMore=null;
  let total=0;for(const x of evs)total+=x.ps.length;
  gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
  if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
-  const more=()=>{gridLimit+=GRID_PAGE;addTiles(GRID_PAGE);if(gs.done>=total){moreObs&&moreObs.disconnect();b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';if(moreObs){moreObs.unobserve(b);moreObs.observe(b);}}};
+  const more=()=>{if(!b.isConnected)return;gridLimit+=GRID_PAGE;addTiles(GRID_PAGE);if(gs.done>=total){moreObs&&moreObs.disconnect();clearInterval(moreTimer);moreTimer=null;gridMore=null;b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';if(moreObs){moreObs.unobserve(b);moreObs.observe(b);}}};
   b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;$('grid').append(b);
-  if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}}
+  if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}
+  gridMore=more;moreTimer=setInterval(nearEnd,400);}
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
  $('photos-count').textContent=countText(evs.flatMap(x=>x.ps));
  $('event-grid').innerHTML='';
@@ -282,9 +287,19 @@ function sideDests(st){$('side-dests').innerHTML='';
  for(const d of st.destinations){const b=document.createElement('button');b.title=d.state;
   const dot=document.createElement('i');dot.className='dot '+cls(d.state);const s=document.createElement('span');s.textContent=base(d.dest);
   b.append(dot,s);b.onclick=()=>{pick(d.dest);show('health');};$('side-dests').append(b);}}
+// While the listing is built, tiles for the photos found so far: the first
+// page of the listing if it exists, else what the walk has found, appended in
+// the order found so a shown tile never moves. The ordered grid replaces them.
+let early=null;
+function drawEarly(ps){if(!early){$('grid').innerHTML='';const g=document.createElement('div');g.className='grid';g.id='grid-early';$('grid').append(g);early={g,n:0,src:null};}
+ for(;early.n<ps.length&&early.n<GRID_PAGE;early.n++){const p=ps[early.n];early.g.append(figure(p,canShow(p)?stem(p):base(p)));}}
+async function earlyTiles(){if(!early)drawEarly([]);
+ if(!early.n)early.src=lib.images.length?'lib':'found';
+ if(early.src==='lib')return drawEarly(lib.images.map(i=>i.path));
+ if(early.n<GRID_PAGE){const f=await j('/api/found');drawEarly(f.paths||[]);}}
 async function init(){
  lib=await j('/api/library');
- while(lib.status==='indexing'){$('lib-count').textContent='Reading the folder… '+Math.max(lib.total_images,lib.found||0)+' photos so far';await new Promise(r=>setTimeout(r,200));lib=await j('/api/library');}
+ while(lib.status==='indexing'){$('lib-count').textContent='Reading the folder… '+Math.max(lib.total_images,lib.found||0)+' photos so far';try{await earlyTiles();}catch(e){}await new Promise(r=>setTimeout(r,200));lib=await j('/api/library');}
  $('lib').textContent='Folder: '+lib.library;
  $('lib-count').textContent=countText(lib.images.map(i=>i.path));
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);sideDests(st);
