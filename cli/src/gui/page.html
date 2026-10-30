@@ -196,6 +196,13 @@ function figure(p,cap,sub){const f=document.createElement('figure');let i;
 // page of tiles is its own block that the browser skips drawing while it is
 // off screen, so a 380k library scrolls without stalls.
 let gs=null;
+// Blocks far from view give up their tiles and keep only their height, and
+// get them back on the way into view, so the page holds a few thousand
+// tiles at most and scrolling 380k never grows the page without bound.
+function fillBlock(g){for(const p of g._ps){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.dataset.p=p;g.append(f);}g._empty=false;g.style.height='';}
+function emptyBlock(g,h){if(g._empty||!h)return;g.style.height=h+'px';g.textContent='';g._empty=true;}
+let bObs=null;
+function blockObs(){if(!bObs)bObs=new IntersectionObserver(es=>{for(const x of es){const g=x.target;if(x.isIntersecting){if(g._empty)fillBlock(g);}else emptyBlock(g,x.boundingClientRect.height);}},{root:$('photos'),rootMargin:'4000px 0px'});return bObs;}
 // One click handler for the whole grid instead of one per tile (380k
 // closures), and selecting only moves the highlight: redrawing would
 // rebuild every tile already scrolled past in a single frame.
@@ -208,11 +215,11 @@ function addTiles(n){const more=$('grid-more');
   if(gs.gj==0&&!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;more?more.before(h):$('grid').append(h);}
   const g=document.createElement('div');g.className='grid';g.style.contentVisibility='auto';g.style.containIntrinsicSize='auto 1200px';
   const k=Math.min(n,ps.length-gs.gj);
-  for(const p of ps.slice(gs.gj,gs.gj+k)){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.dataset.p=p;g.append(f);}
-  more?more.before(g):$('grid').append(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
+  g._ps=ps.slice(gs.gj,gs.gj+k);fillBlock(g);
+  more?more.before(g):$('grid').append(g);blockObs().observe(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
- $('grid').innerHTML='';early=null;if(moreObs){moreObs.disconnect();moreObs=null;}clearInterval(moreTimer);moreTimer=null;gridMore=null;
+ if(bObs){bObs.disconnect();bObs=null;}$('grid').innerHTML='';early=null;if(moreObs){moreObs.disconnect();moreObs=null;}clearInterval(moreTimer);moreTimer=null;gridMore=null;
  let total=0;for(const x of evs)total+=x.ps.length;
  gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
  if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
