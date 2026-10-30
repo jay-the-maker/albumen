@@ -205,7 +205,7 @@ function draw(){
  let total=0;for(const x of evs)total+=x.ps.length;
  gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
  if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
-  const more=()=>{gridLimit+=GRID_PAGE;addTiles(GRID_PAGE);if(gs.done>=total){moreObs&&moreObs.disconnect();b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';}};
+  const more=()=>{gridLimit+=GRID_PAGE;addTiles(GRID_PAGE);if(gs.done>=total){moreObs&&moreObs.disconnect();b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';if(moreObs){moreObs.unobserve(b);moreObs.observe(b);}}};
   b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;$('grid').append(b);
   if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}}
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
