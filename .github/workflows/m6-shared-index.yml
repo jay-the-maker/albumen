@@ -1,11 +1,15 @@
 name: m6 shared index
 
-# Manual only. The binding Linux result for the M6 shared-index read bars
+# Runs on every push to m6-shared-index (GitHub registers a
+# workflow_dispatch only once the file is on main, so the push starts the
+# binding run), and by hand. The binding Linux result for the M6 shared-index read bars
 # (read p95 <= 20 ms, max <= 100 ms) and the kill test, on a GitHub runner.
 # The test library is synthetic and generated in a temp dir; nothing is
 # committed and no real photo is read.
 
 on:
+  push:
+    branches: [m6-shared-index]
   workflow_dispatch:
     inputs:
       files:
@@ -27,9 +31,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      FILES: ${{ github.event.inputs.files }}
-      ITERS: ${{ github.event.inputs.iters }}
-      KILLS: ${{ github.event.inputs.kills }}
+      FILES: ${{ github.event.inputs.files || '380000' }}
+      ITERS: ${{ github.event.inputs.iters || '100' }}
+      KILLS: ${{ github.event.inputs.kills || '500' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -48,7 +52,7 @@ jobs:
               --exact gui_and_search_tool_share_one_index --nocapture --test-threads=1
           done
 
-      - name: X2 at ${{ github.event.inputs.files }} files, seeds 1-3 (read bars)
+      - name: X2 at ${{ github.event.inputs.files || '380000' }} files, seeds 1-3 (read bars)
         run: |
           for seed in 1 2 3; do
             ALBUMEN_M6_FILES=$FILES ALBUMEN_M6_ITERS=$ITERS \
@@ -57,7 +61,7 @@ jobs:
               --exact gui_and_search_tool_share_one_index --nocapture --test-threads=1
           done
 
-      - name: X3 kill mid-write at ${{ github.event.inputs.files }} files
+      - name: X3 kill mid-write at ${{ github.event.inputs.files || '380000' }} files
         run: |
           ALBUMEN_M6_FILES=$FILES ALBUMEN_M6_KILLS=$KILLS ALBUMEN_M6_SEED=1 \
             cargo test --release --locked -p albumen-ingest --test index_shared -- \
