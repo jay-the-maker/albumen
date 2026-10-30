@@ -344,6 +344,9 @@ jobs:
       - name: Click through the demo library with real input
         run: node scripts/gui-behaviour.mjs target/debug/albumen
 
+      - name: Show more grows a grid of more than one page
+        run: node scripts/gui-more-behaviour.mjs target/debug/albumen
+
   throughput:
     name: import throughput (${{ matrix.label }})
     runs-on: ${{ matrix.os }}

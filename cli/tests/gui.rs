@@ -418,6 +418,54 @@ fn clicking_a_photo_updates_info_first() {
         );
     }
     assert!(!after.contains("draw("), "a click must not redraw the grid");
+    // infoPhoto() fills the Info panel's name and date fields.
+    let info = &page[page.find("function infoPhoto()").unwrap()..];
+    let info = &info[..info.find("\nfunction ").unwrap_or(info.len())];
+    for id in ["i-name", "i-taken", "info-photo"] {
+        assert!(
+            info.contains(&format!("$('{id}')")),
+            "infoPhoto() sets #{id}"
+        );
+        assert!(
+            page.contains(&format!("id=\"{id}\"")),
+            "#{id} is in the page"
+        );
+    }
+}
+
+/// Product Lead NO-GO on 44d8b47: draw() must create #grid-more before
+/// addTiles() first looks it up, put it in the grid then, and keep it only
+/// when there are more photos than fit. (The click that grows the grid runs
+/// in scripts/gui-more-behaviour.mjs against more than one page of photos.)
+#[test]
+fn grid_more_is_built_before_add_tiles_looks_it_up() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, page) = get(&addr, "/");
+    let draw = &page[page.find("function draw(){").expect("draw()")..];
+    let draw = &draw[..draw.find("\nfunction ").unwrap_or(draw.len())];
+    let at = |needle: &str| {
+        draw.find(needle)
+            .unwrap_or_else(|| panic!("draw() has {needle}"))
+    };
+    let made = at("b.id='grid-more'");
+    let appended = at("$('grid').append(b);");
+    let first_lookup = at("addTiles(gridLimit);");
+    assert!(made < appended, "the button is made before it is appended");
+    assert!(
+        appended < first_lookup,
+        "#grid-more is in the grid before addTiles() looks it up"
+    );
+    assert!(
+        draw[first_lookup..].contains("if(total<=gs.done)b.remove();else{"),
+        "the button stays only when there are more photos"
+    );
+    let add = &page[page.find("function addTiles(n){").expect("addTiles()")..];
+    assert!(
+        add.starts_with("function addTiles(n){const more=$('grid-more');"),
+        "addTiles() looks up #grid-more first"
+    );
+    assert!(add[..add.find("\nfunction ").unwrap()].contains("more?more.before(g)"));
 }
 
 /// Taste gate v1 FIX-2: photos the browser cannot show get a placeholder

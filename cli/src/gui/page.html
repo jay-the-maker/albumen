@@ -272,8 +272,12 @@ function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
  if(bObs){bObs.disconnect();bObs=null;}if(pObs){pObs.disconnect();pObs=null;}pq.length=0;$('grid').innerHTML='';early=null;if(moreObs){moreObs.disconnect();moreObs=null;}clearInterval(moreTimer);moreTimer=null;gridMore=null;
  let total=0;for(const x of evs)total+=x.ps.length;
- gs={evs,gi:0,gj:0,done:0,total,blocks:[],live:new Set()};addTiles(gridLimit);
- if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
+ gs={evs,gi:0,gj:0,done:0,total,blocks:[],live:new Set()};
+ // #grid-more exists before addTiles() first looks it up, so tiles always go
+ // in before it; it is removed again when every photo fits on the page.
+ const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';$('grid').append(b);
+ addTiles(gridLimit);
+ if(total<=gs.done)b.remove();else{
   // Edge stall (r8: stuck at 301,400 of 380,000): a page that never got its
   // next frame callback left busy set forever. Each chunk now runs on the
   // next frame or after 50 ms, whichever comes first, busy is always cleared
@@ -284,7 +288,7 @@ function draw(){
     finally{if(again)next(step);else{busy=0;if(b.isConnected)done();}}};step();};
   window.__gridBusy=()=>busy;
   const done=()=>{if(gs.done>=total){moreObs&&moreObs.disconnect();clearInterval(moreTimer);moreTimer=null;gridMore=null;b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';if(moreObs){moreObs.unobserve(b);moreObs.observe(b);}}};
-  b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;$('grid').append(b);
+  b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;
   if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}
   gridMore=more;moreTimer=setInterval(nearEnd,400);}
  setTimeout(()=>banner(evs),0);
