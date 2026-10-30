@@ -95,13 +95,223 @@ struct Server {
     thumbs: Mutex<ThumbView>,
     /// Refreshes started; the view keeps the newest finished one.
     thumb_gen: std::sync::atomic::AtomicU64,
+    /// The last built /api/library answer (one walk per refresh, not per
+    /// request); None until the first refresh finishes.
+    library: Mutex<Option<Arc<LibraryView>>>,
 }
 
-/// What the last finished thumbnail-index refresh found.
+/// One library walk, kept compact so /api/library never walks per request:
+/// each image's JSON record in one byte arena, each path in another, and
+/// events as indices. The full answer is written as a stream, never held.
+#[derive(Default)]
+struct LibraryView {
+    generation: u64,
+    /// False while the background walk is still adding images.
+    ready: bool,
+    library: String,
+    files: usize,
+    image_bytes: u64,
+    records: Vec<u8>,
+    record_ends: Vec<u32>,
+    paths: Vec<u8>,
+    path_ends: Vec<u32>,
+    events: Vec<EventIdx>,
+}
+
+struct EventIdx {
+    title: String,
+    day: Option<String>,
+    cover: u32,
+    photos: Vec<u32>,
+}
+
+fn slice_at<'a>(buf: &'a [u8], ends: &[u32], i: usize) -> &'a [u8] {
+    let start = if i == 0 { 0 } else { ends[i - 1] as usize };
+    &buf[start..ends[i] as usize]
+}
+
+impl LibraryView {
+    fn len(&self) -> usize {
+        self.record_ends.len()
+    }
+
+    fn path(&self, i: u32) -> &str {
+        std::str::from_utf8(slice_at(&self.paths, &self.path_ends, i as usize)).unwrap_or("")
+    }
+
+    fn push(&mut self, item: &serde_json::Value) {
+        let _ = serde_json::to_writer(&mut self.records, item);
+        self.record_ends.push(self.records.len() as u32);
+        self.paths
+            .extend_from_slice(item["path"].as_str().unwrap_or_default().as_bytes());
+        self.path_ends.push(self.paths.len() as u32);
+    }
+
+    /// Walk the library once. `partial` gets an "indexing" copy of the
+    /// first page as soon as it exists, so the first request never waits
+    /// for the whole walk.
+    fn build(
+        server: &Server,
+        generation: u64,
+        cached: &std::collections::HashSet<String>,
+        partial: &mut dyn FnMut(LibraryView),
+    ) -> Self {
+        const FIRST_PAGE: usize = 200;
+        let lib = &server.config.library;
+        let cache = live::cache_dir(lib);
+        let mut v = LibraryView {
+            generation,
+            library: lib.display().to_string(),
+            ..Default::default()
+        };
+        let mut when: Vec<(Option<Box<str>>, bool)> = Vec::new();
+        let (files, bytes) = library_items(lib, cache.as_deref(), cached, &mut |files, item| {
+            v.push(&item);
+            when.push((
+                item["taken"].as_str().map(Into::into),
+                item["preview"] != false,
+            ));
+            if v.len() == FIRST_PAGE {
+                let mut early = LibraryView {
+                    generation,
+                    library: v.library.clone(),
+                    files,
+                    records: v.records.clone(),
+                    record_ends: v.record_ends.clone(),
+                    paths: v.paths.clone(),
+                    path_ends: v.path_ends.clone(),
+                    ..Default::default()
+                };
+                early.events = Vec::new();
+                partial(early);
+            }
+        });
+        v.files = files;
+        v.image_bytes = bytes;
+        v.events = event_indices(&when);
+        v.ready = true;
+        v
+    }
+
+    /// The answer as JSON: everything, or one page of images (no events).
+    fn write_json(&self, w: &mut dyn Write, page: Option<(usize, usize)>) -> std::io::Result<()> {
+        let n = self.len();
+        let (a, b) = match page {
+            Some((o, l)) => (o.min(n), o.saturating_add(l).min(n)),
+            None => (0, n),
+        };
+        let js = |s: &str| serde_json::Value::from(s).to_string();
+        write!(
+            w,
+            "{{\"library\":{},\"files\":{},\"image_bytes\":{},\"thumbs_generation\":{},\"status\":\"{}\",\"total_images\":{},\"offset\":{}",
+            js(&self.library),
+            self.files,
+            self.image_bytes,
+            self.generation,
+            if self.ready { "ready" } else { "indexing" },
+            n,
+            a
+        )?;
+        if page.is_none() {
+            w.write_all(b",\"events\":[")?;
+            for (k, e) in self.events.iter().enumerate() {
+                if k > 0 {
+                    w.write_all(b",")?;
+                }
+                write!(
+                    w,
+                    "{{\"title\":{},\"day\":{},\"count\":{},\"key\":{},\"photos\":[",
+                    js(&e.title),
+                    e.day.as_deref().map_or("null".into(), js),
+                    e.photos.len(),
+                    js(self.path(e.cover))
+                )?;
+                for (j, &p) in e.photos.iter().enumerate() {
+                    if j > 0 {
+                        w.write_all(b",")?;
+                    }
+                    w.write_all(js(self.path(p)).as_bytes())?;
+                }
+                w.write_all(b"]}")?;
+            }
+            w.write_all(b"]")?;
+        }
+        w.write_all(b",\"images\":[")?;
+        for i in a..b {
+            if i > a {
+                w.write_all(b",")?;
+            }
+            w.write_all(slice_at(&self.records, &self.record_ends, i))?;
+        }
+        w.write_all(b"]}")
+    }
+
+    /// Send the answer: Content-Length from a counting pass, then stream.
+    fn respond(&self, stream: &mut TcpStream, page: Option<(usize, usize)>) -> std::io::Result<()> {
+        struct Count(usize);
+        impl Write for Count {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0 += b.len();
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut c = Count(0);
+        self.write_json(&mut c, page)?;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+            c.0
+        )?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 16, &mut *stream);
+        self.write_json(&mut w, page)?;
+        w.flush()
+    }
+}
+
+/// `events`, from each image's capture time and preview flag, by index.
+/// Images arrive in path order, so (time, index) sorts like (time, path).
+fn event_indices(when: &[(Option<Box<str>>, bool)]) -> Vec<EventIdx> {
+    let mut by_day: std::collections::BTreeMap<&str, Vec<(&str, u32)>> = Default::default();
+    let mut undated = Vec::new();
+    for (i, (t, _)) in when.iter().enumerate() {
+        match t.as_deref() {
+            Some(t) if t.len() >= 10 => by_day.entry(&t[..10]).or_default().push((t, i as u32)),
+            _ => undated.push(i as u32),
+        }
+    }
+    let cover = |ps: &[u32]| *ps.iter().find(|&&p| when[p as usize].1).unwrap_or(&ps[0]);
+    let mut out: Vec<EventIdx> = by_day
+        .into_iter()
+        .map(|(day, mut ps)| {
+            ps.sort();
+            let photos: Vec<u32> = ps.into_iter().map(|(_, i)| i).collect();
+            EventIdx {
+                title: taken::day_title(day),
+                day: Some(day.to_string()),
+                cover: cover(&photos),
+                photos,
+            }
+        })
+        .collect();
+    if !undated.is_empty() {
+        out.push(EventIdx {
+            title: "No date".into(),
+            day: None,
+            cover: cover(&undated),
+            photos: undated,
+        });
+    }
+    out
+}
+
+/// The generation of the last finished thumbnail-index refresh (what it
+/// found lives in the published library view).
 #[derive(Default)]
 struct ThumbView {
     generation: u64,
-    cached: std::collections::HashSet<String>,
 }
 
 /// Refresh the HEIC thumbnail index in the background (at start and after
@@ -114,6 +324,7 @@ fn refresh_thumbs(server: &Arc<Server>) {
     std::thread::spawn(move || {
         let lib = &s.config.library;
         let Some(cache) = live::cache_dir(lib) else {
+            publish_library(&s, gen, &Default::default());
             return;
         };
         let scan = s
@@ -129,14 +340,31 @@ fn refresh_thumbs(server: &Arc<Server>) {
             .filter(|r| thumbs::is_heic(r))
             .collect();
         let r = thumbs::refresh(lib, &heics, &thumbs::thumbs_root(&cache), scan.as_deref());
-        let mut view = s.thumbs.lock().unwrap();
-        if gen > view.generation {
-            *view = ThumbView {
-                generation: gen,
-                cached: r.cached,
-            };
+        publish_library(&s, gen, &r.cached);
+        {
+            let mut view = s.thumbs.lock().unwrap();
+            if gen > view.generation {
+                *view = ThumbView { generation: gen };
+            }
         }
     });
+}
+
+/// Build the listing for `gen` and publish it: an early first page while
+/// indexing, then the whole thing. An older generation never replaces a
+/// newer finished one.
+fn publish_library(s: &Arc<Server>, gen: u64, cached: &std::collections::HashSet<String>) {
+    let put = |v: LibraryView| {
+        let mut lv = s.library.lock().unwrap();
+        let newer = lv
+            .as_ref()
+            .is_none_or(|o| gen > o.generation || (gen == o.generation && !o.ready));
+        if newer && (v.ready || lv.as_ref().is_none_or(|o| !o.ready)) {
+            *lv = Some(Arc::new(v));
+        }
+    };
+    let full = LibraryView::build(s, gen, cached, &mut |early| put(early));
+    put(full);
 }
 
 pub fn run(args: GuiArgs) -> Result<(), IngestError> {
@@ -223,7 +451,12 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
         last_scan: Mutex::new(None),
         thumbs: Mutex::new(ThumbView::default()),
         thumb_gen: Default::default(),
+        library: Mutex::new(None),
     });
+    if server.config.demo {
+        // The demo library is tiny: have it ready before the first request.
+        publish_library(&server, 0, &Default::default());
+    }
     refresh_thumbs(&server);
     for stream in listener.incoming().flatten() {
         let server = Arc::clone(&server);
@@ -283,16 +516,27 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/library") => {
-            let lib = &server.config.library;
-            let cache = live::cache_dir(lib);
-            let (generation, cached) = {
-                let v = server.thumbs.lock().unwrap();
-                (v.generation, v.cached.clone())
-            };
-            let mut v = library_json_scan(lib, cache.as_deref(), &cached);
-            v["thumbs_generation"] = generation.into();
-            let body = v.to_string();
-            http::respond(&mut stream, 200, "application/json", body.as_bytes())
+            // Served from the last background walk, never walked here. Until
+            // its first page exists the answer is an empty "indexing" one;
+            // the page polls until "status" is "ready".
+            let cur = server.library.lock().unwrap().clone();
+            if http::query_param(&req.target, "refresh").is_some() {
+                refresh_thumbs(server);
+            }
+            let page = http::query_param(&req.target, "offset").map(|o| {
+                let limit = http::query_param(&req.target, "limit")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(500);
+                (o.parse().unwrap_or(0), limit)
+            });
+            match cur {
+                Some(v) => v.respond(&mut stream, page),
+                None => LibraryView {
+                    library: server.config.library.display().to_string(),
+                    ..Default::default()
+                }
+                .respond(&mut stream, page),
+            }
         }
         ("GET", "/video") => {
             // A Live Photo's movie, bytes as on disk, streamed with Range
@@ -461,6 +705,7 @@ pub fn library_json_with(library: &Path, cache: Option<&Path>) -> serde_json::Va
     library_json_scan(library, cache, &Default::default())
 }
 
+#[cfg(test)]
 /// `library_json_with`, with the HEIC paths that the last background
 /// thumbnail-index refresh found cached. The index itself is not read here.
 pub fn library_json_scan(
@@ -468,6 +713,26 @@ pub fn library_json_scan(
     cache: Option<&Path>,
     thumbs_cached: &std::collections::HashSet<String>,
 ) -> serde_json::Value {
+    let mut items = Vec::new();
+    let (files, bytes) = library_items(library, cache, thumbs_cached, &mut |_, i| items.push(i));
+    serde_json::json!({
+        "library": library.display().to_string(),
+        "files": files,
+        "events": events(&items),
+        "images": items,
+        "image_bytes": bytes,
+    })
+}
+
+/// Every image record of `library_json_scan`, in path order, handed to
+/// `sink` one at a time (with the file count) so no caller has to hold
+/// them all. Returns (files, image bytes).
+fn library_items(
+    library: &Path,
+    cache: Option<&Path>,
+    thumbs_cached: &std::collections::HashSet<String>,
+    sink: &mut dyn FnMut(usize, serde_json::Value),
+) -> (usize, u64) {
     let files = library_files(library);
     // Live Photos: a still and a movie with the same folder and stem AND the
     // same ContentIdentifier are one photo. Same stem without a matching ID
@@ -541,89 +806,80 @@ pub fn library_json_scan(
             .map(|m| m.len())
             .unwrap_or(0)
     };
-    let items: Vec<serde_json::Value> = files
-        .iter()
-        .filter(|rel| {
-            (is_photo(rel) || live::is_video(rel))
-                && !paired_raw.contains(*rel)
-                && !merged_mov.contains(*rel)
-        })
-        .map(|rel| {
-            let len = size(rel);
-            bytes += len;
-            let mut when = taken::taken(library, rel);
-            let raw = is_jpeg(rel)
-                .then(|| pair_key(rel).and_then(|k| raw_of.get(&k)))
-                .flatten();
-            // A pair's date: the JPEG's metadata, else the RAW's metadata,
-            // then a date in the file name. Never a made-up date.
-            if let Some(raw) = raw {
-                let jpeg_meta = when.as_ref().is_some_and(|t| t.source == "photo metadata");
-                if !jpeg_meta {
-                    if let Some(t) =
-                        taken::taken(library, raw).filter(|t| t.source == "photo metadata")
-                    {
-                        when = Some(taken::Taken {
-                            when: t.when,
-                            source: "RAW photo metadata",
-                        });
-                    }
+    let nfiles = files.len();
+    for rel in files.iter().filter(|rel| {
+        (is_photo(rel) || live::is_video(rel))
+            && !paired_raw.contains(*rel)
+            && !merged_mov.contains(*rel)
+    }) {
+        let len = size(rel);
+        bytes += len;
+        let mut when = taken::taken(library, rel);
+        let raw = is_jpeg(rel)
+            .then(|| pair_key(rel).and_then(|k| raw_of.get(&k)))
+            .flatten();
+        // A pair's date: the JPEG's metadata, else the RAW's metadata,
+        // then a date in the file name. Never a made-up date.
+        if let Some(raw) = raw {
+            let jpeg_meta = when.as_ref().is_some_and(|t| t.source == "photo metadata");
+            if !jpeg_meta {
+                if let Some(t) = taken::taken(library, raw).filter(|t| t.source == "photo metadata")
+                {
+                    when = Some(taken::Taken {
+                        when: t.when,
+                        source: "RAW photo metadata",
+                    });
                 }
             }
-            let mut item = serde_json::json!({
-                "path": rel,
-                "bytes": len,
-                "taken": when.as_ref().map(|t| t.when.clone()),
-                "taken_from": when.as_ref().map(|t| t.source),
-                "preview": is_image(rel),
-                "format": ext(rel).unwrap_or_default().to_ascii_uppercase(),
-            });
-            if let Some(raw) = raw {
-                let raw_len = size(raw);
-                bytes += raw_len;
-                item["raw_bytes"] = raw_len.into();
-                item["format"] = "RAW + JPEG".into();
-                item["raw"] = raw.as_str().into();
+        }
+        let mut item = serde_json::json!({
+            "path": rel,
+            "bytes": len,
+            "taken": when.as_ref().map(|t| t.when.clone()),
+            "taken_from": when.as_ref().map(|t| t.source),
+            "preview": is_image(rel),
+            "format": ext(rel).unwrap_or_default().to_ascii_uppercase(),
+        });
+        if let Some(raw) = raw {
+            let raw_len = size(raw);
+            bytes += raw_len;
+            item["raw_bytes"] = raw_len.into();
+            item["format"] = "RAW + JPEG".into();
+            item["raw"] = raw.as_str().into();
+        }
+        if thumbs::is_heic(rel) {
+            // No decoder: the tile is the honest placeholder.
+            item["thumb"] = if thumbs_cached.contains(rel.as_str()) {
+                "cached"
+            } else {
+                "none"
             }
-            if thumbs::is_heic(rel) {
-                // No decoder: the tile is the honest placeholder.
-                item["thumb"] = if thumbs_cached.contains(rel.as_str()) {
-                    "cached"
-                } else {
-                    "none"
-                }
-                .into();
-            }
-            if live::is_video(rel) {
-                item["video"] = true.into();
-            }
-            if let Some(mov) = live_of.get(rel.as_str()) {
-                let mov_len = size(mov);
-                bytes += mov_len;
-                item["live"] = mov.as_str().into();
-                item["live_bytes"] = mov_len.into();
-                // Only H.264 plays in the browser; HEVC gets the AC3 copy.
-                let (ok, codec) = live::playable(&library.join(mov));
-                item["live_playable"] = ok.into();
-                item["live_codec"] = codec.into();
-            }
-            if let Some(line) = info.get(rel.as_str()) {
-                item["info"] = line.as_str().into();
-            }
-            item
-        })
-        .collect();
-    serde_json::json!({
-        "library": library.display().to_string(),
-        "files": files.len(),
-        "events": events(&items),
-        "images": items,
-        "image_bytes": bytes,
-    })
+            .into();
+        }
+        if live::is_video(rel) {
+            item["video"] = true.into();
+        }
+        if let Some(mov) = live_of.get(rel.as_str()) {
+            let mov_len = size(mov);
+            bytes += mov_len;
+            item["live"] = mov.as_str().into();
+            item["live_bytes"] = mov_len.into();
+            // Only H.264 plays in the browser; HEVC gets the AC3 copy.
+            let (ok, codec) = live::playable(&library.join(mov));
+            item["live_playable"] = ok.into();
+            item["live_codec"] = codec.into();
+        }
+        if let Some(line) = info.get(rel.as_str()) {
+            item["info"] = line.as_str().into();
+        }
+        sink(nfiles, item);
+    }
+    (nfiles, bytes)
 }
 
 /// Events: photos grouped by the day they were taken, oldest first, each
 /// sorted by time. Photos with no known date go last under "No date".
+#[cfg(test)]
 pub fn events(images: &[serde_json::Value]) -> Vec<serde_json::Value> {
     let mut by_day: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
@@ -940,6 +1196,52 @@ pub(crate) fn io_err(path: &Path, source: std::io::Error) -> IngestError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F1: the compact listing streams the same images and events as the
+    /// per-request listing did, and a page is a slice of it.
+    #[test]
+    fn compact_listing_matches_library_json() {
+        let work = tempfile::tempdir().unwrap();
+        let built = demo::build(work.path()).unwrap();
+        let server = Server {
+            config: Config {
+                library: built.library.clone(),
+                backups: Vec::new(),
+                card: None,
+                state: built.state.clone(),
+                max_age_secs: 0,
+                demo: true,
+            },
+            jobs: Mutex::new(Vec::new()),
+            last_scan: Mutex::new(None),
+            thumbs: Mutex::new(ThumbView::default()),
+            thumb_gen: Default::default(),
+            library: Mutex::new(None),
+        };
+        let mut early = 0;
+        let view = LibraryView::build(&server, 7, &Default::default(), &mut |_| early += 1);
+        let want = library_json(&built.library);
+        let mut out = Vec::new();
+        view.write_json(&mut out, None).unwrap();
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        for k in ["library", "files", "events", "images", "image_bytes"] {
+            assert_eq!(got[k], want[k], "{k}");
+        }
+        assert_eq!(got["status"], "ready");
+        assert_eq!(got["thumbs_generation"], 7);
+        let n = want["images"].as_array().unwrap().len();
+        assert!(n >= 3);
+        let mut out = Vec::new();
+        view.write_json(&mut out, Some((1, 2))).unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            page["images"].as_array().unwrap()[..],
+            want["images"].as_array().unwrap()[1..3]
+        );
+        assert_eq!(page["total_images"], n);
+        assert!(page.get("events").is_none());
+        assert_eq!(early, usize::from(n >= 200));
+    }
 
     #[test]
     fn read_image_refuses_traversal_and_non_images() {

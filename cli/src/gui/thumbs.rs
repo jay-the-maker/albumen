@@ -642,6 +642,18 @@ mod tests {
         assert_eq!(large, (1, 1));
     }
 
+    /// One size per test, so each can run alone in its own process and the
+    /// bench can read that process's peak memory (sh6 per size).
+    #[test]
+    fn sh6_size_10k() {
+        assert_eq!(sh6_run(10_000), (1, 1));
+    }
+
+    #[test]
+    fn sh6_size_100k() {
+        assert_eq!(sh6_run(100_000), (1, 1));
+    }
+
     #[test]
     fn key_is_recipe_tagged_sha256() {
         let k = content_key(&"0".repeat(64));

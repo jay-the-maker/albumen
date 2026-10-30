@@ -444,9 +444,18 @@ fn heic_thumb_index_is_served_by_page_from_albumen_home() {
     std::thread::spawn(move || for _ in lines.map_while(Result::ok) {});
     let _gui = Gui(child);
     let addr = addr.expect("gui prints its URL");
-    let (code, library) = get(&addr, "/api/library");
-    assert_eq!(code, 200);
-    let library: serde_json::Value = serde_json::from_str(&library).unwrap();
+    // The first answer may be "indexing" (the walk runs in the background).
+    let mut library = serde_json::Value::Null;
+    for _ in 0..200 {
+        let (code, body) = get(&addr, "/api/library");
+        assert_eq!(code, 200);
+        library = serde_json::from_str(&body).unwrap();
+        if library["status"] == "ready" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(library["status"], "ready");
     let heic = library["images"]
         .as_array()
         .unwrap()
@@ -468,9 +477,18 @@ fn heic_thumb_index_is_served_by_page_from_albumen_home() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let (_, library) = get(&addr, "/api/library");
-    let library: serde_json::Value = serde_json::from_str(&library).unwrap();
-    assert!(library["thumbs_generation"].as_u64().unwrap() >= 1);
+    // /api/library serves the last background walk; it catches up too.
+    let mut generation = 0;
+    for _ in 0..200 {
+        let (_, library) = get(&addr, "/api/library");
+        let library: serde_json::Value = serde_json::from_str(&library).unwrap();
+        generation = library["thumbs_generation"].as_u64().unwrap();
+        if generation >= 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(generation >= 1);
     let rows = page["entries"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{page}");
     assert_eq!(rows[0]["path"], "IMG_0002.heic");
