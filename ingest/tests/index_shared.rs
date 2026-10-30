@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use albumen_ingest::index::{check_saved_file, read_saved_file, LibraryIndex, CRASH_ENV};
+use albumen_ingest::index::{
+    check_saved_file, newest_slot, read_saved_file, slot_files, LibraryIndex, CRASH_ENV,
+};
 
 const CHILD_ENV: &str = "ALBUMEN_M6_CHILD";
 
@@ -123,7 +125,9 @@ fn gui_and_search_tool_share_one_index() {
         began.elapsed().as_secs_f64() * 1000.0
     );
     let file = index_file(&search);
-    let bytes = std::fs::metadata(&file).unwrap().len();
+    let bytes = std::fs::metadata(newest_slot(&file).unwrap())
+        .unwrap()
+        .len();
     println!(
         "M6 X8 index bytes={bytes} per_file={:.1}",
         bytes as f64 / files as f64
@@ -133,7 +137,9 @@ fn gui_and_search_tool_share_one_index() {
     let reads = Arc::new(AtomicU64::new(0));
     let failures = Arc::new(AtomicU64::new(0));
     let max_read_us = Arc::new(AtomicU64::new(0));
+    let first_failure = Arc::new(std::sync::Mutex::new(None::<String>));
     let reader = {
+        let first_failure = first_failure.clone();
         let (stop, reads, failures, max_read_us, file) = (
             stop.clone(),
             reads.clone(),
@@ -144,11 +150,12 @@ fn gui_and_search_tool_share_one_index() {
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 let t = Instant::now();
-                let ok = check_saved_file(&file).is_ok();
+                let checked = check_saved_file(&file);
                 max_read_us.fetch_max(t.elapsed().as_micros() as u64, Ordering::Relaxed);
                 reads.fetch_add(1, Ordering::Relaxed);
-                if !ok {
+                if let Err(err) = checked {
                     failures.fetch_add(1, Ordering::Relaxed);
+                    first_failure.lock().unwrap().get_or_insert(err);
                 }
             }
         })
@@ -203,11 +210,12 @@ fn gui_and_search_tool_share_one_index() {
     println!(
         "M6 X2 RESULT seed={seed} iters={iters} reads={} parse_failures={} max_read_ms={:.2} \
          regressions={regressions} merges={merges} final_generation={last_generation} \
-         equals_fresh_walk={byte_identical} stale_partials={}",
+         equals_fresh_walk={byte_identical} stale_partials={} first_failure={:?}",
         reads.load(Ordering::Relaxed),
         failures.load(Ordering::Relaxed),
         max_read_us.load(Ordering::Relaxed) as f64 / 1000.0,
-        left.len()
+        left.len(),
+        first_failure.lock().unwrap()
     );
     assert_eq!(failures.load(Ordering::Relaxed), 0);
     assert_eq!(regressions, 0);
@@ -245,15 +253,19 @@ fn footer_refuses_short_and_damaged_files() {
     let index_dir = tempfile::tempdir().unwrap();
     let all = make_library(library.path(), 300);
     let index = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
-    let file = index_file(&index);
+    let file = newest_slot(&index_file(&index)).unwrap();
     let good = std::fs::read(&file).unwrap();
     let mut refused = 0;
     let step = (good.len() / 97).max(1);
     let mut cuts: Vec<usize> = (0..good.len()).step_by(step).collect();
     cuts.push(good.len() - 1);
     for cut in cuts {
-        std::fs::write(&file, &good[..cut]).unwrap();
+        // Damage every slot: one good slot would (rightly) still be read.
+        for slot in slot_files(&index_file(&index)) {
+            std::fs::write(&slot, &good[..cut]).unwrap();
+        }
         assert!(check_saved_file(&file).is_err(), "cut at {cut} accepted");
+        assert!(check_saved_file(&index_file(&index)).is_err());
         let reopened = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
         assert!(!reopened.loaded, "cut at {cut} was loaded");
         assert_eq!(sorted(reopened.paths().to_vec()), all);
@@ -279,7 +291,7 @@ fn first_format_still_loads() {
     let all = make_library(library.path(), 120);
     let index = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
     let file = index_file(&index);
-    let text = std::fs::read_to_string(&file).unwrap();
+    let text = std::fs::read_to_string(newest_slot(&file).unwrap()).unwrap();
     let v1: String = text
         .lines()
         .filter(|l| !l.starts_with("gen\t") && !l.starts_with("end\t"))
@@ -291,8 +303,11 @@ fn first_format_still_loads() {
             }
         })
         .collect();
-    std::fs::write(&file, v1).unwrap();
-    let reopened = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    // An earlier version saved only `<key>.idx`; put that file alone in a
+    // fresh index directory.
+    let old_dir = tempfile::tempdir().unwrap();
+    std::fs::write(old_dir.path().join(file.file_name().unwrap()), v1).unwrap();
+    let reopened = LibraryIndex::open(library.path(), Some(old_dir.path())).unwrap();
     assert!(reopened.loaded);
     assert_eq!(sorted(reopened.paths().to_vec()), all);
 }
@@ -431,17 +446,25 @@ fn held_handle_delays_but_never_loses_a_save() {
         let mut all = make_library(library.path(), 300);
         let mut index = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
         let file = index_file(&index);
+        // A second save so both slots exist; then hold both.
+        std::fs::write(library.path().join("d03/second.jpg"), b"").unwrap();
+        all.insert("d03/second.jpg".into());
+        std::thread::sleep(Duration::from_millis(2100));
+        index.refresh().unwrap();
         let holder = {
-            let file = file.clone();
-            let held = std::fs::OpenOptions::new()
-                .read(true)
-                .share_mode(FILE_SHARE_READ)
-                .open(&file)
-                .unwrap();
+            let held: Vec<_> = slot_files(&file)
+                .iter()
+                .map(|slot| {
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(FILE_SHARE_READ)
+                        .open(slot)
+                        .unwrap()
+                })
+                .collect();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(hold_ms));
                 drop(held);
-                drop(file);
             })
         };
         std::fs::write(library.path().join("d03/held.jpg"), b"").unwrap();

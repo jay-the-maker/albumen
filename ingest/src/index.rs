@@ -62,8 +62,13 @@ pub const CRASH_ENV: &str = "ALBUMEN_INDEX_CRASH";
 /// each time (about 2.5 s in all).
 const RENAME_RETRIES: u32 = 9;
 
-/// Times a save starts over because another writer saved meanwhile.
-const SAVE_ATTEMPTS: u32 = 16;
+/// Times a writer tries for the index lock, waiting 5 ms, then twice as
+/// long each time, capped at 640 ms (about 2.5 s in all). A writer that
+/// cannot get it leaves its save pending for the next refresh.
+const LOCK_TRIES: u32 = 9;
+
+/// The two slots a saved index alternates between, after `<key>.idx`.
+const SLOTS: [&str; 2] = ["a", "b"];
 
 static PARTIAL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -193,11 +198,7 @@ impl LibraryIndex {
 
     fn read_saved(&self) -> Option<Saved> {
         let file = self.file.as_ref()?;
-        // `std::fs` opens with FILE_SHARE_READ | WRITE | DELETE on Windows,
-        // so a reader never stops a writer's rename.
-        let bytes = std::fs::read(file).ok()?;
-        let text = std::str::from_utf8(&bytes).ok()?;
-        parse_saved(text, &self.root.canonical().to_string_lossy())
+        read_newest(file, &self.root.canonical().to_string_lossy()).map(|(_, saved)| saved)
     }
 
     /// Stat every indexed directory and list again the ones that changed.
@@ -327,6 +328,9 @@ impl LibraryIndex {
         self.paths = paths;
     }
 
+    /// Save under the index lock into the slot that does not hold the
+    /// newest file, so readers (who never lock) always find the newest
+    /// complete file under its own name while this one is replaced.
     fn save(&mut self) -> Result<(), IngestError> {
         let Some(file) = self.file.clone() else {
             return Ok(());
@@ -336,71 +340,62 @@ impl LibraryIndex {
         }
         let root = self.root.canonical().to_string_lossy().into_owned();
         let crash = std::env::var(CRASH_ENV).ok();
-        let mut last_error = None;
-        for _ in 0..SAVE_ATTEMPTS {
-            let disk = self.read_saved();
-            let disk_generation = disk.as_ref().map(|saved| saved.generation);
-            if let Some(saved) = disk {
-                if Some(saved.generation) != self.generation {
-                    self.merges += 1;
-                    self.merge(saved.dirs);
-                }
+        let _lock = lock_index(&file)?;
+        // Under the lock no other writer is between its read and its rename,
+        // so what is read here is what this save replaces.
+        let newest = read_newest(&file, &root);
+        let mut disk_generation = None;
+        let mut newest_slot = None;
+        if let Some((slot, saved)) = newest {
+            disk_generation = Some(saved.generation);
+            newest_slot = slot;
+            if Some(saved.generation) != self.generation {
+                self.merges += 1;
+                self.merge(saved.dirs);
             }
-            let generation = disk_generation.max(self.generation).unwrap_or(0) + 1;
-            let bytes = render_saved(&root, generation, &self.dirs);
-            let partial = file.with_extension(format!(
-                "idx.partial-{}-{}",
-                std::process::id(),
-                PARTIAL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            remove_stale_partials(&file, &partial);
-            let mut handle = dest::create_file(&partial)?;
-            let half = crash.as_deref() == Some("before-rename");
-            let body = if half {
-                &bytes[..bytes.len() / 2]
-            } else {
-                &bytes[..]
-            };
-            handle
-                .write_all(body)
-                .and_then(|()| handle.sync_all())
-                .map_err(|err| IngestError::io(&partial, err))?;
-            drop(handle);
-            if half {
-                std::process::abort();
-            }
-            // Compare before rename: another writer that saved since the read
-            // above means this snapshot may be older. Start over from its file.
-            if read_generation(&file) != disk_generation {
-                dest::remove_file_best_effort(&partial);
-                continue;
-            }
-            if let Err(err) = self.rename_with_retry(&partial, &file) {
-                dest::remove_file_best_effort(&partial);
-                // A missing temp file was cleared by another writer's save:
-                // start over. Anything else is returned and retried later.
-                if is_not_found(&err) {
-                    last_error = Some(err);
-                    continue;
-                }
-                return Err(err);
-            }
-            if crash.as_deref() == Some("after-rename") {
-                std::process::abort();
-            }
-            #[cfg(not(windows))]
-            if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
-                dest::sync_dir(parent)?;
-            }
-            self.generation = Some(generation);
-            return Ok(());
         }
-        Err(last_error.unwrap_or_else(|| {
-            IngestError::io(
-                &file,
-                std::io::Error::other("other writers kept saving; save left pending"),
-            )
-        }))
+        let generation = disk_generation.max(self.generation).unwrap_or(0) + 1;
+        let target = match newest_slot {
+            Some(0) => slot_path(&file, 1),
+            _ => slot_path(&file, 0),
+        };
+        let bytes = render_saved(&root, generation, &self.dirs);
+        let partial = file.with_extension(format!(
+            "idx.partial-{}-{}",
+            std::process::id(),
+            PARTIAL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        // Only the lock holder writes temp files, so any left are a crashed
+        // writer's.
+        remove_stale_partials(&file, &partial);
+        let mut handle = dest::create_file(&partial)?;
+        let half = crash.as_deref() == Some("before-rename");
+        let body = if half {
+            &bytes[..bytes.len() / 2]
+        } else {
+            &bytes[..]
+        };
+        handle
+            .write_all(body)
+            .and_then(|()| handle.sync_all())
+            .map_err(|err| IngestError::io(&partial, err))?;
+        drop(handle);
+        if half {
+            std::process::abort();
+        }
+        if let Err(err) = self.rename_with_retry(&partial, &target) {
+            dest::remove_file_best_effort(&partial);
+            return Err(err);
+        }
+        if crash.as_deref() == Some("after-rename") {
+            std::process::abort();
+        }
+        #[cfg(not(windows))]
+        if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+            dest::sync_dir(parent)?;
+        }
+        self.generation = Some(generation);
+        Ok(())
     }
 
     /// [`dest::rename`], tried again with backoff while another program holds
@@ -459,6 +454,115 @@ impl LibraryIndex {
 
 fn is_not_found(err: &IngestError) -> bool {
     matches!(err, IngestError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// `<key>.idx.a` or `<key>.idx.b`.
+fn slot_path(file: &Path, slot: usize) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".");
+    name.push(SLOTS[slot]);
+    PathBuf::from(name)
+}
+
+/// Take the writers' lock, `<key>.idx.lock`. The OS drops it when the
+/// writer exits or is killed, so a crash never leaves it held.
+fn lock_index(file: &Path) -> Result<std::fs::File, IngestError> {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".lock");
+    let path = PathBuf::from(name);
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|err| IngestError::io(&path, err))?;
+    let mut wait = std::time::Duration::from_millis(5);
+    for _ in 0..LOCK_TRIES {
+        match handle.try_lock() {
+            Ok(()) => return Ok(handle),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_millis(640));
+            }
+            Err(std::fs::TryLockError::Error(err)) => return Err(IngestError::io(&path, err)),
+        }
+    }
+    handle.try_lock().map(|()| handle).map_err(|_| {
+        IngestError::io(
+            &path,
+            std::io::Error::other("another writer kept the index lock; save left pending"),
+        )
+    })
+}
+
+/// The newest complete saved index for `file`: the slot with the highest
+/// generation whose footer checks, else the other slot, else a file saved
+/// by an earlier version under `file` itself. Returns which slot it was
+/// (`None` for the earlier file). Readers never lock: a slot is only ever
+/// replaced by a rename, and never the newest one, so a reader that finds
+/// one slot mid-replace still has the other.
+fn read_newest(file: &Path, root: &str) -> Option<(Option<usize>, Saved)> {
+    let mut slots: Vec<(u64, usize)> = (0..SLOTS.len())
+        .filter_map(|slot| read_generation(&slot_path(file, slot)).map(|g| (g, slot)))
+        .collect();
+    slots.sort_unstable_by(|a, b| b.cmp(a));
+    for (_, slot) in &slots {
+        if let Some(saved) = read_whole(&slot_path(file, *slot), root) {
+            return Some((Some(*slot), saved));
+        }
+    }
+    if slots.is_empty() {
+        // Heads can be missed mid-replace; try both whole before falling back.
+        for slot in 0..SLOTS.len() {
+            if let Some(saved) = read_whole(&slot_path(file, slot), root) {
+                return Some((Some(slot), saved));
+            }
+        }
+    }
+    read_whole(file, root).map(|saved| (None, saved))
+}
+
+fn read_whole(path: &Path, root: &str) -> Option<Saved> {
+    let bytes = std::fs::read(path).ok()?;
+    parse_saved(std::str::from_utf8(&bytes).ok()?, root)
+}
+
+/// The concrete file [`read_saved_file`] and [`check_saved_file`] read for
+/// an index `file`: its newest complete slot, else the earlier-version file.
+pub fn newest_slot(file: &Path) -> Option<PathBuf> {
+    newest_checked(file).map(|(path, _)| path)
+}
+
+/// [`read_newest`] for a caller that does not know the root: each file's own
+/// root line is used.
+fn newest_checked(file: &Path) -> Option<(PathBuf, Saved)> {
+    let own_root = |path: &Path| -> Option<Saved> {
+        let bytes = std::fs::read(path).ok()?;
+        let text = std::str::from_utf8(&bytes).ok()?;
+        let root = text.split('\n').nth(1)?.strip_prefix("root\t")?;
+        parse_saved(text, root)
+    };
+    let mut slots: Vec<(u64, usize)> = (0..SLOTS.len())
+        .filter_map(|slot| read_generation(&slot_path(file, slot)).map(|g| (g, slot)))
+        .collect();
+    slots.sort_unstable_by(|a, b| b.cmp(a));
+    let mut order: Vec<usize> = slots.iter().map(|(_, slot)| *slot).collect();
+    if order.is_empty() {
+        order = (0..SLOTS.len()).collect();
+    }
+    for slot in order {
+        let path = slot_path(file, slot);
+        if let Some(saved) = own_root(&path) {
+            return Some((path, saved));
+        }
+    }
+    own_root(file).map(|saved| (file.to_path_buf(), saved))
+}
+
+/// The two slot files of an index `file`, for tests and tools.
+pub fn slot_files(file: &Path) -> [PathBuf; 2] {
+    [slot_path(file, 0), slot_path(file, 1)]
 }
 
 /// Remove `<file>.partial-*` temp files other than `keep`. One a live writer
@@ -533,7 +637,14 @@ fn flatten_dirs(dirs: &BTreeMap<String, DirRecord>) -> Vec<String> {
 /// Read a saved index file as it is on disk, without refreshing it: its
 /// generation and every file, in walk order. A short or damaged file is an
 /// error. For tests and tools that watch the file.
+///
+/// `file` is an index's [`LibraryIndex::file`] (its newest complete slot is
+/// read, the way an opening index reads it) or one concrete slot file.
 pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
+    if is_index_name(file) {
+        let (_, saved) = newest_checked(file).ok_or("no complete saved index")?;
+        return Ok((saved.generation, flatten_dirs(&saved.dirs)));
+    }
     let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
     let root = text
@@ -547,7 +658,12 @@ pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
 
 /// Check a saved index file: format, footer length and checksum. Returns its
 /// generation.
+/// `file` is resolved as for [`read_saved_file`].
 pub fn check_saved_file(file: &Path) -> Result<u64, String> {
+    if is_index_name(file) {
+        let (_, saved) = newest_checked(file).ok_or("no complete saved index")?;
+        return Ok(saved.generation);
+    }
     let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
     let mut lines = text.split('\n');
@@ -559,6 +675,10 @@ pub fn check_saved_file(file: &Path) -> Result<u64, String> {
     parse_saved(text, root)
         .map(|saved| saved.generation)
         .ok_or_else(|| "damaged or short index file".to_string())
+}
+
+fn is_index_name(file: &Path) -> bool {
+    file.extension().is_some_and(|e| e == "idx")
 }
 
 /// List one directory the way [`SourceRoot::walk`] does: symlinks and unsafe
