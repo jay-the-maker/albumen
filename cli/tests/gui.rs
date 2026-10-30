@@ -418,6 +418,64 @@ fn heic_and_raw_get_placeholder_tiles() {
     );
 }
 
+/// M5 AC2-AC4 HEIC extension, end to end: /api/library reports thumb "none"
+/// for the HEIC, and /api/thumbs pages the content-keyed index that lives
+/// under ALBUMEN_HOME, outside the library.
+#[test]
+fn heic_thumb_index_is_served_by_page_from_albumen_home() {
+    let work = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .args(["gui", "--demo", "--no-open", "--port", "0", "--work"])
+        .arg(work.path())
+        .env("ALBUMEN_HOME", home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut addr = None;
+    for line in lines.by_ref().map_while(Result::ok) {
+        if let Some(url) = line.strip_prefix("albumen gui: http://") {
+            addr = Some(url.trim_end_matches('/').to_string());
+            break;
+        }
+    }
+    std::thread::spawn(move || for _ in lines.map_while(Result::ok) {});
+    let _gui = Gui(child);
+    let addr = addr.expect("gui prints its URL");
+    let (code, library) = get(&addr, "/api/library");
+    assert_eq!(code, 200);
+    let library: serde_json::Value = serde_json::from_str(&library).unwrap();
+    let heic = library["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["path"] == "IMG_0002.heic")
+        .unwrap()
+        .clone();
+    assert_eq!(heic["thumb"], "none");
+    assert_eq!(heic["preview"], false);
+    let (code, page) = get(&addr, "/api/thumbs?offset=0&limit=10");
+    assert_eq!(code, 200);
+    let page: serde_json::Value = serde_json::from_str(&page).unwrap();
+    let rows = page["entries"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{page}");
+    assert_eq!(rows[0]["path"], "IMG_0002.heic");
+    assert_eq!(rows[0]["thumb"], "none");
+    assert_eq!(rows[0]["key"].as_str().unwrap().len(), 64);
+    let previews = home.path().join("previews");
+    let lib_dir = std::fs::read_dir(&previews)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(lib_dir.join("thumbs/v1/index-v1.jsonl").is_file());
+    let (_, past) = get(&addr, "/api/thumbs?offset=5&limit=10");
+    assert!(past.contains("\"entries\":[]"), "{past}");
+}
+
 /// Attributes of an HTML start tag, e.g. `<button class="soon" disabled>`.
 fn attrs(tag: &str) -> Vec<(String, String)> {
     let inner = tag.trim_start_matches('<').trim_end_matches('>');

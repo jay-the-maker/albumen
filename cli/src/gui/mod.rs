@@ -21,6 +21,7 @@ pub mod demo;
 pub mod http;
 pub mod live;
 pub mod taken;
+pub mod thumbs;
 
 const PAGE: &str = include_str!("page.html");
 
@@ -207,8 +208,41 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             "text/html; charset=utf-8",
             PAGE.as_bytes(),
         ),
+        ("GET", "/api/thumbs") => {
+            // S-H6: one page of the HEIC thumbnail index, streamed from disk.
+            let num = |k: &str, d: usize| {
+                http::query_param(&req.target, k)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(d)
+            };
+            let (offset, limit) = (num("offset", 0), num("limit", 200).min(1000));
+            let rows: Vec<serde_json::Value> = thumbs::thumbs_dir(&server.config.library)
+                .map(|root| {
+                    thumbs::page(&root, offset, limit)
+                        .0
+                        .iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "path": e.path, "key": e.key,
+                                "thumb": thumbs::thumb_state(&root, e),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let body = serde_json::json!({ "offset": offset, "entries": rows }).to_string();
+            http::respond(&mut stream, 200, "application/json", body.as_bytes())
+        }
         ("GET", "/api/library") => {
-            let body = library_json(&server.config.library).to_string();
+            let lib = &server.config.library;
+            let scan = server
+                .last_scan
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| newest_scan(&server.config.state));
+            let cache = live::cache_dir(lib);
+            let body = library_json_scan(lib, cache.as_deref(), scan.as_deref()).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/video") => {
@@ -352,14 +386,57 @@ fn is_photo(rel: &str) -> bool {
     is_image(rel) || ext(rel).is_some_and(|e| PLACEHOLDER_EXT.contains(&e.as_str()))
 }
 
+#[cfg(test)]
 pub fn library_json(library: &Path) -> serde_json::Value {
     let cache = live::cache_dir(library);
     library_json_with(library, cache.as_deref())
 }
 
+/// The newest `scan-*.jsonl` in the state folder, if any.
+fn newest_scan(state: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(state)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("scan-") && n.ends_with(".jsonl")
+        })
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .max()
+        .map(|(_, p)| p)
+}
+
 /// `library_json` with an explicit preview cache folder (None: no cache).
+#[cfg(test)]
 pub fn library_json_with(library: &Path, cache: Option<&Path>) -> serde_json::Value {
+    library_json_scan(library, cache, None)
+}
+
+/// `library_json_with`, reusing hashes from an M3 scan manifest for the
+/// HEIC thumbnail index.
+pub fn library_json_scan(
+    library: &Path,
+    cache: Option<&Path>,
+    scan: Option<&Path>,
+) -> serde_json::Value {
     let files = library_files(library);
+    // HEIC thumbnail index (M5 AC2-AC4): keys only, no decoding.
+    let heics: Vec<&str> = files
+        .iter()
+        .map(String::as_str)
+        .filter(|r| thumbs::is_heic(r))
+        .collect();
+    let thumb_of: std::collections::HashMap<String, &'static str> = match cache {
+        Some(c) => {
+            let root = thumbs::thumbs_root(c);
+            let r = thumbs::refresh(library, &heics, &root, scan);
+            r.entries
+                .iter()
+                .map(|e| (e.path.clone(), thumbs::thumb_state(&root, e)))
+                .collect()
+        }
+        None => Default::default(),
+    };
     // Live Photos: a still and a movie with the same folder and stem AND the
     // same ContentIdentifier are one photo. Same stem without a matching ID
     // stays two items, each with an Info line saying why.
@@ -475,6 +552,10 @@ pub fn library_json_with(library: &Path, cache: Option<&Path>) -> serde_json::Va
                 item["raw_bytes"] = raw_len.into();
                 item["format"] = "RAW + JPEG".into();
                 item["raw"] = raw.as_str().into();
+            }
+            if thumbs::is_heic(rel) {
+                // No decoder: the tile is the honest placeholder.
+                item["thumb"] = thumb_of.get(rel.as_str()).copied().unwrap_or("none").into();
             }
             if live::is_video(rel) {
                 item["video"] = true.into();
@@ -1241,6 +1322,105 @@ mod tests {
         assert_eq!(movie.len(), 12865);
         assert!(read_image(&lib, "roll/IMG_0005.HEIC").is_none());
         assert_eq!(before, snapshot(&lib));
+    }
+
+    // ---- M5 AC2-AC4 HEIC extension (S-H4, S-H5) ----
+
+    /// S-H4: /api/library says thumb "none" for HEIC and never offers a preview.
+    #[test]
+    fn sh4_heic_items_report_thumb_none_and_no_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let home = dir.path().join("home");
+        std::fs::create_dir(&lib).unwrap();
+        live_library(&lib);
+        let cache = live::cache_dir_in(&home, &lib).unwrap();
+        for c in [None, Some(cache.as_path())] {
+            let v = library_json_with(&lib, c);
+            let heic: Vec<_> = v["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|i| thumbs::is_heic(i["path"].as_str().unwrap()))
+                .collect();
+            assert_eq!(heic.len(), 2);
+            for i in heic {
+                assert_eq!(i["thumb"], "none");
+                assert_eq!(i["preview"], false);
+                assert_eq!(i["format"], "HEIC");
+            }
+        }
+        assert!(read_image(&lib, "roll/IMG_0005.HEIC").is_none());
+        assert!(PAGE.contains("Can't preview this file here. Your original is kept unchanged."));
+    }
+
+    /// S-H5: scan, GUI listing, index build, invalidate and rebuild leave every
+    /// original identical (SHA-256, size, mtime) and add nothing. Covers HEIC,
+    /// a Live pair, RAW+JPEG and an HEVC movie.
+    #[test]
+    fn sh5_originals_never_touched_across_scan_index_invalidate_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let home = dir.path().join("home");
+        std::fs::create_dir(&lib).unwrap();
+        live_library(&lib);
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+        // Synthetic HEVC stub: the fixture movie with its sample entry set to hvc1.
+        let mut hevc = std::fs::read(fixtures.join("live-photo/IMG_0005.mov")).unwrap();
+        let at = hevc.windows(4).position(|w| w == b"avc1").unwrap();
+        hevc[at..at + 4].copy_from_slice(b"hvc1");
+        let put = |rel: &str, bytes: &[u8]| {
+            let p = lib.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            albumen_ingest::dest::create_file(&p)
+                .unwrap()
+                .write_all(bytes)
+                .unwrap();
+        };
+        put("raw/DSC_0001.NEF", b"synthetic raw bytes");
+        put("raw/DSC_0001.JPG", b"synthetic jpeg bytes");
+        put("clips/hevc.mov", &hevc);
+        let before = snapshot(&lib);
+        let kinds = |s: &[(String, u64, SystemTime, String)], e: &str| {
+            s.iter()
+                .filter(|f| f.0.to_ascii_lowercase().ends_with(e))
+                .count()
+        };
+        assert!(kinds(&before, ".heic") >= 2 && kinds(&before, ".nef") == 1);
+        assert!(kinds(&before, ".mov") >= 3);
+        let hevc_codec = live::playable(&lib.join("clips/hevc.mov"));
+        assert_eq!(hevc_codec, (false, Some("HEVC")));
+        let state = dir.path().join("state");
+        // Scan (M3): the real scanner writes its manifest outside the library.
+        let manifest = state.join("scan-1.jsonl");
+        let root = SourceRoot::open(&lib).unwrap();
+        let stats = albumen_ingest::scan_tree(&root, &manifest).unwrap();
+        assert_eq!(stats.files as usize, before.len());
+        assert_eq!(before, snapshot(&lib), "after scan");
+        let cache = live::cache_dir_in(&home, &lib).unwrap();
+        let troot = thumbs::thumbs_root(&cache);
+        // GUI open + index build, reusing the scan's hashes.
+        let v = library_json_scan(&lib, Some(&cache), Some(&manifest));
+        assert!(v["images"].as_array().unwrap().len() >= 5);
+        let heics: Vec<&str> = before
+            .iter()
+            .map(|f| f.0.as_str())
+            .filter(|r| thumbs::is_heic(r))
+            .collect();
+        let heics: Vec<String> = heics.iter().map(|r| r.replace('\\', "/")).collect();
+        let refs: Vec<&str> = heics.iter().map(String::as_str).collect();
+        let warm = thumbs::refresh(&lib, &refs, &troot, Some(&manifest));
+        assert_eq!(warm.hashed, 0, "warm index build re-hashes nothing");
+        assert_eq!(warm.entries.len(), refs.len());
+        assert_eq!(before, snapshot(&lib), "after GUI open and index build");
+        // Invalidate: move the cache away (never delete), then rebuild.
+        std::fs::rename(&cache, dir.path().join("moved-away")).unwrap();
+        let rebuilt = thumbs::refresh(&lib, &refs, &troot, Some(&manifest));
+        assert_eq!((rebuilt.hashed, rebuilt.from_scan), (0, refs.len() as u64));
+        let _ = library_json_scan(&lib, Some(&cache), Some(&manifest));
+        let _ = library_json_with(&lib, None);
+        assert_eq!(before, snapshot(&lib), "after invalidate and rebuild");
+        assert_eq!(hevc_codec, live::playable(&lib.join("clips/hevc.mov")));
     }
 
     /// AC5: /video serves the original movie bytes unchanged, and the page
