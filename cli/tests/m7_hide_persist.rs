@@ -772,8 +772,16 @@ fn the_hide_note_follows_a_hide_file_on_the_next_poll() {
     assert!(fixed["hide_note"].is_null(), "{fixed}");
 }
 
-#[test]
-fn a_bad_family_log_entry_before_a_later_hide_hides_every_family_object() {
+enum Break {
+    Corrupt,
+    BadSignature,
+    Mismatch,
+    Delete,
+}
+
+/// bea hides one then two; break bea's entry for "hide one" so the view would
+/// drop the later "hide two" too. Hides must fail closed for every viewer.
+fn break_entry_before_a_later_hide(how: Break) {
     let tmp = tempfile::tempdir().unwrap();
     let f = family(tmp.path());
     let mut objects = Vec::new();
@@ -785,7 +793,6 @@ fn a_bad_family_log_entry_before_a_later_hide_hides_every_family_object() {
         objects.push(r);
         shas.push(sha);
     }
-    // bea: hide one, then hide two (the later hide).
     family_mark(&f, "hide", &shas[0]);
     family_mark(&f, "hide", &shas[1]);
     let index = tempfile::tempdir().unwrap();
@@ -794,8 +801,6 @@ fn a_bad_family_log_entry_before_a_later_hide_hides_every_family_object() {
         !v.contains(&objects[1]) && v.contains(&objects[2]),
         "before: {v:?}"
     );
-    // Corrupt bea's entry for "hide one" (synthetic temp fixture). The view
-    // drops it and the later "hide two" with it; hides must fail closed.
     let mut files = Vec::new();
     files_under(&f.library.join("members").join(&f.member_b), &mut files);
     let mut logs: Vec<PathBuf> = files
@@ -808,17 +813,38 @@ fn a_bad_family_log_entry_before_a_later_hide_hides_every_family_object() {
             .and_then(|s| s.parse::<u64>().ok())
     });
     let bad = logs[logs.len() - 2].clone();
-    fs::write(&bad, b"{ not a signed entry").unwrap();
-    let want = format!(
-        "Family photos hidden: a family log entry can't be read: {}",
-        bad.display()
-    );
+    let last = logs[logs.len() - 1].clone();
+    // Synthetic temp fixture only.
+    let prefix = match how {
+        Break::Corrupt => {
+            fs::write(&bad, b"{ not a signed entry").unwrap();
+            "Family photos hidden: a family log entry can't be read: "
+        }
+        Break::BadSignature => {
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&fs::read(&bad).unwrap()).unwrap();
+            let sig = v["signature"].as_str().unwrap().to_string();
+            let flip = if sig.ends_with('0') { '1' } else { '0' };
+            v["signature"] = format!("{}{flip}", &sig[..sig.len() - 1]).into();
+            fs::write(&bad, serde_json::to_vec(&v).unwrap()).unwrap();
+            "Family photos hidden: a family log entry can't be read: "
+        }
+        Break::Mismatch => {
+            fs::copy(&last, &bad).unwrap();
+            "Family photos hidden: a family log entry can't be read: "
+        }
+        Break::Delete => {
+            fs::remove_file(&bad).unwrap();
+            "Family photos hidden: a family log entry is missing: "
+        }
+    };
+    let want = format!("{prefix}{}", bad.display());
     for viewer in [Some(f.member_a.as_str()), Some(f.member_b.as_str()), None] {
         let h = hidden_paths(&f.library, &objects, viewer);
         for o in &objects {
             assert!(
                 h.paths.contains(o),
-                "{viewer:?} sees {o} with a bad log entry"
+                "{viewer:?} sees {o} with a broken log entry"
             );
         }
         assert_eq!(h.errors, std::slice::from_ref(&want), "{viewer:?}");
@@ -828,6 +854,26 @@ fn a_bad_family_log_entry_before_a_later_hide_hides_every_family_object() {
     let gui_index = tempfile::tempdir().unwrap();
     let (_gui, addr) = start(&f.library, work.path(), gui_index.path(), home.path());
     let found = ready_found(&addr);
-    println!("M7 bad-entry note: {}", found["hide_note"]);
+    println!("M7 broken-entry note: {}", found["hide_note"]);
     assert_eq!(found["hide_note"].as_str(), Some(want.as_str()));
+}
+
+#[test]
+fn a_bad_family_log_entry_before_a_later_hide_hides_every_family_object() {
+    break_entry_before_a_later_hide(Break::Corrupt);
+}
+
+#[test]
+fn a_missing_family_log_entry_before_a_later_hide_hides_every_family_object() {
+    break_entry_before_a_later_hide(Break::Delete);
+}
+
+#[test]
+fn a_family_log_entry_with_a_bad_signature_hides_every_family_object() {
+    break_entry_before_a_later_hide(Break::BadSignature);
+}
+
+#[test]
+fn a_family_log_entry_out_of_sequence_hides_every_family_object() {
+    break_entry_before_a_later_hide(Break::Mismatch);
 }

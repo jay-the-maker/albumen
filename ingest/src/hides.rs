@@ -122,6 +122,10 @@ pub const FAMILY_LOG_UNREADABLE: &str = "Family photos hidden: can't read the fa
 pub const FAMILY_ENTRY_UNREADABLE: &str =
     "Family photos hidden: a family log entry can't be read: ";
 
+/// Start of the error (and the gui's line) when a family log entry is
+/// missing while a later one exists; `<path>/log/<seq>.json` follows.
+pub const FAMILY_ENTRY_MISSING: &str = "Family photos hidden: a family log entry is missing: ";
+
 /// Every family fail-closed line starts with this; the gui shows the first
 /// line as is.
 pub const FAMILY_HIDDEN: &str = "Family photos hidden: ";
@@ -156,7 +160,11 @@ fn family_state(library: &Path, paths: &[String], viewer: Option<&str>, out: &mu
     match crate::family::unreadable_log_entries(library) {
         Ok(bad) if bad.is_empty() => {}
         Ok(bad) => {
-            let first = format!("{FAMILY_ENTRY_UNREADABLE}{}", bad[0].display());
+            use crate::family::LogProblem;
+            let first = match &bad[0] {
+                LogProblem::Unreadable(p) => format!("{FAMILY_ENTRY_UNREADABLE}{}", p.display()),
+                LogProblem::Missing(p) => format!("{FAMILY_ENTRY_MISSING}{}", p.display()),
+            };
             let more = bad.len() - 1;
             fail_closed(
                 out,

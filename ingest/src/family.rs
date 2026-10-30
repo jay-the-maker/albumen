@@ -1066,20 +1066,34 @@ fn manifest_value(view: &View) -> Value {
 }
 
 /// Merge every verified log into the shared manifest.
-/// Log entries that end a device's chain early because they can't be read
-/// or don't verify (bad JSON, bad signature, wrong member/device/seq/prev).
-/// The view silently drops such an entry and every later one from that
-/// device; sync and export keep that behaviour. Hide derivation calls this
-/// so it can fail closed instead (M7, A8). A missing seq (a gap) is not
-/// reported here.
-pub fn unreadable_log_entries(library: &Path) -> Result<Vec<PathBuf>, IngestError> {
+/// Why a device's family log ends early, for hide derivation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogProblem {
+    /// This entry can't be read or doesn't verify (bad JSON, bad signature,
+    /// wrong member/device/seq/prev).
+    Unreadable(PathBuf),
+    /// This entry is missing while a later one exists (a hole in the middle).
+    Missing(PathBuf),
+}
+
+/// Entries that end a device's chain early. The view silently drops such an
+/// entry and every later one from that device; sync and export keep that
+/// behaviour. Hide derivation calls this so it can fail closed instead (M7,
+/// A8). A short tail (missing entries at the END) can't be seen locally and
+/// is not reported: it only delays hides, never reverses one.
+pub fn unreadable_log_entries(library: &Path) -> Result<Vec<LogProblem>, IngestError> {
     let mut bad = Vec::new();
     for member in member_dirs(library)? {
         for device in device_dirs(library, &member)? {
             let chain = read_device_chain(library, &member, &device)?;
-            let files = list_log_files(&log_dir(library, &member, &device))?;
-            if chain.gap.is_none() && chain.records.len() < files.len() {
-                bad.push(files[chain.records.len()].1.clone());
+            let dir = log_dir(library, &member, &device);
+            if let Some(seq) = chain.gap {
+                bad.push(LogProblem::Missing(dir.join(format!("{seq}.json"))));
+                continue;
+            }
+            let files = list_log_files(&dir)?;
+            if chain.records.len() < files.len() {
+                bad.push(LogProblem::Unreadable(files[chain.records.len()].1.clone()));
             }
         }
     }
