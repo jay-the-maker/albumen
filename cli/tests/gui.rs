@@ -276,8 +276,9 @@ fn page_is_a_source_list_library_with_plumbing_under_show_details() {
         "Not verified (exit",
         ">Edit<",
         ">Share<",
-        ">Faces<",
-        ">Places<",
+        // Faces and Places only as disabled rows (FIX-4), never live views.
+        "data-s=\"faces\"",
+        "data-s=\"places\"",
     ] {
         assert!(!page.contains(gone), "still has {gone}");
     }
@@ -390,4 +391,28 @@ fn heic_and_raw_get_placeholder_tiles() {
         .unwrap()
         .iter()
         .all(|i| i["preview"] == true));
+}
+
+/// FIX-4: Places and Faces are listed under LIBRARY as disabled
+/// 'not built yet' rows: no data-s, so no click opens a view.
+#[test]
+fn places_and_faces_are_disabled_not_built_yet_rows() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (code, page) = get(&addr, "/");
+    assert_eq!(code, 200);
+    for name in ["Places", "Faces"] {
+        let row = format!(
+            "<button class=\"soon\" disabled title=\"{name} is not built yet\"><span>{name}</span><small>not built yet</small></button>"
+        );
+        assert!(page.contains(&row), "missing {name} row");
+        assert!(!page.contains(&format!("data-s=\"{}\"", name.to_lowercase())));
+        assert!(!page.contains(&format!("<section id=\"{}\"", name.to_lowercase())));
+    }
+    let lib = page.find("<h2>LIBRARY</h2>").unwrap();
+    let photos = page.find("<span>Photos</span>").unwrap();
+    let places = page.find("<span>Places</span>").unwrap();
+    let faces = page.find("<span>Faces</span>").unwrap();
+    let backups = page.find("<h2>BACKUPS</h2>").unwrap();
+    assert!(lib < photos && photos < places && places < faces && faces < backups);
 }
