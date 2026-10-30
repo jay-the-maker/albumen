@@ -195,7 +195,7 @@ impl LibraryIndex {
         let file = self.file.as_ref()?;
         // `std::fs` opens with FILE_SHARE_READ | WRITE | DELETE on Windows,
         // so a reader never stops a writer's rename.
-        let bytes = std::fs::read(file).ok()?;
+        let bytes = read_index_bytes(file).ok()?;
         let text = std::str::from_utf8(&bytes).ok()?;
         parse_saved(text, &self.root.canonical().to_string_lossy())
     }
@@ -457,6 +457,52 @@ impl LibraryIndex {
     }
 }
 
+/// Read a saved index. On Windows a reader that opens the index in the
+/// instant another writer replaces it can be refused, or find no file at
+/// all, while the old file is being swapped out. Those reads are tried
+/// again briefly (1 ms doubling, 8 tries) instead of being taken as "no
+/// index", which would make the caller walk the whole library. A missing
+/// file with no writer mid-save is returned at once.
+fn read_index_bytes(file: &Path) -> std::io::Result<Vec<u8>> {
+    with_open_retry(file, || std::fs::read(file))
+}
+
+fn with_open_retry<T>(
+    file: &Path,
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut wait = std::time::Duration::from_millis(1);
+    let mut tries = 0;
+    loop {
+        match op() {
+            Err(err)
+                if tries < 8
+                    && (err.kind() != std::io::ErrorKind::NotFound || save_in_progress(file)) =>
+            {
+                tries += 1;
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Whether a `<file>.partial-*` temp file exists: some writer is mid-save.
+fn save_in_progress(file: &Path) -> bool {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
+        return false;
+    };
+    let prefix = format!("{name}.partial-");
+    std::fs::read_dir(dir).is_ok_and(|read| {
+        read.flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+    })
+}
+
 fn is_not_found(err: &IngestError) -> bool {
     matches!(err, IngestError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
 }
@@ -484,11 +530,22 @@ fn remove_stale_partials(file: &Path, keep: &Path) {
     }
 }
 
+/// The first 64 KiB of a saved index (enough for the format, root and
+/// generation lines), with the same retry as [`read_index_bytes`].
+fn read_index_head(file: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let handle = with_open_retry(file, || std::fs::File::open(file)).ok()?;
+    let mut head = Vec::new();
+    handle.take(64 * 1024).read_to_end(&mut head).ok()?;
+    Some(head)
+}
+
 /// The generation in the first lines of a saved file, without reading the
 /// rest. A first-format file is generation 0.
 fn read_generation(file: &Path) -> Option<u64> {
     use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(std::fs::File::open(file).ok()?);
+    let bytes = read_index_head(file)?;
+    let mut reader = std::io::BufReader::new(&bytes[..]);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     match line.trim_end_matches('\n') {
@@ -534,7 +591,7 @@ fn flatten_dirs(dirs: &BTreeMap<String, DirRecord>) -> Vec<String> {
 /// generation and every file, in walk order. A short or damaged file is an
 /// error. For tests and tools that watch the file.
 pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
-    let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
+    let bytes = read_index_bytes(file).map_err(|err| err.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
     let root = text
         .split('\n')
@@ -548,7 +605,7 @@ pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
 /// Check a saved index file: format, footer length and checksum. Returns its
 /// generation.
 pub fn check_saved_file(file: &Path) -> Result<u64, String> {
-    let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
+    let bytes = read_index_bytes(file).map_err(|err| err.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
     let mut lines = text.split('\n');
     let _format = lines.next();
