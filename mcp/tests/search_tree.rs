@@ -101,7 +101,13 @@ impl std::fmt::Display for OsLocal {
                     format!("UTC{sign}{h}:{m:02}")
                 }
             };
-            format!("{when} {zone}")
+            let label = format!("{when} {zone}");
+            // CI sets this after `tzutil /s "India Standard Time"` so the
+            // half-hour offset is checked against a fixed string too.
+            if let Ok(want) = std::env::var("ALBUMEN_EXPECTED_LOCAL_LABEL") {
+                assert_eq!(label, want, "OS zone label");
+            }
+            label
         });
         f.write_str(label)
     }
