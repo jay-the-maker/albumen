@@ -11,6 +11,7 @@
 
 mod card;
 mod checksum;
+pub mod clock;
 mod copy_profile;
 pub mod dest;
 mod discover;

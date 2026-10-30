@@ -80,6 +80,51 @@ fn status(args: &[&str]) -> (i32, String) {
     albumen(&all)
 }
 
+/// The stamp before `tail` is "YYYY-MM-DD HH:MM UTC", "UTC-7" or
+/// "UTC+5:30": a numeric offset, never an abbreviation such as PDT.
+fn labelled(line: &str, tail: &str) -> bool {
+    let Some(head) = line.strip_suffix(tail) else {
+        return false;
+    };
+    let Some((_, zone)) = head.rsplit_once(' ') else {
+        return false;
+    };
+    let Some(offset) = zone.strip_prefix("UTC") else {
+        return false;
+    };
+    let date = &head[head.len() - zone.len() - 17..head.len() - zone.len() - 1];
+    let digits = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+    date.len() == 16
+        && digits(&date[0..4])
+        && digits(&date[11..13])
+        && (offset.is_empty()
+            || (offset.starts_with(['+', '-'])
+                && offset[1..].chars().all(|c| c.is_ascii_digit() || c == ':')))
+}
+
+/// Linux and macOS honour `TZ`: India shows "UTC+5:30", UTC shows "UTC".
+#[cfg(unix)]
+#[test]
+fn stamps_follow_tz_with_numeric_offsets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = backup(tmp.path(), "zoned", 1);
+    for (tz, zone) in [
+        ("Asia/Kolkata", " UTC+5:30)"),
+        ("UTC", " UTC)"),
+        ("America/Los_Angeles", " UTC-"),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_albumen"))
+            .args(["status", p(&dest)])
+            .env("TZ", tz)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let first = text.lines().next().unwrap();
+        assert!(first.contains(zone), "TZ={tz}: {text}");
+        assert!(labelled(first, ")"), "TZ={tz}: {text}");
+    }
+}
+
 fn lines(text: &str) -> Vec<&str> {
     text.lines().collect()
 }
@@ -127,7 +172,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
     let l = lines(&text);
     assert_eq!(l.len(), 3, "{text}");
     assert!(
-        l[0].starts_with("ok: backup checked 2 hours ago (") && l[0].ends_with(" UTC)"),
+        l[0].starts_with("ok: backup checked 2 hours ago (") && labelled(l[0], ")"),
         "{text}"
     );
     assert_eq!(l[1], "12 items, all match what was backed up");
@@ -157,7 +202,7 @@ fn fresh_stale_damaged_never_and_unreadable() {
         l[0].starts_with("stale: last good backup was 12 days ago ("),
         "{text}"
     );
-    assert!(l[0].ends_with(" UTC), limit is 7 days"), "{text}");
+    assert!(labelled(l[0], "), limit is 7 days"), "{text}");
     assert_eq!(
         l[1],
         "4 items were verified then; changes since are not checked"
