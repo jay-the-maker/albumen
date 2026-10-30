@@ -659,11 +659,34 @@ pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
 /// Check a saved index file: format, footer length and checksum. Returns its
 /// generation.
 /// `file` is resolved as for [`read_saved_file`].
+///
+/// A current-format file is verified without building its directory tree:
+/// the footer's length and SHA-256 cover every body byte, so a body that
+/// matches them is the body the writer wrote. A first-format file has no
+/// checksum and is still fully parsed.
 pub fn check_saved_file(file: &Path) -> Result<u64, String> {
     if is_index_name(file) {
-        let (_, saved) = newest_checked(file).ok_or("no complete saved index")?;
-        return Ok(saved.generation);
+        let mut slots: Vec<(u64, usize)> = (0..SLOTS.len())
+            .filter_map(|slot| read_generation(&slot_path(file, slot)).map(|g| (g, slot)))
+            .collect();
+        slots.sort_unstable_by(|a, b| b.cmp(a));
+        let mut order: Vec<PathBuf> = slots
+            .iter()
+            .map(|(_, slot)| slot_path(file, *slot))
+            .collect();
+        if order.is_empty() {
+            order = (0..SLOTS.len()).map(|slot| slot_path(file, slot)).collect();
+        }
+        order.push(file.to_path_buf());
+        return order
+            .iter()
+            .find_map(|path| check_one(path).ok())
+            .ok_or_else(|| "no complete saved index".to_string());
     }
+    check_one(file)
+}
+
+fn check_one(file: &Path) -> Result<u64, String> {
     let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
     let mut lines = text.split('\n');
@@ -672,9 +695,30 @@ pub fn check_saved_file(file: &Path) -> Result<u64, String> {
         .next()
         .and_then(|line| line.strip_prefix("root\t"))
         .ok_or("no root line")?;
-    parse_saved(text, root)
-        .map(|saved| saved.generation)
-        .ok_or_else(|| "damaged or short index file".to_string())
+    let damaged = || "damaged or short index file".to_string();
+    if !text.starts_with(&format!("{FORMAT}\n")) {
+        return parse_saved(text, root)
+            .map(|saved| saved.generation)
+            .ok_or_else(damaged);
+    }
+    verify_footer(text).ok_or_else(damaged)
+}
+
+/// The generation of a current-format file whose footer length and checksum
+/// match its body; the directory lines are not parsed.
+fn verify_footer(text: &str) -> Option<u64> {
+    let trimmed = text.strip_suffix('\n')?;
+    let start = trimmed.rfind('\n')? + 1;
+    let mut footer = trimmed[start..].strip_prefix("end\t")?.splitn(2, '\t');
+    let len: usize = footer.next()?.parse().ok()?;
+    let sum = footer.next()?;
+    if len != start || sha256_hex(&text.as_bytes()[..start]) != sum {
+        return None;
+    }
+    let mut lines = text[..start].splitn(4, '\n');
+    lines.next()?;
+    lines.next()?.strip_prefix("root\t")?;
+    lines.next()?.strip_prefix("gen\t")?.parse().ok()
 }
 
 fn is_index_name(file: &Path) -> bool {
