@@ -457,17 +457,28 @@ impl LibraryIndex {
     }
 }
 
-/// Read a saved index. On Windows an open in the instant another writer
-/// replaces the file can fail (access denied while the old file is being
-/// deleted); that is tried again, briefly, rather than read as "no index",
-/// which would make the caller walk the whole library. A missing file is
-/// returned at once.
+/// Read a saved index. On Windows a reader that opens the index in the
+/// instant another writer replaces it can be refused, or find no file at
+/// all, while the old file is being swapped out. Those reads are tried
+/// again briefly (1 ms doubling, 8 tries) instead of being taken as "no
+/// index", which would make the caller walk the whole library. A missing
+/// file with no writer mid-save is returned at once.
 fn read_index_bytes(file: &Path) -> std::io::Result<Vec<u8>> {
+    with_open_retry(file, || std::fs::read(file))
+}
+
+fn with_open_retry<T>(
+    file: &Path,
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
     let mut wait = std::time::Duration::from_millis(1);
     let mut tries = 0;
     loop {
-        match std::fs::read(file) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound && tries < 8 => {
+        match op() {
+            Err(err)
+                if tries < 8
+                    && (err.kind() != std::io::ErrorKind::NotFound || save_in_progress(file)) =>
+            {
                 tries += 1;
                 std::thread::sleep(wait);
                 wait *= 2;
@@ -475,6 +486,21 @@ fn read_index_bytes(file: &Path) -> std::io::Result<Vec<u8>> {
             other => return other,
         }
     }
+}
+
+/// Whether a `<file>.partial-*` temp file exists: some writer is mid-save.
+fn save_in_progress(file: &Path) -> bool {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
+        return false;
+    };
+    let prefix = format!("{name}.partial-");
+    std::fs::read_dir(dir).is_ok_and(|read| {
+        read.flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+    })
 }
 
 fn is_not_found(err: &IngestError) -> bool {
@@ -508,22 +534,10 @@ fn remove_stale_partials(file: &Path, keep: &Path) {
 /// generation lines), with the same retry as [`read_index_bytes`].
 fn read_index_head(file: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
-    let mut wait = std::time::Duration::from_millis(1);
-    for _ in 0..9 {
-        match std::fs::File::open(file) {
-            Ok(handle) => {
-                let mut head = Vec::new();
-                handle.take(64 * 1024).read_to_end(&mut head).ok()?;
-                return Some(head);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(_) => {
-                std::thread::sleep(wait);
-                wait *= 2;
-            }
-        }
-    }
-    None
+    let handle = with_open_retry(file, || std::fs::File::open(file)).ok()?;
+    let mut head = Vec::new();
+    handle.take(64 * 1024).read_to_end(&mut head).ok()?;
+    Some(head)
 }
 
 /// The generation in the first lines of a saved file, without reading the
