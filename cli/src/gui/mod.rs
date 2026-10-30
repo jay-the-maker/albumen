@@ -763,7 +763,17 @@ mod tests {
         let v = job_args(&config, "verify", Some("/b1"), None).unwrap();
         assert_eq!(v[0], "verify-manifest");
         assert_eq!(v[5], "--proof");
-        assert!(v[6].starts_with("/b1/ALBUMEN-PROOFS/verify-"));
+        // The proof path is built with Path::join, so compare as a path,
+        // not as a '/'-separated string (Windows joins with '\\').
+        let proof = Path::new(&v[6]);
+        assert_eq!(
+            proof.parent(),
+            Some(Path::new("/b1").join("ALBUMEN-PROOFS").as_path())
+        );
+        assert!(proof
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("verify-")));
         let s = job_args(&config, "scan", None, Some(Path::new("/state/a.jsonl"))).unwrap();
         assert_eq!(&s[4..], ["--previous", "/state/a.jsonl"]);
         let b = job_args(&config, "backup", Some("/b1"), None).unwrap();
@@ -881,31 +891,77 @@ mod tests {
             let mut f = albumen_ingest::dest::create_file(&lib.join(to)).unwrap();
             f.write_all(&bytes).unwrap();
         };
-        for sub in ["a", "Roll", "roll"] {
-            std::fs::create_dir(lib.join(sub)).unwrap();
+        std::fs::create_dir(lib.join("a")).unwrap();
+        std::fs::create_dir(lib.join("Roll")).unwrap();
+        // NTFS and APFS are case-insensitive by default: "roll" is then the
+        // same folder as "Roll", so the case-only half cannot be built.
+        let case_sensitive = !lib.join("roll").exists();
+        if case_sensitive {
+            std::fs::create_dir(lib.join("roll")).unwrap();
         }
         // .jpeg pairs; the JPEG has no date, so the RAW's metadata dates it.
         copy("raw-jpeg/IMG_0003.dng", "a/IMG_0003.DNG");
         let mut f = albumen_ingest::dest::create_file(&lib.join("a/img_0003.jpeg")).unwrap();
         f.write_all(b"no exif here").unwrap();
         // Folder names differ only in case: two folders, no pair.
-        copy("raw-jpeg/IMG_0003.dng", "Roll/IMG_1.dng");
-        copy("raw-jpeg/IMG_0003.jpg", "roll/IMG_1.jpg");
+        if case_sensitive {
+            copy("raw-jpeg/IMG_0003.dng", "Roll/IMG_1.dng");
+            copy("raw-jpeg/IMG_0003.jpg", "roll/IMG_1.jpg");
+        }
         let v = library_json(lib);
         let images = v["images"].as_array().unwrap();
         let paths: Vec<&str> = images.iter().map(|i| i["path"].as_str().unwrap()).collect();
-        assert_eq!(
-            paths,
-            ["Roll/IMG_1.dng", "a/img_0003.jpeg", "roll/IMG_1.jpg"],
-            "{v}"
-        );
-        let pair = &images[1];
+        let want: &[&str] = if case_sensitive {
+            &["Roll/IMG_1.dng", "a/img_0003.jpeg", "roll/IMG_1.jpg"]
+        } else {
+            &["a/img_0003.jpeg"]
+        };
+        assert_eq!(paths, want, "{v}");
+        let pair = &images[usize::from(case_sensitive)];
         assert_eq!(pair["format"], "RAW + JPEG");
         assert_eq!(pair["raw"], "a/IMG_0003.DNG");
         assert_eq!(pair["taken"], "2015-09-03T18:45:12");
         assert_eq!(pair["taken_from"], "RAW photo metadata");
         assert!(pair["raw_bytes"].as_u64().unwrap() > 0);
-        assert!(images[2].get("raw").is_none());
+        if case_sensitive {
+            assert!(images[2].get("raw").is_none());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn job_args_take_windows_drive_paths() {
+        let config = Config {
+            library: r"C:\Photos\Library".into(),
+            backups: vec![r"D:\Backup 1".into()],
+            card: None,
+            state: r"C:\Albumen\state".into(),
+            max_age_secs: 1,
+            demo: false,
+        };
+        let v = job_args(&config, "verify", Some(r"D:\Backup 1"), None).unwrap();
+        assert_eq!(
+            v[2],
+            r"D:\Backup 1\".to_string() + crate::status::RECORD_NAME
+        );
+        let proof = Path::new(&v[6]);
+        assert_eq!(
+            proof.parent(),
+            Some(Path::new(r"D:\Backup 1\ALBUMEN-PROOFS"))
+        );
+        let b = job_args(&config, "backup", Some(r"D:\Backup 1"), None).unwrap();
+        assert_eq!(
+            &b[..5],
+            [
+                "backup",
+                "--from",
+                r"C:\Photos\Library",
+                "--to",
+                r"D:\Backup 1"
+            ]
+        );
+        assert_eq!(b[6], r"C:\Albumen\state\backup");
+        assert!(job_args(&config, "backup", Some(r"D:\Other"), None).is_err());
     }
 
     #[test]
