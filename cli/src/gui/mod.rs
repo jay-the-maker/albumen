@@ -767,10 +767,8 @@ fn library_files_indexed_in(
     let mut n = 0usize;
     found.store(0, Ordering::Relaxed);
     found_paths.lock().unwrap().clear();
-    let opened = albumen_ingest::index::LibraryIndex::open_with_progress(
-        library,
-        dir,
-        &mut |rel| {
+    let opened =
+        albumen_ingest::index::LibraryIndex::open_with_progress(library, dir, &mut |rel| {
             if is_photo(rel) {
                 n += 1;
                 if n <= FOUND_SHOWN {
@@ -778,8 +776,7 @@ fn library_files_indexed_in(
                 }
                 found.store(n, Ordering::Relaxed);
             }
-        },
-    );
+        });
     match opened {
         Ok(index) => {
             let mut paths = index.into_paths();
@@ -1374,7 +1371,9 @@ mod tests {
             .map(|p| p.as_str().unwrap())
             .collect();
         assert_eq!(paths.len(), FOUND_SHOWN);
-        assert!(paths.iter().all(|p| p.starts_with("2024/") && p.ends_with(".jpg")));
+        assert!(paths
+            .iter()
+            .all(|p| p.starts_with("2024/") && p.ends_with(".jpg")));
         let unique: std::collections::HashSet<_> = paths.iter().collect();
         assert_eq!(unique.len(), FOUND_SHOWN);
         assert!(paths.iter().all(|p| files.iter().any(|f| f == p)));
