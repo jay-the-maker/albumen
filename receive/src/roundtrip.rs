@@ -21,13 +21,15 @@ fn fixtures() -> std::path::PathBuf {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "needs Git Bash; on Windows run with --include-ignored once Git for Windows is installed (CONTRIBUTING.md, Testing on Windows)"
+)]
 async fn synthetic_live_photo_survives_the_webdav_receiver() {
     let generated = tempfile::tempdir().unwrap();
     let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../scripts/synthetic-live-photo.sh");
-    let Some(bash) = bash_program() else {
-        return;
-    };
+    let bash = bash_program();
     let output = std::process::Command::new(&bash)
         .arg(&script)
         .arg(generated.path())
@@ -104,9 +106,10 @@ async fn synthetic_live_photo_survives_the_webdav_receiver() {
 ///
 /// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
 /// Bash when the test process is a Windows binary, and it exits before the
-/// writer runs. On Windows without Git Bash this returns `None` and the test
-/// skips with a "needs bash" message; everywhere else bash is required.
-fn bash_program() -> Option<std::path::PathBuf> {
+/// writer runs. On Windows these tests are `#[ignore]`d with a reason, so a
+/// normal `cargo test` lists them as ignored, not ok; with `--include-ignored`
+/// and no Git Bash this panics with a "needs bash" message.
+fn bash_program() -> std::path::PathBuf {
     if cfg!(windows) {
         for candidate in [
             r"C:\Program Files\Git\bin\bash.exe",
@@ -114,16 +117,15 @@ fn bash_program() -> Option<std::path::PathBuf> {
         ] {
             let path = std::path::PathBuf::from(candidate);
             if path.is_file() {
-                return Some(path);
+                return path;
             }
         }
-        eprintln!(
-            "skipped: needs bash. Install Git for Windows (Git Bash) to run this \
-             test; see CONTRIBUTING.md, Testing on Windows."
+        panic!(
+            "needs bash: install Git for Windows (Git Bash) to run this test; \
+             see CONTRIBUTING.md, Testing on Windows."
         );
-        return None;
     }
-    Some(std::path::PathBuf::from("bash"))
+    std::path::PathBuf::from("bash")
 }
 
 fn identifier(path: &std::path::Path, key: &str) -> Option<String> {

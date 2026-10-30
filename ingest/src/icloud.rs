@@ -2439,6 +2439,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "needs symlink privilege (Developer Mode); on Windows run with --include-ignored once it is on (CONTRIBUTING.md, Testing on Windows)"
+    )]
     fn symlink_is_not_followed() {
         let tmp = Tmp::new();
         let from = tmp.path().join("export");
@@ -2449,11 +2453,10 @@ mod tests {
             // Windows needs Developer Mode (or an elevated shell) to create
             // symlinks: OS error 1314. See CONTRIBUTING.md, Testing on Windows.
             if cfg!(windows) && err.raw_os_error() == Some(1314) {
-                eprintln!(
-                    "skipped: needs symlink privilege. Turn on Windows Developer \
-                     Mode (or run elevated); see CONTRIBUTING.md, Testing on Windows."
+                panic!(
+                    "needs symlink privilege: turn on Windows Developer Mode (or \
+                     run elevated); see CONTRIBUTING.md, Testing on Windows."
                 );
-                return;
             }
             panic!("symlink: {err}");
         }

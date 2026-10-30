@@ -29,6 +29,10 @@ const VOLATILE_TAGS: &[&str] = &[
 ];
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "needs Git Bash; on Windows run with --include-ignored once Git for Windows is installed (CONTRIBUTING.md, Testing on Windows)"
+)]
 fn iptc_core_is_deterministic_and_survives_ingest_and_export() {
     let licenses = fs::read_to_string(repo_path("tests/fixtures/LICENSES.md")).unwrap();
     assert!(licenses.contains(JPEG_SHA));
@@ -38,9 +42,7 @@ fn iptc_core_is_deterministic_and_survives_ingest_and_export() {
 
     let generated = tempfile::tempdir().unwrap();
     let script = repo_path("scripts/write-iptc-core.sh");
-    let Some(bash) = bash_program() else {
-        return;
-    };
+    let bash = bash_program();
     let output = Command::new(&bash)
         .arg(&script)
         .arg(generated.path())
@@ -134,9 +136,10 @@ fn require_iptc_core(dump: &Value, path: &Path) {
 ///
 /// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
 /// Bash when the test process is a Windows binary, and it exits before the
-/// writer runs. On Windows without Git Bash this returns `None` and the test
-/// skips with a "needs bash" message; everywhere else bash is required.
-fn bash_program() -> Option<PathBuf> {
+/// writer runs. On Windows these tests are `#[ignore]`d with a reason, so a
+/// normal `cargo test` lists them as ignored, not ok; with `--include-ignored`
+/// and no Git Bash this panics with a "needs bash" message.
+fn bash_program() -> PathBuf {
     if cfg!(windows) {
         for candidate in [
             r"C:\Program Files\Git\bin\bash.exe",
@@ -144,16 +147,15 @@ fn bash_program() -> Option<PathBuf> {
         ] {
             let path = PathBuf::from(candidate);
             if path.is_file() {
-                return Some(path);
+                return path;
             }
         }
-        eprintln!(
-            "skipped: needs bash. Install Git for Windows (Git Bash) to run this \
-             test; see CONTRIBUTING.md, Testing on Windows."
+        panic!(
+            "needs bash: install Git for Windows (Git Bash) to run this test; \
+             see CONTRIBUTING.md, Testing on Windows."
         );
-        return None;
     }
-    Some(PathBuf::from("bash"))
+    PathBuf::from("bash")
 }
 
 fn repo_path(relative: &str) -> PathBuf {

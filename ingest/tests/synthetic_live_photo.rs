@@ -35,6 +35,10 @@ const VOLATILE_TAGS: &[&str] = &[
 ];
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "needs Git Bash; on Windows run with --include-ignored once Git for Windows is installed (CONTRIBUTING.md, Testing on Windows)"
+)]
 fn synthetic_live_photo_survives_import_and_export() {
     let licenses = fs::read_to_string(repo_path("tests/fixtures/LICENSES.md")).unwrap();
     assert!(licenses.contains(CONTENT_ID));
@@ -42,9 +46,7 @@ fn synthetic_live_photo_survives_import_and_export() {
     assert!(licenses.contains("MakerNoteApple"));
 
     let generated = tempfile::tempdir().unwrap();
-    let Some(tag) = generate(generated.path()) else {
-        return;
-    };
+    let tag = generate(generated.path());
     assert_eq!(tag, HEIC_TAG);
     let heic = generated.path().join(HEIC_NAME);
     let mov = generated.path().join(MOV_NAME);
@@ -137,11 +139,13 @@ fn synthetic_live_photo_survives_import_and_export() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "needs Git Bash; on Windows run with --include-ignored once Git for Windows is installed (CONTRIBUTING.md, Testing on Windows)"
+)]
 fn icloud_flags_a_live_pair_whose_content_identifiers_differ() {
     let generated = tempfile::tempdir().unwrap();
-    if generate(generated.path()).is_none() {
-        return;
-    }
+    generate(generated.path());
     let staged = tempfile::tempdir().unwrap();
     let from = staged.path().join("icloud");
     let originals = from.join("originals").join("0");
@@ -204,9 +208,9 @@ fn copy_stamped(source: &Path, dest: &Path) {
     stamp(dest);
 }
 
-fn generate(dir: &Path) -> Option<String> {
+fn generate(dir: &Path) -> String {
     let script = repo_path("scripts/synthetic-live-photo.sh");
-    let bash = bash_program()?;
+    let bash = bash_program();
     let output = Command::new(&bash)
         .arg(&script)
         .arg(dir)
@@ -220,23 +224,22 @@ fn generate(dir: &Path) -> Option<String> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next_back()
-            .unwrap_or("")
-            .trim()
-            .to_string(),
-    )
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next_back()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// Git for Windows, not `C:\\Windows\\System32\\bash.exe`.
 ///
 /// The System32 entry is the WSL launcher. It is earlier on `PATH` than Git
 /// Bash when the test process is a Windows binary, and it exits before the
-/// writer runs. On Windows without Git Bash this returns `None` and the test
-/// skips with a "needs bash" message; everywhere else bash is required.
-fn bash_program() -> Option<PathBuf> {
+/// writer runs. On Windows these tests are `#[ignore]`d with a reason, so a
+/// normal `cargo test` lists them as ignored, not ok; with `--include-ignored`
+/// and no Git Bash this panics with a "needs bash" message.
+fn bash_program() -> PathBuf {
     if cfg!(windows) {
         for candidate in [
             r"C:\Program Files\Git\bin\bash.exe",
@@ -244,16 +247,15 @@ fn bash_program() -> Option<PathBuf> {
         ] {
             let path = PathBuf::from(candidate);
             if path.is_file() {
-                return Some(path);
+                return path;
             }
         }
-        eprintln!(
-            "skipped: needs bash. Install Git for Windows (Git Bash) to run this \
-             test; see CONTRIBUTING.md, Testing on Windows."
+        panic!(
+            "needs bash: install Git for Windows (Git Bash) to run this test; \
+             see CONTRIBUTING.md, Testing on Windows."
         );
-        return None;
     }
-    Some(PathBuf::from("bash"))
+    PathBuf::from("bash")
 }
 
 fn repo_path(relative: &str) -> PathBuf {
