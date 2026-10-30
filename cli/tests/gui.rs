@@ -356,9 +356,29 @@ fn every_script_id_lookup_exists_in_the_page() {
     let mut missing = Vec::new();
     for part in page.split("$('").skip(1) {
         let id = &part[..part.find('\'').unwrap()];
-        if !page.contains(&format!("id=\"{id}\"")) {
-            missing.push(id.to_string());
+        if page.contains(&format!("id=\"{id}\"")) {
+            continue;
         }
+        // Built by the script (b.id='grid-more'): allowed only if the script
+        // creates it and every lookup checks it exists before using it.
+        if page.contains(&format!(".id='{id}'")) {
+            for (at, _) in page.match_indices(&format!("$('{id}')")) {
+                // From the lookup to the end of its function.
+                let body = &page[at..];
+                let line = &body[..body.find("\nfunction ").unwrap_or(body.len())];
+                let var = page[..at]
+                    .rsplit_once("const ")
+                    .and_then(|(_, v)| v.split_once('=').map(|(v, _)| v.trim()))
+                    .unwrap_or("");
+                assert!(
+                    !var.is_empty()
+                        && (line.contains(&format!("!{var}")) || line.contains(&format!("{var}?"))),
+                    "script-built #{id} is used without an existence check: {line}"
+                );
+            }
+            continue;
+        }
+        missing.push(id.to_string());
     }
     assert!(
         missing.is_empty(),
@@ -375,18 +395,29 @@ fn clicking_a_photo_updates_info_first() {
     let work = tempfile::tempdir().unwrap();
     let (_gui, addr) = start(work.path());
     let (_, page) = get(&addr, "/");
+    // The grid has one delegated click handler (e7ac85b). Inside it, the
+    // first thing after the selection is set must be infoPhoto(): nothing
+    // that can throw (highlight, redraw) may run before Info is updated.
+    let start = page
+        .find("$('grid').addEventListener('click',")
+        .expect("the grid's photo click handler");
+    let handler = &page[start..start + page[start..].find("});").unwrap()];
+    let select = handler
+        .find("selected=f.dataset.p;")
+        .expect("click sets the selection");
+    let after = &handler[select + "selected=f.dataset.p;".len()..];
     assert!(
-        page.contains("f.onclick=()=>{selected=p;infoPhoto();draw();}"),
-        "photo click must call infoPhoto() before draw()"
+        after.starts_with("infoPhoto();"),
+        "photo click must call infoPhoto() before anything else: {handler}"
     );
-    let info = &page[page.find("function infoPhoto()").unwrap()..];
-    let info = &info[..info.find('}').unwrap()];
-    for id in ["i-name", "i-taken", "info-photo"] {
+    let before = &handler[..select];
+    for risky in ["classList", "draw(", "querySelector('figure.sel')"] {
         assert!(
-            info.contains(id) || page.contains(&format!("$('{id}')")),
-            "{id}"
+            !before.contains(risky),
+            "{risky} runs before the selection and infoPhoto(): {handler}"
         );
     }
+    assert!(!after.contains("draw("), "a click must not redraw the grid");
 }
 
 /// Taste gate v1 FIX-2: photos the browser cannot show get a placeholder
@@ -555,6 +586,35 @@ fn library_rows(page: &str) -> Vec<(Vec<(String, String)>, String)> {
         .collect()
 }
 
+/// The words of a script with its `//` and `/* */` comments removed, split
+/// on anything that is not a letter, digit or underscore.
+fn script_words(script: &str) -> std::collections::BTreeSet<&str> {
+    let mut code = Vec::new();
+    let mut rest = script;
+    while !rest.is_empty() {
+        let line = rest.find("//");
+        let block = rest.find("/*");
+        let (cut, end) = match (line, block) {
+            (Some(l), b) if b.is_none_or(|b| l < b) => {
+                // `//` inside a URL string (http://) is not a comment.
+                if rest[..l].ends_with(':') {
+                    (l + 2, l + 2)
+                } else {
+                    (l, rest[l..].find('\n').map_or(rest.len(), |n| l + n))
+                }
+            }
+            (_, Some(b)) => (b, rest[b..].find("*/").map_or(rest.len(), |n| b + n + 2)),
+            _ => (rest.len(), rest.len()),
+        };
+        code.push(&rest[..cut]);
+        rest = &rest[end..];
+    }
+    code.iter()
+        .flat_map(|c| c.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
 /// FIX-4, structural (R4): Places and Faces are LIBRARY rows that carry the
 /// `disabled` attribute and no `data-s`, there is no view for them, and the
 /// script never refers to them, so nothing can open them.
@@ -585,8 +645,11 @@ fn places_and_faces_are_disabled_not_built_yet_rows() {
     // No section, and not a word about them in the script.
     let lower = page.to_ascii_lowercase();
     let script = &lower[lower.rfind("<script>").unwrap()..];
+    let words = script_words(script);
     for word in ["places", "faces"] {
-        assert!(!script.contains(word), "script refers to {word}");
+        // Whole words in code and strings; comments and words such as
+        // "replaces" do not count.
+        assert!(!words.contains(word), "script refers to {word}");
         assert!(
             !lower.contains(&format!("id=\"{word}\"")),
             "{word} view exists"

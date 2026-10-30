@@ -249,7 +249,7 @@ function blockObs(){if(!bObs)bObs=new IntersectionObserver(es=>{for(const x of e
 // closures), and selecting only moves the highlight: redrawing would
 // rebuild every tile already scrolled past in a single frame.
 $('grid').addEventListener('click',e=>{const f=e.target.closest('figure[data-p]');if(!f||!$('grid').contains(f))return;
- const o=$('grid').querySelector('figure.sel');if(o)o.classList.remove('sel');selected=f.dataset.p;f.classList.add('sel');infoPhoto();});
+ selected=f.dataset.p;infoPhoto();const o=$('grid').querySelector('figure.sel');if(o)o.classList.remove('sel');f.classList.add('sel');});
 // Tiles go in a few hundred per frame so no single frame does a whole page.
 const GRID_STEP=200;
 function addTiles(n){const more=$('grid-more');
