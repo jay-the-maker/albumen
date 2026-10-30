@@ -166,27 +166,28 @@ impl LibraryView {
             ..Default::default()
         };
         let mut when: Vec<(Option<Box<str>>, bool)> = Vec::new();
-        let (files, bytes) = library_items(lib, files, cache.as_deref(), cached, &mut |files, item| {
-            v.push(&item);
-            when.push((
-                item["taken"].as_str().map(Into::into),
-                item["preview"] != false,
-            ));
-            if v.len() == FIRST_PAGE {
-                let mut early = LibraryView {
-                    generation,
-                    library: v.library.clone(),
-                    files,
-                    records: v.records.clone(),
-                    record_ends: v.record_ends.clone(),
-                    paths: v.paths.clone(),
-                    path_ends: v.path_ends.clone(),
-                    ..Default::default()
-                };
-                early.events = Vec::new();
-                partial(early);
-            }
-        });
+        let (files, bytes) =
+            library_items(lib, files, cache.as_deref(), cached, &mut |files, item| {
+                v.push(&item);
+                when.push((
+                    item["taken"].as_str().map(Into::into),
+                    item["preview"] != false,
+                ));
+                if v.len() == FIRST_PAGE {
+                    let mut early = LibraryView {
+                        generation,
+                        library: v.library.clone(),
+                        files,
+                        records: v.records.clone(),
+                        record_ends: v.record_ends.clone(),
+                        paths: v.paths.clone(),
+                        path_ends: v.path_ends.clone(),
+                        ..Default::default()
+                    };
+                    early.events = Vec::new();
+                    partial(early);
+                }
+            });
         v.files = files;
         v.image_bytes = bytes;
         v.events = event_indices(&when);
