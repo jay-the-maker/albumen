@@ -508,8 +508,8 @@ fn places_and_faces_are_disabled_not_built_yet_rows() {
 
 /// R1: Info shows a camera time as written and says it has no zone; only a
 /// time with an offset is converted to this computer's zone.
-/// R2: Backup health converts the CLI's UTC stamps to local time with a zone
-/// and uses the dark chrome. (Behaviour runs in scripts/gui-behaviour.mjs.)
+/// R2: Backup health shows the CLI's own stamps, local time with a numeric
+/// offset ("UTC-7"), and uses the dark chrome. (Behaviour runs in scripts/gui-behaviour.mjs.)
 #[test]
 fn times_are_labelled_honestly_and_health_is_dark() {
     let work = tempfile::tempdir().unwrap();
@@ -521,7 +521,11 @@ fn times_are_labelled_honestly_and_health_is_dark() {
     assert!(page.contains(".dark .card{"));
     assert!(page.contains("#info{overflow:auto;min-height:0;background:#2f3136;"));
     assert!(!page.contains("#info{overflow:auto;min-height:0;background:#fff"));
-    assert!(page.contains("localStamps(st.summary||'')"));
+    assert!(page.contains("$('health-summary').textContent=st.summary||'';"));
+    assert!(
+        !page.contains("localStamps"),
+        "health re-labels the CLI's times"
+    );
     let (_, library) = get(&addr, "/api/library");
     let library: serde_json::Value = serde_json::from_str(&library).unwrap();
     for i in library["images"].as_array().unwrap() {
@@ -549,7 +553,11 @@ fn product_lead_asks_after_fix_7_are_in_the_page() {
     let info = page.find("<div id=\"info\"").unwrap();
     let show = page.find("<div id=\"show\"").unwrap();
     assert!(app < info && info < show);
-    assert!(page.contains("timeZoneName:'short'"), "times carry a zone");
+    assert!(
+        page.contains("const z=o==0?'UTC':'UTC'+"),
+        "times carry a numeric offset"
+    );
+    assert!(!page.contains("timeZoneName"), "no zone abbreviations");
     assert!(page.contains("' KB'") && page.contains("' MB'"));
     assert!(!page.contains("im.bytes+' bytes'"));
     assert!(page.contains("'RAW file: '+base(im.raw)"));

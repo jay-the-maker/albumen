@@ -5,8 +5,9 @@
 //
 //   node scripts/gui-behaviour.mjs target/debug/albumen
 //
-// Env: CHROME (default google-chrome). Chrome runs with TZ=America/Los_Angeles
-// so the UTC-to-local checks are meaningful. Exits non-zero on any failure.
+// Env: CHROME (default google-chrome). The GUI server and Chrome run with
+// TZ=America/Los_Angeles so the local-time checks are meaningful (Windows
+// ignores TZ and uses the PC's zone). Exits non-zero on any failure.
 import {spawn} from 'node:child_process';
 import {mkdtempSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -19,7 +20,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const kids = [];
 const done = code => { for (const k of kids) k.kill(); process.exit(code); };
 
-const gui = spawn(bin, ['gui', '--demo', '--no-open', '--port', '0', '--work', work], {stdio: ['ignore', 'pipe', 'inherit']});
+const gui = spawn(bin, ['gui', '--demo', '--no-open', '--port', '0', '--work', work], {stdio: ['ignore', 'pipe', 'inherit'], env: {...process.env, TZ: 'America/Los_Angeles'}});
 kids.push(gui);
 const url = await new Promise((res, rej) => {
   const rl = createInterface({input: gui.stdout});
@@ -122,15 +123,15 @@ try {
   check('R1: camera time says it has no zone', taken == 'Taken 2015-09-03 18:45 (camera clock, no time zone)', taken);
   await ev(`(()=>{const s=$('search');s.value='';s.dispatchEvent(new Event('input'));})()`);
 
-  // R2: Backup health is dark and shows local time with a zone, never UTC.
+  // R2: Backup health is dark and shows local time with a numeric offset.
   await click('aside button[data-s="health"]');
   await until(`document.querySelectorAll('#cards .card').length==4`, 'health cards');
   check('R2: health uses the dark chrome', await ev(`$('main').classList.contains('dark')`), false);
   const bg = await ev(`getComputedStyle(document.querySelector('#cards .card')).backgroundColor`);
   check('R2: cards are dark, not white', bg != 'rgb(255, 255, 255)', bg);
   const shown = await ev(`[...document.querySelectorAll('#cards .card .txt')].map(t=>t.innerText).join('\\n')+'\\n'+$('health-summary').innerText`);
-  check('R2: no UTC stamp left on the health screen', !/ UTC\b/.test(shown), shown);
-  check('R2: stale time shown in local zone', /\d{4}-\d\d-\d\d \d\d:\d\d P[DS]T/.test(shown), shown);
+  check('R2: no zone abbreviation on the health screen', !/\b[A-Z]{2,4}T\b/.test(shown), shown);
+  check('R2: stale time shown with a numeric offset', /\d{4}-\d\d-\d\d \d\d:\d\d UTC-[78]\b/.test(shown), shown);
   // R13 / S1: backups show their folder name, never a temp path or an invented drive name.
   const names = await ev(`[...document.querySelectorAll('#side-dests span, #cards .card h3')].map(e=>e.textContent)`);
   check('R13: sidebar and cards show folder names only', names.length == 8 && names.every(n => !/[\\/:]/.test(n) && !/temp|tmp/i.test(n)), names);
