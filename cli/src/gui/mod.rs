@@ -365,7 +365,9 @@ fn refresh_thumbs(server: &Arc<Server>) {
         let files = if s.config.demo {
             library_files(lib)
         } else {
-            library_files_indexed(lib, &s.found, &s.found_paths, &s.index_note)
+            let files = library_files_indexed(lib, &s.found, &s.found_paths, &s.index_note);
+            retry_pending_save(&s);
+            files
         };
         let Some(cache) = live::cache_dir(lib) else {
             publish_library(&s, gen, files, &Default::default());
@@ -390,6 +392,41 @@ fn refresh_thumbs(server: &Arc<Server>) {
                 *view = ThumbView { generation: gen };
             }
         }
+    });
+}
+
+/// One background retry loop at a time for an index save left pending.
+static RETRYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const RETRY_TRIES: u32 = 120;
+
+/// D1(b): when the index save was left pending (another writer kept the
+/// lock), retry it in the background every [`RETRY_EVERY`] until it lands,
+/// so a save is never lost and no request ever waits on the lock. The page
+/// shows one quiet line (`/api/index` "pending") until then.
+fn retry_pending_save(s: &Arc<Server>) {
+    use std::sync::atomic::Ordering;
+    if s.index_note.lock().unwrap().is_none() || RETRYING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let s = Arc::clone(s);
+    std::thread::spawn(move || {
+        let dir = albumen_ingest::index::default_index_dir();
+        for _ in 0..RETRY_TRIES {
+            std::thread::sleep(RETRY_EVERY);
+            match albumen_ingest::index::LibraryIndex::open(&s.config.library, dir.as_deref()) {
+                Ok(index) => {
+                    let still = index.save_error.clone();
+                    let done = still.is_none();
+                    *s.index_note.lock().unwrap() = still;
+                    if done {
+                        break;
+                    }
+                }
+                Err(err) => *s.index_note.lock().unwrap() = Some(err.to_string()),
+            }
+        }
+        RETRYING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -575,6 +612,13 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             // While a first walk runs: the photos found so far, in the order
             // found (append-only, so tiles already shown never move).
             let body = found_json(server).to_string();
+            http::respond(&mut stream, 200, "application/json", body.as_bytes())
+        }
+        ("GET", "/api/index") => {
+            // X4: whether an index save is still owed (retried in the
+            // background); never waits on the index or its lock.
+            let note = server.index_note.lock().unwrap().clone();
+            let body = serde_json::json!({ "pending": note.is_some(), "detail": note }).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/library") => {

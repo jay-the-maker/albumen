@@ -591,3 +591,65 @@ fn pending_save_lands_on_next_refresh() {
     let (_, saved) = read_saved_file(&file).unwrap();
     assert_eq!(sorted(saved), all, "a pending save was lost");
 }
+
+/// D1 condition (b): a writers' lock held past every retry (another albumen
+/// stuck mid-save, or any program holding `<key>.idx.lock`) never loses a
+/// save. The refresh still returns the new listing, the save stays pending
+/// (`save_error` set), and the next refresh after the lock is released
+/// writes it, even though nothing in the library changed in between.
+#[test]
+fn a_stuck_lock_leaves_the_save_pending_and_it_is_retried() {
+    let library = tempfile::tempdir().unwrap();
+    let index_dir = tempfile::tempdir().unwrap();
+    let mut all = make_library(library.path(), 300);
+    let mut index = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    let file = index_file(&index);
+    let (before_generation, _) = read_saved_file(&file).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open({
+            let mut name = file.as_os_str().to_owned();
+            name.push(".lock");
+            PathBuf::from(name)
+        })
+        .unwrap();
+    lock.lock().unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    std::fs::write(library.path().join("d03/stuck.jpg"), b"").unwrap();
+    all.insert("d03/stuck.jpg".into());
+    let t = Instant::now();
+    index.refresh().unwrap();
+    let held_ms = t.elapsed().as_millis();
+    assert!(
+        index.save_error.is_some(),
+        "a held lock must leave the save pending"
+    );
+    assert_eq!(
+        sorted(index.paths().to_vec()),
+        all,
+        "the listing is still current"
+    );
+    let (generation, saved) = read_saved_file(&file).unwrap();
+    assert_eq!(
+        generation, before_generation,
+        "nothing was written under the lock"
+    );
+    assert!(!sorted(saved).contains("d03/stuck.jpg"));
+    // A second refresh while still held keeps it pending, not dropped.
+    index.refresh().unwrap();
+    assert!(index.save_error.is_some(), "still pending while held");
+    lock.unlock().unwrap();
+    drop(lock);
+    // Nothing changed in the library; the pending save still goes out.
+    index.refresh().unwrap();
+    assert_eq!(index.save_error, None, "the retried save succeeds");
+    let (after_generation, saved) = read_saved_file(&file).unwrap();
+    assert!(after_generation > before_generation);
+    assert_eq!(sorted(saved), all, "a stuck lock lost a save");
+    println!(
+        "M6 D1b held_refresh_ms={held_ms} generation {before_generation} -> {after_generation} \
+         saved_after_release=true"
+    );
+}
