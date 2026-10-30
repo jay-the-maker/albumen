@@ -19,7 +19,7 @@ aside button.on{background:var(--accent);color:#fff}aside button.soon{opacity:.5
 h1{font-size:20px;font-weight:600;margin:0}.sub{color:var(--mute);margin:0 0 16px}.dark .sub,.dark .count{color:#a9adb5}
 .back{border:0;background:none;color:inherit;font:inherit;cursor:pointer;opacity:.8}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--thumb),1fr));gap:14px;margin-bottom:20px}
-.grid figure{margin:0;cursor:default}.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:3px;display:block;background:#555;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.grid figure{margin:0;cursor:default;position:relative}.grid .live{position:absolute;top:6px;left:6px;font:600 10px/1 system-ui,sans-serif;letter-spacing:.06em;padding:3px 6px;border-radius:9px;background:rgba(255,255,255,.85);color:#222;border:0;cursor:pointer}#i-live video{width:100%;margin-top:6px;border-radius:3px;background:#000}.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:3px;display:block;background:#555;box-shadow:0 1px 3px rgba(0,0,0,.4)}
 .grid .ph{width:100%;aspect-ratio:4/3;border-radius:3px;background:#4a4c52;color:#ccc;display:flex;align-items:center;justify-content:center;text-align:center;font-size:12px;padding:6px;box-sizing:border-box}.grid figure.sel .ph{outline:3px solid #f2c94c;outline-offset:2px}
 .grid figure.sel img{outline:3px solid #f2c94c;outline-offset:2px}
 .grid figcaption{font-size:12px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;opacity:.85}
@@ -119,7 +119,7 @@ details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,mo
 </div>
 </div>
 <div id="info" hidden>
-<div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p><p id="i-raw" hidden></p></div>
+<div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p><p id="i-raw" hidden></p><p id="i-note" hidden></p><div id="i-live" hidden><p id="i-live-file"></p><button id="i-play" type="button">Play Live Photo</button></div></div>
 <h3>Library</h3>
 <p>Albumen only reads this folder. Nothing in it is changed, moved or deleted.</p>
 <p><span class="lock">&#128274; read-only</span> <span id="lib-count"></span></p>
@@ -170,10 +170,13 @@ function visible(){const evs=curEvent?[curEvent]:lib.events;return evs.flatMap(e
 // HEIC and RAW are listed and counted like any photo; the browser cannot
 // show them yet, so they get a calm placeholder tile instead of an image.
 const canShow=p=>{const m=byPath(p);return !m||m.preview!==false;};
+// Plain words for any file the browser cannot show (spec AC3).
+const CANT="Can't preview this file here. Your original is kept unchanged.";
 const fmt=p=>{const m=byPath(p);return (m&&m.format)||'';};
 function figure(p,cap,sub){const f=document.createElement('figure');let i;
  if(canShow(p)){i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);}
- else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent='\u00a0\u2014 preview not available yet';i.append(b,m);}
+ else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent='\u00a0\u2014 '+base(p)+'. '+CANT;i.append(b,m);}
+ const lm=byPath(p);if(lm&&lm.live){const l=document.createElement('button');l.type='button';l.className='live';l.textContent='LIVE';l.title='Play the Live Photo';l.onclick=e=>{e.stopPropagation();selected=p;setInfo(true);draw();playLive();};f.append(l);}
  const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
@@ -226,8 +229,18 @@ function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=
  $('i-name').textContent=base(im.path);
  $('i-taken').textContent=!im.taken?'Date taken: not known':'Taken '+when(im.taken)+(im.taken.length<16||zoned(im.taken)?' (from '+im.taken_from+')':'');
  $('i-taken').title=im.taken?'From '+im.taken_from:'';
- $('i-size').textContent=human(im.bytes)+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false?' \u00b7 '+im.format+', preview not available yet':'');
- $('i-raw').hidden=!im.raw;$('i-raw').textContent=im.raw?'RAW file: '+base(im.raw)+' ('+human(im.raw_bytes||0)+')':'';}
+ $('i-size').textContent=human(im.bytes)+(im.raw?' \u00b7 RAW + JPEG':'')+(im.preview===false?' \u00b7 '+im.format+'. '+CANT:'');
+ $('i-raw').hidden=!im.raw;$('i-raw').textContent=im.raw?'RAW file: '+base(im.raw)+' ('+human(im.raw_bytes||0)+')':'';
+ $('i-note').hidden=!im.info;$('i-note').textContent=im.info||'';
+ $('i-live').hidden=!im.live;$('i-live').querySelectorAll('video').forEach(v=>v.remove());
+ $('i-live-file').textContent=im.live?'Live Photo movie: '+base(im.live)+' ('+human(im.live_bytes||0)+')':'';}
+// Live Photo: the movie plays only when asked, muted, from /video (the
+// original bytes; nothing is converted or written).
+function playLive(){const im=selected&&byPath(selected);if(!im||!im.live)return;
+ const box=$('i-live');box.querySelectorAll('video').forEach(v=>v.remove());
+ const v=document.createElement('video');v.muted=true;v.controls=true;v.playsInline=true;v.src='/video?p='+encodeURIComponent(im.live);
+ box.append(v);const pr=v.play();if(pr&&pr.catch)pr.catch(()=>{});}
+$('i-play').onclick=playLive;
 // Info is a fixed pane beside the grid, never over it.
 function setInfo(on){$('info').hidden=!on;document.querySelector('.app').classList.toggle('with-info',on);infoPhoto();}
 $('b-info').onclick=()=>setInfo($('info').hidden);

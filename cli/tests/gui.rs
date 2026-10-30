@@ -396,7 +396,7 @@ fn heic_and_raw_get_placeholder_tiles() {
     let work = tempfile::tempdir().unwrap();
     let (_gui, addr) = start(work.path());
     let (_, page) = get(&addr, "/");
-    assert!(page.contains("preview not available yet"));
+    assert!(page.contains("Can't preview this file here. Your original is kept unchanged."));
     assert!(page.contains("m.preview!==false"));
     let (_, library) = get(&addr, "/api/library");
     let library: serde_json::Value = serde_json::from_str(&library).unwrap();

@@ -19,6 +19,7 @@ use albumen_ingest::{IngestError, SourceRoot};
 
 pub mod demo;
 pub mod http;
+pub mod live;
 pub mod taken;
 
 const PAGE: &str = include_str!("page.html");
@@ -210,6 +211,14 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             let body = library_json(&server.config.library).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
+        ("GET", "/video") => {
+            // A Live Photo's movie, bytes as on disk. No transcode.
+            let rel = http::query_param(&req.target, "p").unwrap_or_default();
+            match live::read_video(&server.config.library, &rel) {
+                Some((bytes, mime)) => http::respond(&mut stream, 200, mime, &bytes),
+                None => http::respond(&mut stream, 404, "text/plain", b"not found"),
+            }
+        }
         ("GET", "/api/status") => {
             let body = status_json(&server.config, SystemTime::now()).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
@@ -341,7 +350,66 @@ fn is_photo(rel: &str) -> bool {
 }
 
 pub fn library_json(library: &Path) -> serde_json::Value {
+    let cache = live::cache_dir(library);
+    library_json_with(library, cache.as_deref())
+}
+
+/// `library_json` with an explicit preview cache folder (None: no cache).
+pub fn library_json_with(library: &Path, cache: Option<&Path>) -> serde_json::Value {
     let files = library_files(library);
+    // Live Photos: a still and a movie with the same folder and stem AND the
+    // same ContentIdentifier are one photo. Same stem without a matching ID
+    // stays two items, each with an Info line saying why.
+    let mut mov_of: std::collections::HashMap<String, String> = Default::default();
+    for rel in files.iter().filter(|r| live::is_video(r)) {
+        if let Some(k) = pair_key(rel) {
+            mov_of.entry(k).or_insert_with(|| rel.clone());
+        }
+    }
+    let candidates: Vec<(&String, &String)> = files
+        .iter()
+        .filter(|r| live::is_still(r))
+        .filter_map(|r| pair_key(r).and_then(|k| mov_of.get(&k)).map(|m| (r, m)))
+        .collect();
+    let mut probe: Vec<&str> = candidates
+        .iter()
+        .flat_map(|(s, m)| [s.as_str(), m.as_str()])
+        .collect();
+    probe.sort();
+    probe.dedup();
+    let ids = live::identifiers(library, &probe, cache);
+    let mut live_of: std::collections::HashMap<String, String> = Default::default();
+    let mut info: std::collections::HashMap<String, String> = Default::default();
+    let mut merged_mov: std::collections::HashSet<String> = Default::default();
+    let name = |rel: &str| rel.rsplit('/').next().unwrap_or(rel).to_string();
+    for (still, mov) in candidates {
+        let a = ids.get(still.as_str()).cloned().flatten();
+        let b = ids.get(mov.as_str()).cloned().flatten();
+        if a.is_some() && a == b && !merged_mov.contains(mov) {
+            live_of.insert(still.clone(), mov.clone());
+            merged_mov.insert(mov.clone());
+        } else {
+            let line = match (&a, &b) {
+                (Some(_), Some(_)) => format!(
+                    "Not joined as a Live Photo: {} and {} have different Live Photo IDs.",
+                    name(still),
+                    name(mov)
+                ),
+                (None, _) => format!(
+                    "Not joined as a Live Photo with {}: {} has no Live Photo ID.",
+                    name(mov),
+                    name(still)
+                ),
+                (Some(_), None) => format!(
+                    "Not joined as a Live Photo with {}: {} has no Live Photo ID.",
+                    name(still),
+                    name(mov)
+                ),
+            };
+            info.insert(still.clone(), line.clone());
+            info.entry(mov.clone()).or_insert(line);
+        }
+    }
     let mut bytes = 0u64;
     // RAW + JPEG pairs (same folder, same stem): one photo, shown as the JPEG.
     let mut raw_of: std::collections::HashMap<String, String> = Default::default();
@@ -363,7 +431,11 @@ pub fn library_json(library: &Path) -> serde_json::Value {
     };
     let items: Vec<serde_json::Value> = files
         .iter()
-        .filter(|rel| is_photo(rel) && !paired_raw.contains(*rel))
+        .filter(|rel| {
+            (is_photo(rel) || live::is_video(rel))
+                && !paired_raw.contains(*rel)
+                && !merged_mov.contains(*rel)
+        })
         .map(|rel| {
             let len = size(rel);
             bytes += len;
@@ -400,6 +472,18 @@ pub fn library_json(library: &Path) -> serde_json::Value {
                 item["raw_bytes"] = raw_len.into();
                 item["format"] = "RAW + JPEG".into();
                 item["raw"] = raw.as_str().into();
+            }
+            if live::is_video(rel) {
+                item["video"] = true.into();
+            }
+            if let Some(mov) = live_of.get(rel.as_str()) {
+                let mov_len = size(mov);
+                bytes += mov_len;
+                item["live"] = mov.as_str().into();
+                item["live_bytes"] = mov_len.into();
+            }
+            if let Some(line) = info.get(rel.as_str()) {
+                item["info"] = line.as_str().into();
             }
             item
         })
@@ -974,5 +1058,214 @@ mod tests {
         assert_eq!(ev[0]["key"], "b.jpg");
         assert_eq!(ev[0]["photos"][0], "a.dng");
         assert_eq!(ev[1]["key"], "c.nef", "placeholder only when none can show");
+    }
+
+    // ---- M5 Live viewing (spec 1AyJZOLnjRe-V0gQp9ll4lfgKV9Pv4bvs) ----
+
+    fn live_library(lib: &Path) {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+        let copy = |from: &str, to: &str| {
+            let bytes = std::fs::read(fixtures.join(from)).unwrap();
+            if let Some(dir) = Path::new(to).parent() {
+                std::fs::create_dir_all(lib.join(dir)).unwrap();
+            }
+            let mut f = albumen_ingest::dest::create_file(&lib.join(to)).unwrap();
+            f.write_all(&bytes).unwrap();
+        };
+        copy("live-photo/IMG_0005.heic", "roll/IMG_0005.HEIC");
+        copy("live-photo/IMG_0005.mov", "roll/IMG_0005.MOV");
+        // Same stem, but the still carries no Live Photo ID: two items.
+        copy("heic/IMG_0002.heic", "roll/IMG_0006.heic");
+        copy("live-photo/IMG_0005.mov", "roll/IMG_0006.mov");
+        // A movie with no still at all.
+        copy("live-photo/IMG_0005.mov", "clips/IMG_0007.mov");
+    }
+
+    /// Path, length, mtime and SHA-256 of every file under `root`.
+    fn snapshot(root: &Path) -> Vec<(String, u64, SystemTime, String)> {
+        use sha2::Digest as _;
+        let mut out = Vec::new();
+        let mut todo = vec![root.to_path_buf()];
+        while let Some(dir) = todo.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let e = e.unwrap();
+                let p = e.path();
+                let m = std::fs::symlink_metadata(&p).unwrap();
+                if m.is_dir() {
+                    todo.push(p);
+                    continue;
+                }
+                let bytes = std::fs::read(&p).unwrap();
+                out.push((
+                    p.strip_prefix(root).unwrap().to_string_lossy().into_owned(),
+                    m.len(),
+                    m.modified().unwrap(),
+                    format!("{:x}", sha2::Sha256::digest(&bytes)),
+                ));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// AC1: a matched still + movie is one item with a LIVE movie; a
+    /// same-stem pair without a matching ID stays two items, both explained.
+    #[test]
+    fn live_photo_pairs_by_content_identifier_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
+        live_library(&lib);
+        let v = library_json_with(&lib, None);
+        let images = v["images"].as_array().unwrap();
+        let paths: Vec<&str> = images.iter().map(|i| i["path"].as_str().unwrap()).collect();
+        assert_eq!(
+            paths,
+            [
+                "clips/IMG_0007.mov",
+                "roll/IMG_0005.HEIC",
+                "roll/IMG_0006.heic",
+                "roll/IMG_0006.mov"
+            ],
+            "{v}"
+        );
+        let find = |p: &str| images.iter().find(|i| i["path"] == p).unwrap();
+        let pair = find("roll/IMG_0005.HEIC");
+        assert_eq!(pair["live"], "roll/IMG_0005.MOV");
+        assert_eq!(pair["live_bytes"], 12865);
+        assert!(pair.get("info").is_none(), "{pair}");
+        for p in ["roll/IMG_0006.heic", "roll/IMG_0006.mov"] {
+            let it = find(p);
+            assert!(it.get("live").is_none(), "{it}");
+            assert_eq!(
+                it["info"],
+                "Not joined as a Live Photo with IMG_0006.mov: IMG_0006.heic has no Live Photo ID."
+            );
+        }
+        let lone = find("clips/IMG_0007.mov");
+        assert_eq!(lone["video"], true);
+        assert_eq!(lone["preview"], false);
+        assert_eq!(lone["format"], "MOV");
+        assert!(lone.get("info").is_none());
+        let total: u64 = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 4, "the Live pair counts as one photo");
+    }
+
+    /// AC1: two movies whose IDs differ from the still are not joined.
+    #[test]
+    fn different_identifiers_stay_apart_with_an_info_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+        let still = std::fs::read(fixtures.join("live-photo/IMG_0005.heic")).unwrap();
+        let mut movie = std::fs::read(fixtures.join("live-photo/IMG_0005.mov")).unwrap();
+        // Synthetic edit of a copy: change one hex digit of the movie's ID.
+        let key = b"com.apple.quicktime.content.identifier";
+        let at = movie.windows(key.len()).position(|w| w == key).unwrap();
+        let uuid = b"B4E3C1A0-7F2D-4C8A-9E11-0A1B2C3D4E5F";
+        let u = at
+            + movie[at..]
+                .windows(uuid.len())
+                .position(|w| w == uuid)
+                .unwrap();
+        movie[u] = b'C';
+        for (name, bytes) in [("IMG_0009.heic", &still), ("IMG_0009.mov", &movie)] {
+            let mut f = albumen_ingest::dest::create_file(&lib.join(name)).unwrap();
+            f.write_all(bytes).unwrap();
+        }
+        let v = library_json_with(lib, None);
+        let images = v["images"].as_array().unwrap();
+        assert_eq!(images.len(), 2, "{v}");
+        for i in images {
+            assert!(i.get("live").is_none());
+            assert_eq!(
+                i["info"],
+                "Not joined as a Live Photo: IMG_0009.heic and IMG_0009.mov have different Live Photo IDs."
+            );
+        }
+    }
+
+    /// AC2: the preview cache lives under ALBUMEN_HOME, is disposable, and
+    /// rebuilds with the same result after it is moved away.
+    #[test]
+    fn preview_cache_is_outside_the_library_and_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let home = dir.path().join("home");
+        std::fs::create_dir(&lib).unwrap();
+        live_library(&lib);
+        let cache = live::cache_dir_in(&home, &lib).unwrap();
+        assert!(cache.starts_with(&home));
+        let first = library_json_with(&lib, Some(&cache));
+        let file = cache.join("live-ids-v1.json");
+        assert!(file.is_file(), "cache written under ALBUMEN_HOME");
+        let warm = library_json_with(&lib, Some(&cache));
+        assert_eq!(first["images"], warm["images"]);
+        // Move the cache away (never deleted) and rebuild.
+        std::fs::rename(&cache, dir.path().join("moved-away")).unwrap();
+        let rebuilt = library_json_with(&lib, Some(&cache));
+        assert_eq!(first["images"], rebuilt["images"]);
+        assert!(file.is_file(), "cache rebuilt");
+        // A cache inside the library is refused, and the listing still works.
+        assert!(live::cache_dir_in(&lib.join(".albumen"), &lib).is_none());
+    }
+
+    /// AC4: listing, caching and serving leave every original bit-exact
+    /// (same names, sizes, mtimes and SHA-256) and add nothing to the library.
+    #[test]
+    fn live_viewing_never_writes_to_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let home = dir.path().join("home");
+        std::fs::create_dir(&lib).unwrap();
+        live_library(&lib);
+        let before = snapshot(&lib);
+        let cache = live::cache_dir_in(&home, &lib).unwrap();
+        for _ in 0..2 {
+            let _ = library_json_with(&lib, Some(&cache));
+        }
+        let _ = library_json_with(&lib, None);
+        let (movie, _) = live::read_video(&lib, "roll/IMG_0005.MOV").unwrap();
+        assert_eq!(movie.len(), 12865);
+        assert!(read_image(&lib, "roll/IMG_0005.HEIC").is_none());
+        assert_eq!(before, snapshot(&lib));
+    }
+
+    /// AC5: /video serves the original movie bytes unchanged, and the page
+    /// plays it only on request, muted, with controls.
+    #[test]
+    fn live_movie_is_served_as_is_and_played_muted_on_request() {
+        let dir = tempfile::tempdir().unwrap();
+        live_library(dir.path());
+        let want = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/live-photo/IMG_0005.mov"),
+        )
+        .unwrap();
+        let (bytes, mime) = live::read_video(dir.path(), "roll/IMG_0005.MOV").unwrap();
+        assert_eq!(bytes, want, "no transcode");
+        assert_eq!(mime, "video/mp4");
+        assert!(live::read_video(dir.path(), "roll/IMG_0005.HEIC").is_none());
+        assert!(live::read_video(dir.path(), "roll/../roll/IMG_0005.MOV").is_none());
+        assert!(PAGE.contains("'/video?p='"));
+        assert!(PAGE.contains("v.muted=true;v.controls=true"));
+        assert!(PAGE.contains("l.textContent='LIVE'"));
+        assert!(!PAGE.contains("autoplay"));
+    }
+
+    /// AC3: one plain sentence for anything the browser cannot show, with the
+    /// file name and type; the old "not available yet" copy is gone.
+    #[test]
+    fn cant_preview_copy_names_the_file_and_type() {
+        assert!(PAGE.contains(
+            "const CANT=\"Can't preview this file here. Your original is kept unchanged.\";"
+        ));
+        assert!(PAGE.contains("'\\u00a0\\u2014 '+base(p)+'. '+CANT"));
+        assert!(PAGE.contains("im.format+'. '+CANT"));
+        assert!(!PAGE.contains("preview not available yet"));
     }
 }
