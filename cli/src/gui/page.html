@@ -160,7 +160,12 @@ async function job(kind,dest,on){
 function sq(s){return s&&/^[A-Za-z0-9\/._\-:=+@]+$/.test(s)?s:"'"+s.replace(/'/g,"'\\''")+"'"}
 function q(s){return /[\s"'$`\\]/.test(s)?'"'+s.replace(/(["\\$`])/g,'\\$1')+'"':s}
 // Library: Photos grouped under their Event, Events as skimmable tiles.
-const byPath=p=>lib.images.find(i=>i.path==p);
+// One lookup table per listing (a linear find per tile froze the page at 380k).
+let bpSrc=null,bpMap=null;
+const byPath=p=>{if(bpSrc!==lib.images){bpSrc=lib.images;bpMap=new Map();for(const i of lib.images)if(!bpMap.has(i.path))bpMap.set(i.path,i);}return bpMap.get(p);};
+// The grid is paged: only the first gridLimit tiles are in the page, and
+// more are added as the end of the grid scrolls into view.
+const GRID_PAGE=600;let gridLimit=GRID_PAGE,moreObs=null;
 // Search matches the shown file and, for a RAW + JPEG pair, the RAW's name.
 function match(p){const t=$('search').value.trim().toLowerCase();if(!t)return true;const m=byPath(p);
  return [p,m&&m.raw].filter(Boolean).some(x=>base(x).toLowerCase().includes(t));}
@@ -183,13 +188,26 @@ function figure(p,cap,sub){const f=document.createElement('figure');let i;
  else{i=document.createElement('div');i.className='ph';const b=document.createElement('span');b.textContent=fmt(p);const m=document.createElement('span');m.className='more';m.textContent=CANT;i.append(b,m);}
  const lm=byPath(p);if(lm&&lm.live){const l=document.createElement('button');l.type='button';l.className='live';l.textContent='LIVE';l.title='Play the Live Photo';l.onclick=e=>{e.stopPropagation();selected=p;setInfo(true);draw();playLive();};f.append(l);}
  const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
+// Appends the next n tiles, never rebuilding what is already there. Each
+// page of tiles is its own block that the browser skips drawing while it is
+// off screen, so a 380k library scrolls without stalls.
+let gs=null;
+function addTiles(n){const more=$('grid-more');
+ while(n>0&&gs.gi<gs.evs.length){const {e,ps}=gs.evs[gs.gi];
+  if(gs.gj==0&&!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;more?more.before(h):$('grid').append(h);}
+  const g=document.createElement('div');g.className='grid';g.style.contentVisibility='auto';g.style.containIntrinsicSize='auto 1200px';
+  const k=Math.min(n,ps.length-gs.gj);
+  for(const p of ps.slice(gs.gj,gs.gj+k)){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
+  more?more.before(g):$('grid').append(g);gs.gj+=k;gs.done+=k;n-=k;if(gs.gj>=ps.length){gs.gi++;gs.gj=0;}}}
 function draw(){
  const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
- $('grid').innerHTML='';
- for(const {e,ps} of evs){if(!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;$('grid').append(h);}
-  const g=document.createElement('div');g.className='grid';
-  for(const p of ps){const f=figure(p,canShow(p)?stem(p):base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;infoPhoto();draw();};g.append(f);}
-  $('grid').append(g);}
+ $('grid').innerHTML='';if(moreObs){moreObs.disconnect();moreObs=null;}
+ let total=0;for(const x of evs)total+=x.ps.length;
+ gs={evs,gi:0,gj:0,done:0,total};addTiles(gridLimit);
+ if(total>gs.done){const b=document.createElement('button');b.type='button';b.className='plain';b.id='grid-more';
+  const more=()=>{gridLimit+=GRID_PAGE;addTiles(GRID_PAGE);if(gs.done>=total){moreObs&&moreObs.disconnect();b.remove();}else{$('grid').append(b);b.textContent='Show more ('+(total-gs.done)+' more)';}};
+  b.textContent='Show more ('+(total-gs.done)+' more)';b.onclick=more;$('grid').append(b);
+  if(window.IntersectionObserver){moreObs=new IntersectionObserver(es=>{if(es.some(x=>x.isIntersecting))more();},{rootMargin:'800px'});moreObs.observe(b);}}
  $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
  $('photos-count').textContent=countText(evs.flatMap(x=>x.ps));
  $('event-grid').innerHTML='';
@@ -198,11 +216,11 @@ function draw(){
   const shown=ps.filter(canShow);
   if(im&&shown.length){f.onmousemove=ev=>{const r=im.getBoundingClientRect();const k=Math.min(shown.length-1,Math.max(0,Math.floor((ev.clientX-r.left)/r.width*shown.length)));im.src=img(shown[k]);};
   f.onmouseleave=()=>{im.src=img(e.key);};}
-  f.ondblclick=()=>{curEvent=e;show('photos');};
+  f.ondblclick=()=>{curEvent=e;gridLimit=GRID_PAGE;show('photos');};
   $('event-grid').append(f);}
  $('events-count').textContent=lib.events.length+(lib.events.length==1?' event':' events');}
 $('to-events').onclick=()=>show('events');
-$('search').oninput=draw;
+$('search').oninput=()=>{gridLimit=GRID_PAGE;draw();};
 // At the smallest sizes captions hide and placeholders say only the format.
 function zoom(v){document.documentElement.style.setProperty('--thumb',v+'px');document.documentElement.classList.toggle('mini',Number(v)<130);try{localStorage.setItem('albumen-zoom',v);}catch(e){}}
 $('zoom').oninput=()=>zoom($('zoom').value);
