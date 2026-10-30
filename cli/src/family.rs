@@ -204,6 +204,13 @@ pub enum Command {
         /// When set with `--apply`, append a signed snapshot in this member's log.
         #[arg(long)]
         key: Option<PathBuf>,
+        /// Print a short text summary (members, photos per member, revoked)
+        /// instead of JSON. The GUI's Family view shows these same lines.
+        #[arg(long, conflicts_with = "key")]
+        summary: bool,
+        /// With `--summary`: also say how many photos this member sees and hides.
+        #[arg(long, requires = "summary")]
+        viewer: Option<String>,
         #[arg(long)]
         apply: bool,
         #[arg(long)]
@@ -515,9 +522,15 @@ pub fn run(command: Command) -> Result<(), IngestError> {
         Command::Manifest {
             library,
             key,
+            summary,
+            viewer,
             apply,
             execute,
         } => {
+            if summary {
+                print!("{}", summary_text(&library, viewer.as_deref())?);
+                return Ok(());
+            }
             if let Some(key) = key {
                 let signing = family::load_key(&key)?;
                 if apply || execute {
@@ -599,6 +612,92 @@ pub fn run(command: Command) -> Result<(), IngestError> {
             Ok(())
         }
     }
+}
+
+/// The words `albumen family manifest --summary` prints, one line each.
+///
+/// The GUI's read-only Family view shows exactly this text, so the two never
+/// drift. A revoked member's photos stay and are still counted.
+pub fn summary_text(library: &Path, viewer: Option<&str>) -> Result<String, IngestError> {
+    let json = family::manifest_json(library)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&json).map_err(|err| IngestError::Family {
+            message: format!("family manifest: {err}"),
+        })?;
+    let list = |key: &str| -> Vec<serde_json::Value> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let text = |entry: &serde_json::Value, key: &str| -> String {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let members: Vec<_> = list("members")
+        .into_iter()
+        .filter(|m| m.get("admitted").and_then(serde_json::Value::as_bool) == Some(true))
+        .collect();
+    let objects = list("objects");
+    let revoked = members
+        .iter()
+        .filter(|m| m.get("revoked").and_then(serde_json::Value::as_bool) == Some(true))
+        .count();
+    let photos = |n: usize| {
+        if n == 1 {
+            "1 photo".to_string()
+        } else {
+            format!("{n} photos")
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&format!("family library {}\n", text(&value, "library_id")));
+    out.push_str(&format!(
+        "{} members: {} active, {revoked} revoked\n",
+        members.len(),
+        members.len() - revoked
+    ));
+    out.push_str(&format!(
+        "{} in all members' folders\n",
+        photos(objects.len())
+    ));
+    for member in &members {
+        let id = text(member, "id");
+        let short: String = id.chars().take(8).collect();
+        let name = text(member, "name");
+        let label = if name.is_empty() { short.clone() } else { name };
+        let count = objects.iter().filter(|o| text(o, "member") == id).count();
+        let mut line = format!("{label} ({short}): {}", photos(count));
+        if member.get("revoked").and_then(serde_json::Value::as_bool) == Some(true) {
+            line.push_str(", revoked; their photos stay");
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if let Some(viewer) = viewer {
+        let viewer = family::canonical_member_id(viewer)?;
+        let hidden = list("hides")
+            .iter()
+            .filter(|h| {
+                text(h, "viewer") == viewer
+                    && h.get("hidden").and_then(serde_json::Value::as_bool) == Some(true)
+                    && objects
+                        .iter()
+                        .any(|o| text(o, "sha256") == text(h, "sha256"))
+            })
+            .count();
+        let short: String = viewer.chars().take(8).collect();
+        out.push_str(&format!(
+            "viewer {short}: {} of {} photos shown, {hidden} hidden\n",
+            objects.len() - hidden,
+            objects.len()
+        ));
+    }
+    Ok(out)
 }
 
 fn load_or_create(path: &Path) -> Result<FamilyKey, IngestError> {
