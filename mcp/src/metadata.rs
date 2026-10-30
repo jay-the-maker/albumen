@@ -1590,6 +1590,121 @@ mod tests {
         assert!(again["n2.xmp"].captions.iter().any(|c| c.contains("cap 9")));
     }
 
+    /// A writer holds the file open, makes a same-size edit, closes it, and
+    /// the modified time is then put back. The next warm search after the
+    /// close must re-hash the file. NTFS can lag a directory entry while a
+    /// writer has the file open, so this also measures, per round, how long
+    /// after the close the directory read shows the new ChangeTime and size
+    /// (equal to the per-file stat). Rounds: ALBUMEN_SETTLE_ROUNDS (20).
+    /// Run with --nocapture to see the "settle_lag" line.
+    #[test]
+    fn warm_search_rehashes_a_same_size_edit_after_the_writer_closes() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::time::{Duration, Instant};
+        let rounds: usize = std::env::var("ALBUMEN_SETTLE_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let root = tempfile::tempdir().unwrap();
+        let mut relative = Vec::new();
+        for n in 0..3 {
+            let name = format!("w{n}.xmp");
+            std::fs::write(
+                root.path().join(&name),
+                xmp(&format!("cap {n}"), "kw", "Lens A"),
+            )
+            .unwrap();
+            relative.push(name);
+        }
+        let name = "w1.xmp";
+        let path = root.path().join(name);
+        let at = std::fs::read(&path)
+            .unwrap()
+            .windows(5)
+            .position(|w| w == b"cap 1")
+            .unwrap()
+            + 4;
+        let size = std::fs::metadata(&path).unwrap().len();
+        let listed = || {
+            stat_all_by_dir(root.path(), &[name], None, 1)
+                .pop()
+                .flatten()
+                .unwrap()
+                .unwrap()
+        };
+        let mut cache = Cache::with_racy_ns(0);
+        cache.load(root.path(), &relative).unwrap();
+        cache.load(root.path(), &relative).unwrap();
+        let mut hashed = cache.hashed();
+        let (mut lags_ns, mut shown_while_open, mut first_poll) = (Vec::new(), 0usize, 0usize);
+        for round in 0..rounds {
+            // Coarse clocks: let the time tick past the last change.
+            std::thread::sleep(Duration::from_millis(50));
+            let before = listed();
+            let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let digit = b'2' + (round % 7) as u8;
+            let mut writer = std::fs::File::options().write(true).open(&path).unwrap();
+            writer.seek(SeekFrom::Start(at as u64)).unwrap();
+            writer.write_all(&[digit]).unwrap();
+            writer.flush().unwrap();
+            if listed().ctime_ns != before.ctime_ns {
+                shown_while_open += 1;
+            }
+            drop(writer);
+            let closed = Instant::now();
+            let mut polls = 0usize;
+            let lag = loop {
+                polls += 1;
+                let now = listed();
+                let truth = stat_one(root.path(), name).unwrap();
+                if now.ctime_ns != before.ctime_ns && now == truth && now.size == size {
+                    break closed.elapsed();
+                }
+                assert!(
+                    closed.elapsed() < Duration::from_secs(10),
+                    "round {round}: listing never showed the edit: {now:?} vs {truth:?}"
+                );
+                std::thread::yield_now();
+            };
+            lags_ns.push(lag.as_nanos());
+            first_poll += usize::from(polls == 1);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+            let again = cache.load(root.path(), &relative).unwrap();
+            hashed += 1;
+            assert_eq!(
+                cache.hashed(),
+                hashed,
+                "round {round}: only the edited file is re-hashed"
+            );
+            let want = format!("cap {}", digit as char);
+            assert!(
+                again[name].captions.iter().any(|c| c.contains(&want)),
+                "round {round}"
+            );
+        }
+        lags_ns.sort_unstable();
+        let us = |ns: u128| ns as f64 / 1000.0;
+        if !lags_ns.is_empty() {
+            println!(
+                "settle_lag os={} rounds={} min_us={:.1} p50_us={:.1} max_us={:.1} shown_while_open={} settled_on_first_poll={} all_us={:?}",
+                std::env::consts::OS,
+                lags_ns.len(),
+                us(lags_ns[0]),
+                us(lags_ns[(lags_ns.len() - 1) / 2]),
+                us(lags_ns[lags_ns.len() - 1]),
+                shown_while_open,
+                first_poll,
+                lags_ns.iter().map(|&n| (us(n) * 10.0).round() / 10.0).collect::<Vec<_>>()
+            );
+        }
+    }
+
     #[test]
     fn a_hash_taken_inside_the_racy_window_is_not_trusted() {
         let root = tempfile::tempdir().unwrap();

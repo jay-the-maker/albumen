@@ -336,6 +336,10 @@ albumen-mcp --library ./library --destination ./destination --enable-export --en
 
 How Albumen compares with iCloud Photos, Google Photos and Frame.io is in [docs/compare.md](docs/compare.md). Details are in [docs/architecture.md](docs/architecture.md). What is not built yet is listed in [ROADMAP.md](ROADMAP.md).
 
+## Known limits
+
+- On Windows, an edit is picked up by the first search after the editing app closes the file. If an app still has a photo open, search may show its previous version until the app closes it.
+
 ## Support
 
 Albumen will be funded through GitHub Sponsors (profile pending), and no other platforms.
