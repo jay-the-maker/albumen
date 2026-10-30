@@ -437,6 +437,15 @@ fn readers_keep_answering_while_one_writer_saves() {
     );
     assert_eq!(save_errors, 0);
     assert!(equals_walk, "the last save is not the library");
+    // Memory is not timing (XO 22:13Z): a freeze cannot excuse the RSS bar.
+    if let Some(kb) = child_peak {
+        assert!(
+            kb <= MAX_CHILD_RSS_KB,
+            "gui child peak RSS {kb} kB over {MAX_CHILD_RSS_KB} kB (332 MiB)"
+        );
+    } else if cfg!(any(target_os = "linux", windows)) {
+        panic!("could not read the gui child's peak RSS");
+    }
     println!("M6 X1 CORRECTNESS_OK");
     // A frozen box (a tick gap over 1 s, or wall and monotonic clocks
     // drifting apart by over 1 s) makes every timing meaningless: INVALID,
@@ -457,14 +466,6 @@ fn readers_keep_answering_while_one_writer_saves() {
         "/api/library max under write {write_max:.2} ms over 16.7 ms"
     );
     assert!(rmax <= 100.0, "index read max {rmax:.2} ms over 100 ms");
-    if let Some(kb) = child_peak {
-        assert!(
-            kb <= MAX_CHILD_RSS_KB,
-            "gui child peak RSS {kb} kB over {MAX_CHILD_RSS_KB} kB (332 MiB)"
-        );
-    } else if cfg!(any(target_os = "linux", windows)) {
-        panic!("could not read the gui child's peak RSS");
-    }
     assert!(
         first_ms <= 2000.0,
         "first listing {first_ms:.1} ms over 2 s"

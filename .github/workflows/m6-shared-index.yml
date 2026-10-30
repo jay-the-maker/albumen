@@ -87,3 +87,18 @@ jobs:
           cargo test --release --locked -p albumen-ingest --test index_shared 2>&1 | tee rest.log
           grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' rest.log \
             || { echo "::error::index_shared ran no tests or ignored some"; exit 1; }
+
+      - name: M6 INVALID counter
+        if: always()
+        run: |
+          touch m6-invalid-counter.log
+          echo "M6 INVALID_COUNTER_SUMMARY invalid=$(grep -c 'outcome=INVALID' m6-invalid-counter.log || true) green_after_rerun=$(grep -c 'outcome=GREEN_AFTER_RERUN' m6-invalid-counter.log || true) attempts=$(grep -vc 'GREEN_AFTER_RERUN' m6-invalid-counter.log || true)"
+          cat m6-invalid-counter.log
+
+      - name: Upload the INVALID counter log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-invalid-counter-${{ github.sha }}
+          path: m6-invalid-counter.log
+          if-no-files-found: warn

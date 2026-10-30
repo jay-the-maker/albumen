@@ -7,6 +7,15 @@
 # line in the output.  Usage: m6-one.sh <test name> <tag>  (env passes through)
 set -euo pipefail
 name=$1 tag=$2
+# INVALID counter (XO 22:13Z): one line per attempt, plus GREEN_AFTER_RERUN
+# when a rerun passes after INVALID. Uploaded as a CI artifact.
+counter_log=${M6_COUNTER_LOG:-$PWD/m6-invalid-counter.log}
+m6_count() { # outcome attempt max_gap_ms
+  local line
+  line="$(date -u +%Y-%m-%dT%H:%M:%SZ) tag=$tag attempt=$2 outcome=$1 sha=$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown) runner=${RUNNER_NAME:-$(hostname)} max_gap_ms=$3"
+  echo "$line" >> "$counter_log"
+  echo "M6 INVALID_COUNTER $line"
+}
 # At most one rerun after INVALID (XO 22:03Z): the outer call runs the
 # attempt itself twice at most; two INVALID runs in a row are a FAIL.
 if [ -z "${M6_ATTEMPT:-}" ]; then
@@ -16,15 +25,21 @@ if [ -z "${M6_ATTEMPT:-}" ]; then
     echo "M6 $tag attempt 1 INVALID; one rerun allowed"
     arc=0
     M6_ATTEMPT=2 bash "$0" "$@" || arc=$?
+    [ "$arc" -eq 0 ] && m6_count GREEN_AFTER_RERUN 2 "$(cat "$counter_log.gap" 2>/dev/null || echo NA)"
     if [ "$arc" -eq 75 ]; then
       echo "M6 $tag FAIL: two INVALID runs in a row"
       echo "::error::$name FAIL: INVALID twice in a row (box froze on both runs)"
+      rm -f "$counter_log.gap"
       exit 1
     fi
   fi
+  rm -f "$counter_log.gap"
   exit "$arc"
 fi
 log=$(mktemp)
+gap=NA
+# Every attempt records its outcome by exit code: 0 PASS, 75 INVALID, else FAIL.
+trap 'e=$?; case $e in 0) o=PASS;; 75) o=INVALID;; *) o=FAIL;; esac; echo "$gap" > "$counter_log.gap"; m6_count $o "$M6_ATTEMPT" "$gap"' EXIT
 # Peak RSS bar (M6, XO 20:12Z): 332 MiB = 339968 kB, measured by GNU time -v.
 # Linux reports the largest process in cargo's tree (the test binary).
 max_kb=${ALBUMEN_M6_MAX_RSS_KB:-339968}
@@ -51,7 +66,7 @@ if grep -q "M6 $tag INVALID" "$log" || awk -v g="$gap" -v s="$skew" 'BEGIN{exit 
   froze=1
 fi
 if [ "$froze" -eq 1 ] && [ "$rc" -ne 0 ] && ! grep -q "M6 $tag CORRECTNESS_OK" "$log"; then
-  echo "::error::$name FAIL during a freeze: correctness failed before INVALID could apply (exit $rc)"
+  echo "::error::$name FAIL during a freeze: a correctness or RSS assert failed before INVALID could apply (exit $rc)"
   exit "$rc"
 fi
 if [ "$froze" -eq 1 ]; then
