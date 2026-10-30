@@ -84,19 +84,19 @@ jobs:
 
       - name: M7 hidden photos stay hidden at ${{ github.event.inputs.files || '380000' }} files (M6 bars)
         run: |
-          # First tile <= 2 s and gui child peak RSS <= 332 MiB, with no hidden photo shown.
+          # First tile <= 2 s, full listing (ready_ms) <= 60 s, and gui child peak RSS <= 332 MiB, with no hidden photo shown.
           ALBUMEN_M7_FILES=$FILES ALBUMEN_M7_BARS=1 M6_TREE_RSS=diag \
             M6_PKG=albumen M6_TEST=m7_hide_persist \
-            M6_RESULT_MAX="first_tile_ms=2000 gui_child_peak_rss_kb=339968 hidden_shown=0" \
+            M6_RESULT_MAX="first_tile_ms=2000 ready_ms=60000 gui_child_peak_rss_kb=339968 hidden_shown=0" \
             bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7
 
       - name: The rest of the M7 hide tests
         run: |
           set -o pipefail
           cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
-          # 6 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
-          grep -Eq '^test result: ok\. 6 passed; 0 failed; 0 ignored' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 6 tests green"; exit 1; }
+          # 8 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
+          grep -Eq '^test result: ok\. 8 passed; 0 failed; 0 ignored' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 8 tests green"; exit 1; }
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
         run: |
