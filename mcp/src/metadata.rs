@@ -624,6 +624,9 @@ pub fn stat_all<S: AsRef<str> + Sync>(
         .map(|n| n.get())
         .unwrap_or(1)
         .clamp(1, 8);
+    if cfg!(windows) && std::env::var_os("ALBUMEN_STAT_PER_FILE").is_none() {
+        return stat_all_by_dir(root, relative_paths, deadline, threads);
+    }
     if threads == 1 || relative_paths.len() < 512 {
         run(relative_paths, &mut out);
         return out;
@@ -634,6 +637,83 @@ pub fn stat_all<S: AsRef<str> + Sync>(
             scope.spawn(move || run(paths, slots));
         }
     });
+    out
+}
+
+/// Stat by listing each directory once instead of opening every file.
+///
+/// On Windows `std::fs::metadata` opens a handle per file (CreateFileW), and
+/// every open passes the antivirus filter: 380k opens cost ~2.4 s on 8
+/// threads. `DirEntry::metadata` there comes from the directory listing
+/// (FindFirstFile/FindNextFile) with no open, ~0.4 s for the same tree.
+/// NTFS can lag a directory entry's size and time while a writer still has
+/// the file open; the entry is current once the writer closes it. Set
+/// `ALBUMEN_STAT_PER_FILE=1` to stat file by file. A path the listing does
+/// not show falls back to [`stat_one`], so its error text is unchanged.
+pub(crate) fn stat_all_by_dir<S: AsRef<str> + Sync>(
+    root: &Path,
+    relative_paths: &[S],
+    deadline: Option<std::time::Instant>,
+    threads: usize,
+) -> Vec<Option<Result<StatKey, String>>> {
+    let mut by_dir: std::collections::BTreeMap<&str, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, relative) in relative_paths.iter().enumerate() {
+        let relative = relative.as_ref();
+        let dir = relative.rfind('/').map_or("", |at| &relative[..at]);
+        by_dir.entry(dir).or_default().push(i);
+    }
+    let groups: Vec<(&str, Vec<usize>)> = by_dir.into_iter().collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::with_capacity(relative_paths.len()));
+    let work = || {
+        let mut local = Vec::new();
+        loop {
+            let g = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some((dir, members)) = groups.get(g) else {
+                break;
+            };
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                break;
+            }
+            let full_dir = if dir.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(PathBuf::from_iter(dir.split('/')))
+            };
+            let mut listed: std::collections::HashMap<std::ffi::OsString, StatKey> =
+                std::collections::HashMap::new();
+            if let Ok(entries) = std::fs::read_dir(&full_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if !meta.is_dir() && !meta.file_type().is_symlink() {
+                            listed.insert(entry.file_name(), StatKey::of(&meta));
+                        }
+                    }
+                }
+            }
+            for &i in members {
+                let relative = relative_paths[i].as_ref();
+                let name = relative.rsplit('/').next().unwrap_or(relative);
+                let stat = match listed.get(std::ffi::OsStr::new(name)) {
+                    Some(key) => Ok(*key),
+                    None => stat_one(root, relative),
+                };
+                local.push((i, stat));
+            }
+        }
+        results.lock().unwrap().extend(local);
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1).min(groups.len().max(1)) {
+            scope.spawn(work);
+        }
+    });
+    let mut out: Vec<Option<Result<StatKey, String>>> = Vec::new();
+    out.resize_with(relative_paths.len(), || None);
+    for (i, stat) in results.into_inner().unwrap() {
+        out[i] = Some(stat);
+    }
     out
 }
 
@@ -1213,6 +1293,35 @@ fn push_unique(dest: &mut Vec<String>, extra: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stat_by_dir_listing_matches_per_file_stat() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("a/b")).unwrap();
+        let mut paths = Vec::new();
+        for (i, rel) in ["top.jpg", "a/one.jpg", "a/b/two.jpg", "a/b/three.dng"]
+            .iter()
+            .enumerate()
+        {
+            let full = root.path().join(PathBuf::from_iter(rel.split('/')));
+            std::fs::write(&full, vec![b'x'; 10 + i]).unwrap();
+            paths.push(rel.to_string());
+        }
+        paths.push("a/b/missing.jpg".to_string());
+        paths.push("nodir/missing.jpg".to_string());
+        let per_file: Vec<_> = paths.iter().map(|p| stat_one(root.path(), p)).collect();
+        for threads in [1, 3, 8] {
+            let by_dir = stat_all_by_dir(root.path(), &paths, None, threads);
+            assert_eq!(by_dir.len(), paths.len());
+            for (want, got) in per_file.iter().zip(by_dir) {
+                assert_eq!(Some(want.clone()), got);
+            }
+        }
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(stat_all_by_dir(root.path(), &paths, Some(past), 2)
+            .iter()
+            .all(Option::is_none));
+    }
 
     #[test]
     fn date_bounds_and_antimeridian() {
