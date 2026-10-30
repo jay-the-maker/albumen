@@ -263,7 +263,7 @@ fn page_is_a_source_list_library_with_plumbing_under_show_details() {
         // Honest wording kept exactly.
         "Albumen only reads this folder. Nothing in it is changed, moved or deleted.",
         "Copies new and changed photos to a local or mounted folder, then checks every copy.",
-        "One honest state per backup folder.",
+        "One state per backup folder.",
         "Re-reads every backed-up copy and keeps a proof file you can open.",
         " items match, checked with SHA-256.",
         "--ok:#1f7a3f;--stale:#b26a00;--bad:#b3261e;--none:#6b7078;--accent:#2b5fd9",
