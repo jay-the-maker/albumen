@@ -378,6 +378,125 @@ fn paired_member_upload_leaves_the_other_member() {
     assert!(!library.join("cert.der").exists());
 }
 
+/// Every file under `root`: relative path, bytes and mtime.
+fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, (Vec<u8>, SystemTime)> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let meta = fs::metadata(&path).unwrap();
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    (fs::read(&path).unwrap(), meta.modified().unwrap()),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// M4 AC6: a paired member's PUT under another member's folder, or outside
+/// members/ entirely, is refused before any write and names the reason.
+#[test]
+fn put_outside_own_member_namespace_is_refused_before_any_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    let founder = albumen_ingest::family::create_key(&tmp.path().join("founder.key")).unwrap();
+    let library = albumen_ingest::family::init_library(&parent, &founder, "member-01").unwrap();
+    let mtime = UNIX_EPOCH + Duration::new(1_400_000_222, 100);
+    let photo = tmp.path().join("synthetic.jpg");
+    stamp(&photo, b"synthetic-member-01-original", mtime);
+    albumen_ingest::family::add_object(&library, &founder, &photo, None).unwrap();
+    let phone = albumen_ingest::family::create_key(&tmp.path().join("phone.key")).unwrap();
+    let invite = albumen_ingest::family::invite(&library, &founder, phone.member_id()).unwrap();
+    albumen_ingest::family::join(&library, &phone, &invite, "member-02").unwrap();
+    albumen_ingest::family::admit(&library, &founder, phone.member_id(), &invite).unwrap();
+    let founder_tree = library.join("members").join(founder.member_id());
+
+    let png = tmp.path().join("pair.png");
+    let running = Receiver::start(&[
+        "--to",
+        library.to_str().unwrap(),
+        "--user",
+        "camera",
+        "--password",
+        PASSWORD,
+        "--member",
+        phone.member_id(),
+        "--pair",
+        "--webdav",
+        "127.0.0.1:0",
+        "--qr-png",
+        png.to_str().unwrap(),
+        "--apply",
+    ]);
+    let parsed = pairing::parse_uri(&pairing_uri(&running.output)).unwrap();
+    let addr = webdav_addr(&running.output);
+    let founder_before = snapshot(&founder_tree);
+    let library_before = snapshot(&library);
+    let put = |path: &str, body: &[u8]| {
+        tls_exchange(
+            addr,
+            &parsed.fingerprint,
+            "camera",
+            PASSWORD,
+            "PUT",
+            path,
+            body,
+        )
+        .unwrap()
+    };
+
+    for path in [
+        format!("/members/{}/evil.jpg", founder.member_id()),
+        "/stray.jpg".to_string(),
+        "/albumen-family.json".to_string(),
+    ] {
+        let refused = put(&path, b"not-theirs");
+        assert!(refused.starts_with("HTTP/1.1 403"), "{path}: {refused}");
+        assert!(
+            refused.contains("refusing a write outside members/"),
+            "{path}: {refused}"
+        );
+        assert_eq!(snapshot(&library), library_before, "{path} wrote something");
+    }
+    assert_eq!(snapshot(&founder_tree), founder_before);
+
+    let body = b"member-02-own-original";
+    let own = put(&format!("/members/{}/own.jpg", phone.member_id()), body);
+    assert!(own.starts_with("HTTP/1.1 201"), "{own}");
+    let mut hash = sha2::Sha256::new();
+    hash.update(body);
+    let want: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        header(&own, "X-Albumen-Sha256").as_deref(),
+        Some(want.as_str())
+    );
+    let stored = library
+        .join("members")
+        .join(phone.member_id())
+        .join("own.jpg");
+    assert_eq!(fs::read(&stored).unwrap(), body);
+    assert_eq!(
+        snapshot(&founder_tree),
+        founder_before,
+        "member-01's tree changed"
+    );
+    // Outside member-02's own folder, nothing was added or changed.
+    let own_prefix = Path::new("members").join(phone.member_id());
+    let outside = |tree: std::collections::BTreeMap<std::path::PathBuf, (Vec<u8>, SystemTime)>| {
+        tree.into_iter()
+            .filter(|(p, _)| !p.starts_with(&own_prefix))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(outside(snapshot(&library)), outside(library_before));
+}
+
 struct Receiver {
     child: Child,
     output: String,
