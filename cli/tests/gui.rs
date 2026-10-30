@@ -285,10 +285,7 @@ fn page_is_a_source_list_library_with_plumbing_under_show_details() {
     for (at, _) in page.match_indices("class=\"runs\"") {
         let open = page[..at].rfind("<details").expect("runs inside details");
         let close = page[..at].rfind("</details>");
-        assert!(
-            close.map_or(true, |c| c < open),
-            "runs line outside details"
-        );
+        assert!(close.is_none_or(|c| c < open), "runs line outside details");
     }
     // No monospace font on the home (Photos) screen: only details use it.
     let style = &page[page.find("<style>").unwrap()..page.find("</style>").unwrap()];
@@ -331,4 +328,66 @@ fn demo_photos_group_into_four_events_by_capture_date() {
     assert_eq!(first["taken_from"], "photo metadata", "{first}");
     assert!(first["taken"].as_str().unwrap().starts_with("2026-10-"));
     assert_eq!(library["events"][0]["key"], "2026-10-03 harbour.png");
+}
+
+/// Taste gate v1 FIX-1: every element the script looks up by id exists, so
+/// draw() cannot throw on a null (the `curEvent-grid` typo left Events empty
+/// and stopped Info updating).
+#[test]
+fn every_script_id_lookup_exists_in_the_page() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, page) = get(&addr, "/");
+    let mut missing = Vec::new();
+    for part in page.split("$('").skip(1) {
+        let id = &part[..part.find('\'').unwrap()];
+        if !page.contains(&format!("id=\"{id}\"")) {
+            missing.push(id.to_string());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "ids looked up but not in the page: {missing:?}"
+    );
+    assert!(page.contains("$('event-grid').append(f)"));
+    assert!(!page.contains("curEvent'"), "count label find-replace slip");
+}
+
+/// Taste gate v1 FIX-1b: clicking a photo refreshes Info before redrawing the
+/// grid, so Info updates even if a later redraw step fails.
+#[test]
+fn clicking_a_photo_updates_info_first() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, page) = get(&addr, "/");
+    assert!(
+        page.contains("f.onclick=()=>{selected=p;infoPhoto();draw();}"),
+        "photo click must call infoPhoto() before draw()"
+    );
+    let info = &page[page.find("function infoPhoto()").unwrap()..];
+    let info = &info[..info.find('}').unwrap()];
+    for id in ["i-name", "i-taken", "info-photo"] {
+        assert!(
+            info.contains(id) || page.contains(&format!("$('{id}')")),
+            "{id}"
+        );
+    }
+}
+
+/// Taste gate v1 FIX-2: photos the browser cannot show get a placeholder
+/// tile, not a hidden or broken image.
+#[test]
+fn heic_and_raw_get_placeholder_tiles() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, page) = get(&addr, "/");
+    assert!(page.contains("preview not available yet"));
+    assert!(page.contains("m.preview!==false"));
+    let (_, library) = get(&addr, "/api/library");
+    let library: serde_json::Value = serde_json::from_str(&library).unwrap();
+    assert!(library["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i["preview"] == true));
 }
