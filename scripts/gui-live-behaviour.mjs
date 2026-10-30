@@ -137,6 +137,9 @@ try {
   const forms = await ev(`[countText(['roll/IMG_0005.HEIC']),countText(['roll/IMG_0008.MOV']),countText(['roll/IMG_0005.HEIC','roll/IMG_0008.MOV']),countText([]),countText(['roll/IMG_0005.HEIC','roll/IMG_0010.HEIC'])]`);
   check('count wording singular/plural', JSON.stringify(forms) == JSON.stringify(['1 photo', '1 video', '1 photo, 1 video', '0 photos', '2 photos']), forms);
   check('tile copy has no stray leading dash', !tiles.some(t => t.includes('\u2014')), tiles);
+  const heicTile = await ev(`(()=>{const f=${fig('IMG_0005.HEIC').js};return f&&{ph:f.querySelector('.ph').innerText.replace(/\\s+/g,' ').trim(),cap:f.querySelector('figcaption').textContent,all:f.innerText};})()`);
+  check('HEIC tile: name once, as the caption, with HEIC and the can\'t-preview copy', heicTile && heicTile.cap == 'IMG_0005.HEIC' &&
+    heicTile.ph == "HEIC Can't preview this file here. Your original is kept unchanged." && heicTile.all.split('IMG_0005.HEIC').length == 2, heicTile);
   await snap('badge');
 
   // The real click on the LIVE badge.
