@@ -3,7 +3,9 @@
 //! saves it over and over. Counters: parse failures, fallback walks (no
 //! complete saved index), partial results (a saved listing shorter or
 //! longer than the writer's own count for that generation). GUI page
-//! latency during writes is compared with a no-write baseline.
+//! latency during writes is compared with a same-run, spaced, no-writer
+//! control (Product Lead X1 ruling, 20:31Z): p50 within 10% of it, and
+//! /api/library max under write <= 16.7 ms.
 //! Synthetic files only.
 //!
 //! Env: ALBUMEN_M6_FILES (default 2000), ALBUMEN_M6_CYCLES (save/read
@@ -203,21 +205,19 @@ fn readers_keep_answering_while_one_writer_saves() {
         })
         .collect();
 
-    // Baseline with the same two index readers running, so the only
-    // difference between the two samples is the writer saving.
-    let mut base = gui_pages(&addr, 300);
-    let base_p50 = pct(&mut base, 0.50);
-    let base_p95 = pct(&mut base, 0.95);
-    let base_max = pct(&mut base, 1.0);
-    // Diagnostic control (no bar): single requests spaced out like the
-    // write-phase samples, with no writer running.
+    // Diagnostic only (no bar): a warm back-to-back loop with the readers
+    // running and no writer.
+    let mut warm = gui_pages(&addr, 300);
+    let (warm_p50, warm_max) = (pct(&mut warm, 0.50), pct(&mut warm, 1.0));
+    // The X1 base (the bar): single requests spaced out like the
+    // write-phase samples, the same index readers running, no writer.
     let mut spaced: Vec<f64> = (0..300)
         .flat_map(|_| {
             std::thread::sleep(Duration::from_millis(5));
             gui_pages(&addr, 1)
         })
         .collect();
-    let (spaced_p50, spaced_p95, spaced_max) = (
+    let (base_p50, base_p95, base_max) = (
         pct(&mut spaced, 0.50),
         pct(&mut spaced, 0.95),
         pct(&mut spaced, 1.0),
@@ -270,8 +270,7 @@ fn readers_keep_answering_while_one_writer_saves() {
         println!("M6 X1 SLOW_READ at_ms={at:.1} took_ms={ms:.1}");
     }
     println!(
-        "M6 X1 DIAG gui_base_max_ms={base_max:.2} gui_spaced_p50_ms={spaced_p50:.2} \
-         gui_spaced_p95_ms={spaced_p95:.2} gui_spaced_max_ms={spaced_max:.2} gui_write_max_ms={write_max:.2} \
+        "M6 X1 DIAG gui_warm_p50_ms={warm_p50:.2} gui_warm_max_ms={warm_max:.2} gui_base_max_ms={base_max:.2} \
          gui_write_samples={} writer_refresh_p50_ms={rf50:.2} writer_refresh_max_ms={rfmax:.2} \
          slow_reads_over_50ms={} slow_reads_overlapping_a_writer_refresh={overlapping}",
         during.len(),
@@ -292,7 +291,7 @@ fn readers_keep_answering_while_one_writer_saves() {
          parse_failures={parse_failures} fallback_walks={fallbacks} partial_results={partials} \
          index_read_p50_ms={r50:.2} index_read_p95_ms={r95:.2} index_read_max_ms={rmax:.2} \
          gui_base_p50_ms={base_p50:.2} gui_base_p95_ms={base_p95:.2} \
-         gui_write_p50_ms={p50:.2} gui_write_p95_ms={p95:.2} gui_p50_ratio={:.3} \
+         gui_write_p50_ms={p50:.2} gui_write_p95_ms={p95:.2} gui_write_max_ms={write_max:.2} gui_p50_ratio={:.3} \
          first_listing_ms={first_ms:.1} final_equals_walk={equals_walk}",
         checked.load(Ordering::Relaxed),
         p50 / base_p50
@@ -309,7 +308,11 @@ fn readers_keep_answering_while_one_writer_saves() {
     assert!(p50 <= 500.0, "/api/library p50 {p50:.2} ms over 500 ms");
     assert!(
         p50 <= base_p50 * 1.10,
-        "/api/library p50 {p50:.2} ms more than 10% over the no-write {base_p50:.2} ms"
+        "/api/library p50 {p50:.2} ms more than 10% over the spaced no-writer control {base_p50:.2} ms"
+    );
+    assert!(
+        write_max <= 16.7,
+        "/api/library max under write {write_max:.2} ms over 16.7 ms"
     );
     assert!(
         first_ms <= 2000.0,
