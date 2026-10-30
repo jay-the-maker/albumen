@@ -3,88 +3,143 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Albumen (demo)</title>
 <style>
-:root{--ink:#1d1f23;--mute:#6b7078;--line:#e4e6ea;--bg:#fafaf8;--ok:#1f7a3f;--stale:#b26a00;--bad:#b3261e;--none:#6b7078;--accent:#2b5fd9}
-*{box-sizing:border-box}body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg)}
-.demo{background:#fff4d6;border-bottom:1px solid #ecd9a0;padding:6px 20px;font-size:13px;color:#6b5100}
-header{display:flex;align-items:center;gap:28px;padding:14px 20px;border-bottom:1px solid var(--line);background:#fff}
-header b{font-size:18px;letter-spacing:.2px}nav{display:flex;gap:4px}
-nav button{border:0;background:none;padding:7px 12px;border-radius:7px;color:var(--mute);font:inherit;cursor:pointer}
-nav button.on{background:#eef1f6;color:var(--ink)}
-main{max-width:1060px;margin:0 auto;padding:26px 20px 60px}
-h1{font-size:22px;font-weight:600;margin:0 0 4px}.sub{color:var(--mute);margin:0 0 18px}
-.runs{font:12px ui-monospace,Menlo,Consolas,monospace;color:#8a8f97;margin:0 0 18px;word-break:break-all}
-.folder{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:18px}
-.folder code{flex:1;font-size:13px;word-break:break-all}.lock{font-size:12px;color:var(--ok);border:1px solid #cfe5d6;background:#f0f8f3;border-radius:20px;padding:2px 10px;white-space:nowrap}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:18px}
-.grid figure{margin:0}.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:6px;display:block;background:#eee}
-.grid figcaption{font-size:12px;color:var(--mute);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 20px;font:inherit;font-weight:600;cursor:pointer}
+:root{--ink:#1d1f23;--mute:#6b7078;--line:#e4e6ea;--bg:#fafaf8;--ok:#1f7a3f;--stale:#b26a00;--bad:#b3261e;--none:#6b7078;--accent:#2b5fd9;--thumb:200px;--canvas:#3a3c41;--side:#e3e6eb}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg);display:flex;flex-direction:column}
+.demo{background:#fff4d6;border-bottom:1px solid #ecd9a0;padding:3px 16px;font-size:12px;color:#6b5100}
+.app{flex:1;display:grid;grid-template-columns:200px 1fr;min-height:0}
+aside{background:var(--side);border-right:1px solid #cfd3da;overflow:auto;padding:10px 0 20px;font-size:13px}
+aside h2{font-size:11px;font-weight:700;color:#7d838c;letter-spacing:.6px;margin:14px 14px 4px}
+aside button{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:4px 14px 4px 22px;font:inherit;color:var(--ink);cursor:pointer;text-align:left}
+aside button.on{background:var(--accent);color:#fff}aside button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{flex:none;width:9px;height:9px;border-radius:50%;background:var(--none)}
+.dot.s-ok{background:var(--ok)}.dot.s-stale{background:var(--stale)}.dot.s-damaged{background:var(--bad)}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.view{flex:1;overflow:auto;padding:18px 22px 30px}.dark .view{background:var(--canvas);color:#e8e9ec}
+.top{display:flex;align-items:baseline;gap:12px;margin:0 0 12px}
+h1{font-size:20px;font-weight:600;margin:0}.sub{color:var(--mute);margin:0 0 16px}.dark .sub,.dark .count{color:#a9adb5}
+.back{border:0;background:none;color:inherit;font:inherit;cursor:pointer;opacity:.8}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--thumb),1fr));gap:14px;margin-bottom:20px}
+.grid figure{margin:0;cursor:default}.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:3px;display:block;background:#555;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.grid figure.sel img{outline:3px solid #f2c94c;outline-offset:2px}
+.grid figcaption{font-size:12px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;opacity:.85}
+.grid figcaption small{display:block;opacity:.7}
+.ev-h{font-size:13px;font-weight:600;margin:4px 0 8px;opacity:.85}
+.events{grid-template-columns:repeat(auto-fill,minmax(calc(var(--thumb) * 1.2),1fr))}
+.primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 18px;font:inherit;font-weight:600;cursor:pointer}
 .primary:disabled{opacity:.5;cursor:default}
-select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:100%}
-.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
-.out{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;min-height:20px}
+.plain{background:#fff;color:var(--ink);border:1px solid #c9cdd4;border-radius:7px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
+select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:100%}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.out{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;white-space:pre-wrap;min-height:20px;margin-bottom:10px}
 .out:empty{display:none}
 .bar{height:6px;background:#eceef2;border-radius:3px;overflow:hidden;margin:4px 0 6px}.bar i{display:block;height:100%;background:var(--accent);width:0}
 .count{font-size:13px;color:var(--mute)}
 .card{background:#fff;border:1px solid var(--line);border-left:5px solid var(--none);border-radius:10px;padding:12px 16px;margin-bottom:12px}
-.summary{margin:0 0 12px;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}.card .w{font-weight:700;text-transform:none}.card pre{margin:4px 0 0;white-space:pre-wrap;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace}
+.card h3{margin:0 0 2px;font-size:15px}.card .txt{white-space:pre-wrap}.card .w{font-weight:700;text-transform:none}.card .act{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.summary{margin:0 0 12px;white-space:pre-wrap}
 .s-ok{border-left-color:var(--ok)}.s-ok .w{color:var(--ok)}.s-stale{border-left-color:var(--stale)}.s-stale .w{color:var(--stale)}
 .s-damaged{border-left-color:var(--bad)}.s-damaged .w{color:var(--bad)}.s-none .w{color:var(--none)}
 .badge{display:inline-flex;align-items:center;gap:8px;background:#e9f6ee;color:var(--ok);border:1px solid #bfe0cb;border-radius:22px;padding:6px 16px;font-weight:700;font-size:17px}
 .proof{margin-top:16px}.proof table{border-collapse:collapse;font-size:13px}.proof td{padding:4px 14px 4px 0;vertical-align:top}.proof td:first-child{color:var(--mute)}
-.proof code{word-break:break-all}a{color:var(--accent)}
+.proof code{word-break:break-all;font:inherit}a{color:var(--accent)}
+details.more{margin:8px 0 14px;font-size:13px;color:var(--mute)}details.more summary{cursor:pointer}
+details.more pre,details.more .runs{font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;margin:6px 0 0}
+.lock{font-size:12px;color:var(--ok);border:1px solid #cfe5d6;background:#f0f8f3;border-radius:20px;padding:2px 10px;white-space:nowrap}
+.tools{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#d9dce1;border-top:1px solid #bfc4cc;font-size:13px}
+.tools input[type=search]{width:180px;padding:4px 10px;border:1px solid #b9bec6;border-radius:14px;font:inherit}
+.tools .grow{flex:1}.tools input[type=range]{width:160px}
+#info{position:fixed;right:16px;bottom:58px;width:300px;max-height:70vh;overflow:auto;background:#fff;color:var(--ink);border:1px solid #c9cdd4;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.25);padding:12px 14px;font-size:13px}
+#info h3{margin:0 0 6px;font-size:14px}#info p{margin:4px 0}
+#show{position:fixed;inset:0;background:#000;display:flex;align-items:center;justify-content:center;z-index:9}
+#show img{max-width:96vw;max-height:92vh}#show p{position:fixed;bottom:12px;color:#aaa;font-size:13px;margin:0}
 [hidden]{display:none!important}
 </style></head>
 <body>
 <div class="demo">DEMO-ONLY window. Synthetic sample images. Runs on this computer; the window listens on 127.0.0.1 only.</div>
-<header><b>Albumen</b>
-<nav><button data-s="photos" class="on">1 Choose photos</button><button data-s="backup">2 Back up</button><button data-s="health">3 Backup health</button><button data-s="proof">4 Proof</button></nav></header>
-<main>
-<section id="photos">
-<h1>Choose your photos folder.</h1>
-<p class="sub">Albumen only reads this folder. Nothing in it is changed, moved or deleted.</p>
-<p class="runs" id="runs-photos">runs: albumen scan</p>
-<div class="folder"><span>Folder</span><code id="lib"></code><span class="lock">&#128274; read-only</span></div>
-<div class="grid" id="grid"></div>
-<div class="row"><button class="primary" id="go-scan">Check photos</button><span class="count" id="scan-count"></span></div>
-<div class="bar" id="scan-bar" hidden><i></i></div>
-<div class="out" id="scan-out"></div>
+<div class="app">
+<aside id="side">
+<h2>LIBRARY</h2>
+<button data-s="events"><span>Events</span></button>
+<button data-s="photos" class="on"><span>Photos</span></button>
+<h2>BACKUPS</h2>
+<button data-s="health"><span>Backup health</span></button>
+<div id="side-dests"></div>
+<button data-s="backup"><span>Back up…</span></button>
+<button data-s="proof"><span>Proof</span></button>
+</aside>
+<div class="main dark" id="main">
+<section id="events" class="view" hidden>
+<div class="top"><h1>Events</h1><span class="count" id="events-count"></span></div>
+<div class="grid events" id="event-grid"></div>
 </section>
-<section id="backup" hidden>
+<section id="photos" class="view">
+<div class="top"><button class="back" id="to-events" hidden>&#8249; Events</button><h1 id="photos-title">Photos</h1><span class="count" id="photos-count"></span></div>
+<div id="grid"></div>
+</section>
+<section id="backup" class="view" hidden>
 <h1>Back up</h1>
 <p class="sub">Copies new and changed photos to a local or mounted folder, then checks every copy.</p>
-<p class="runs" id="runs-backup">runs: albumen backup --from … --to …</p>
 <div class="row"><label for="dest-b">To</label><select id="dest-b"></select><button class="primary" id="go-backup">Back up</button><span class="count" id="backup-count"></span></div>
 <div class="out" id="backup-out"></div>
+<div class="row" id="backup-act" hidden></div>
+<details class="more"><summary>Show details</summary><p class="runs" id="runs-backup">runs: albumen backup --from … --to …</p><pre id="backup-raw"></pre></details>
 </section>
-<section id="health" hidden>
+<section id="health" class="view" hidden>
 <h1>Backup health</h1>
 <p class="sub">One honest state per backup folder.</p>
-<p class="runs" id="runs-health">runs: albumen status DEST…</p>
-<pre class="summary" id="health-summary" hidden></pre>
+<p class="summary" id="health-summary" hidden></p>
 <div id="cards"></div>
-<pre class="summary" id="health-next" hidden></pre>
+<details class="more"><summary>Show details</summary><p class="runs" id="runs-health">runs: albumen status DEST…</p><pre id="health-next" hidden></pre></details>
 </section>
-<section id="proof" hidden>
+<section id="proof" class="view" hidden>
 <h1>Proof</h1>
 <p class="sub">Re-reads every backed-up copy and keeps a proof file you can open.</p>
-<p class="runs" id="runs-proof">runs: albumen verify-manifest --proof</p>
 <div class="row"><label for="dest-v">Backup</label><select id="dest-v"></select><button class="primary" id="go-verify">Check backup</button></div>
 <div id="verified" hidden><span class="badge">&#10003; Verified</span><p id="match"></p></div>
 <div class="out" id="verify-out"></div>
+<div class="row" id="verify-act" hidden><button class="plain" id="to-health">Open backup health</button></div>
 <div class="proof" id="proof-box" hidden><table>
 <tr><td>Proof file</td><td><code id="p-path"></code> &nbsp;<a id="p-open" target="_blank" rel="noopener">Open proof file</a></td></tr>
 <tr><td>Size</td><td id="p-size"></td></tr><tr><td>SHA-256</td><td><code id="p-sha"></code></td></tr></table></div>
+<details class="more"><summary>Show details</summary><p class="runs" id="runs-proof">runs: albumen verify-manifest --proof</p><pre id="verify-raw"></pre></details>
 </section>
-</main>
+<div class="tools">
+<input type="search" id="search" placeholder="Search names" aria-label="Search photo names">
+<label for="zoom" class="count">Size</label><input type="range" id="zoom" min="90" max="360" step="1" value="200" aria-label="Thumbnail size">
+<span class="grow"></span>
+<button class="plain" id="b-info">Info</button>
+<button class="plain" id="b-show">Slideshow</button>
+<button class="plain" id="b-backup">Back up</button>
+<button class="plain" id="b-check">Check backup</button>
+</div>
+</div>
+</div>
+<div id="info" hidden>
+<div id="info-photo" hidden><h3 id="i-name"></h3><p id="i-taken"></p><p id="i-size"></p></div>
+<h3>Library</h3>
+<p>Albumen only reads this folder. Nothing in it is changed, moved or deleted.</p>
+<p><span class="lock">&#128274; read-only</span> <span id="lib-count"></span></p>
+<div class="row"><button class="primary" id="go-scan">Check photos</button><span class="count" id="scan-count"></span></div>
+<div class="bar" id="scan-bar" hidden><i></i></div>
+<div class="out" id="scan-out"></div>
+<details class="more"><summary>Show details</summary><pre id="lib"></pre><p class="runs" id="runs-photos">runs: albumen scan</p><pre id="scan-raw"></pre></details>
+</div>
+<div id="show" hidden><img id="show-img" alt=""><p>Click or press Esc to stop.</p></div>
 <script>
 const $=id=>document.getElementById(id);
 const H={'X-Albumen':'1'};
 const enc=encodeURIComponent;
-let dests=[];
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.s));
-function show(s){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.s==s));
- document.querySelectorAll('main section').forEach(x=>x.hidden=x.id!=s); if(s=='health')health();}
+const LIB_VIEWS=['events','photos'];
+let dests=[],lib={images:[],events:[]},curEvent=null,selected=null,cur='photos';
+const base=p=>p.replace(/\/+$/,'').split('/').pop()||p;
+const img=p=>'/img?p='+enc(p);
+document.querySelectorAll('aside button[data-s]').forEach(b=>b.onclick=()=>show(b.dataset.s));
+function show(s){cur=s;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('on',b.dataset.s==s));
+ document.querySelectorAll('.main section').forEach(x=>x.hidden=x.id!=s);
+ const libv=LIB_VIEWS.includes(s);$('main').classList.toggle('dark',libv);
+ for(const id of ['search','zoom','b-show'])$(id).disabled=!libv;
+ if(s=='events')curEvent=null;
+ if(s=='health')health();if(libv)draw();}
 async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(await r.text());return r.json();}
 let attach=null; // a job id from the URL (#screen:job:ID), shown instead of starting one
 async function job(kind,dest,on){
@@ -92,48 +147,117 @@ async function job(kind,dest,on){
  for(;;){const s=await j('/api/job?id='+id);on(s);if(s.exit!==null)return s;await new Promise(r=>setTimeout(r,150));}}
 function sq(s){return s&&/^[A-Za-z0-9\/._\-:=+@]+$/.test(s)?s:"'"+s.replace(/'/g,"'\\''")+"'"}
 function q(s){return /[\s"'$`\\]/.test(s)?'"'+s.replace(/(["\\$`])/g,'\\$1')+'"':s}
+// Library: Photos grouped under their Event, Events as skimmable tiles.
+const byPath=p=>lib.images.find(i=>i.path==p);
+function match(p){const t=$('search').value.trim().toLowerCase();return !t||base(p).toLowerCase().includes(t);}
+function visible(){const evs=curEvent?[curEvent]:lib.events;return evs.flatMap(e=>e.photos).filter(match);}
+function figure(p,cap,sub){const f=document.createElement('figure');const i=new Image();i.loading='lazy';i.alt=base(p);i.src=img(p);
+ const c=document.createElement('figcaption');c.textContent=cap;if(sub){const s=document.createElement('small');s.textContent=sub;c.append(s);}f.append(i,c);return f;}
+function draw(){
+ const evs=(curEvent?[curEvent]:lib.events).map(e=>({e,ps:e.photos.filter(match)})).filter(x=>x.ps.length);
+ $('grid').innerHTML='';
+ for(const {e,ps} of evs){if(!curEvent){const h=document.createElement('div');h.className='ev-h';h.textContent=e.title;$('grid').append(h);}
+  const g=document.createElement('div');g.className='grid';
+  for(const p of ps){const f=figure(p,base(p));f.classList.toggle('sel',p==selected);f.onclick=()=>{selected=p;draw();infoPhoto();};g.append(f);}
+  $('grid').append(g);}
+ const n=evs.reduce((a,x)=>a+x.ps.length,0);
+ $('photos-title').textContent=curEvent?curEvent.title:'Photos';$('to-events').hidden=!curEvent;
+ $('photos-count').textContent=n+(n==1?' photo':' photos');
+ $('curEvent-grid').innerHTML='';
+ for(const e of lib.events){const ps=e.photos.filter(match);if(!ps.length)continue;
+  const f=figure(e.key,e.title,e.count+(e.count==1?' photo':' photos'));const im=f.querySelector('img');
+  f.onmousemove=ev=>{const r=im.getBoundingClientRect();const k=Math.min(ps.length-1,Math.max(0,Math.floor((ev.clientX-r.left)/r.width*ps.length)));im.src=img(ps[k]);};
+  f.onmouseleave=()=>{im.src=img(e.key);};
+  f.ondblclick=()=>{curEvent=e;show('photos');};
+  $('curEvent-grid').append(f);}
+ $('events-count').textContent=lib.events.length+(lib.events.length==1?' curEvent':' events');}
+$('to-events').onclick=()=>show('events');
+$('search').oninput=draw;
+function zoom(v){document.documentElement.style.setProperty('--thumb',v+'px');try{localStorage.setItem('albumen-zoom',v);}catch(e){}}
+$('zoom').oninput=()=>zoom($('zoom').value);
+try{const z=localStorage.getItem('albumen-zoom');if(z){$('zoom').value=z;zoom(z);}}catch(e){}
+function infoPhoto(){const im=selected&&byPath(selected);$('info-photo').hidden=!im;if(!im)return;
+ $('i-name').textContent=base(im.path);
+ $('i-taken').textContent=im.taken?'Taken '+im.taken.replace('T',' ')+' (from '+im.taken_from+')':'Date taken: not known';
+ $('i-size').textContent=im.bytes+' bytes';}
+$('b-info').onclick=()=>{$('info').hidden=!$('info').hidden;infoPhoto();};
+let timer=null;
+function stopShow(){clearInterval(timer);timer=null;$('show').hidden=true;}
+$('b-show').onclick=()=>{const ps=visible();if(!ps.length)return;let k=Math.max(0,ps.indexOf(selected));
+ $('show-img').src=img(ps[k]);$('show').hidden=false;timer=setInterval(()=>{k=(k+1)%ps.length;$('show-img').src=img(ps[k]);},3000);};
+$('show').onclick=stopShow;document.addEventListener('keydown',e=>{if(e.key=='Escape'){stopShow();$('info').hidden=true;}});
+$('b-backup').onclick=()=>show('backup');$('b-check').onclick=()=>show('proof');$('to-health').onclick=()=>show('health');
+function pick(d){const i=dests.indexOf(d);if(i>=0){$('dest-b').selectedIndex=i;$('dest-v').selectedIndex=i;runsB();runsV();}}
+function cls(state){return {ok:'s-ok',stale:'s-stale',damaged:'s-damaged'}[state]||'s-none';}
+function sideDests(st){$('side-dests').innerHTML='';
+ for(const d of st.destinations){const b=document.createElement('button');b.title=d.state;
+  const dot=document.createElement('i');dot.className='dot '+cls(d.state);const s=document.createElement('span');s.textContent=base(d.dest);
+  b.append(dot,s);b.onclick=()=>{pick(d.dest);show('health');};$('side-dests').append(b);}}
 async function init(){
- const lib=await j('/api/library');$('lib').textContent=lib.library;
- $('grid').innerHTML='';for(const im of lib.images){const f=document.createElement('figure');
-  const i=new Image();i.loading='lazy';i.alt=im.path;i.src='/img?p='+enc(im.path);
-  const c=document.createElement('figcaption');c.textContent=im.path.split('/').pop();f.append(i,c);$('grid').append(f);}
- const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);
- for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=d;$(sel).append(o);}}
+ lib=await j('/api/library');$('lib').textContent='Folder: '+lib.library;
+ $('lib-count').textContent=lib.images.length+' photos';
+ const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);sideDests(st);
+ for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=base(d);o.title=d;$(sel).append(o);}}
  $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';
  $('health-summary').textContent=st.summary||'';$('health-summary').hidden=!st.summary;
  $('health-next').textContent=st.summary_next||'';$('health-next').hidden=!st.summary_next;
  $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ');
- runsB();runsV();}
-function runsB(){$('runs-backup').textContent='runs: albumen backup --from '+q($('lib').textContent)+' --to '+q($('dest-b').value);}
+ runsB();runsV();draw();}
+function runsB(){$('runs-backup').textContent='runs: albumen backup --from '+q(lib.library||'')+' --to '+q($('dest-b').value);}
 function runsV(){const d=$('dest-v').value;$('runs-proof').textContent='runs: albumen verify-manifest --manifest '+q(d+'/ALBUMEN-MANIFEST.txt')+' --against '+q(d)+' --proof '+q(d+'/ALBUMEN-PROOFS/verify-…');}
 $('dest-b').onchange=runsB;$('dest-v').onchange=runsV;
 const stdout=s=>s.lines.slice(1);
 $('go-scan').onclick=async()=>{const b=$('go-scan');b.disabled=true;$('scan-bar').hidden=false;$('scan-out').textContent='';
  const s=await job('scan',null,s=>{$('scan-count').textContent=s.done+' of '+s.total+' files';$('scan-bar').firstChild.style.width=(s.total?100*s.done/s.total:0)+'%';});
- $('scan-out').textContent=stdout(s).filter(l=>/^(scanned|hashed) /.test(l)).map(l=>l.replace(/ into .*$/,'')).join('\n')||stdout(s).join('\n');b.disabled=false;};
-$('go-backup').onclick=async()=>{const b=$('go-backup');b.disabled=true;const d=$('dest-b').value;$('backup-out').textContent='';
+ $('scan-out').textContent=stdout(s).filter(l=>/^(scanned|hashed) /.test(l)).map(l=>l.replace(/ into .*$/,'')).join('\n')||stdout(s).filter(l=>!/^next: /.test(l)).join('\n');
+ $('scan-raw').textContent='exit '+s.exit+'\n'+stdout(s).join('\n');b.disabled=false;};
+$('go-backup').onclick=async()=>{const b=$('go-backup');b.disabled=true;const d=$('dest-b').value;$('backup-out').textContent='';$('backup-act').hidden=true;
  const s=await job('backup',d,s=>{const l=stdout(s).filter(l=>/^(scan|export|verify): /.test(l));$('backup-count').textContent=s.exit===null?'working… '+l.length+' of 3 steps':'';
   $('backup-out').textContent=l.join('\n');});
- const keep=stdout(s).filter(l=>/^(export|verify): |^backup ok: /.test(l)||!/^(scan|proof|albumen[^:]*): /.test(l));
- $('backup-out').textContent=keep.join('\n');b.disabled=false;};
-async function health(){const st=await j('/api/status');$('cards').innerHTML='';
- for(const d of st.destinations){const c=document.createElement('div');
-  const cls={ok:'s-ok',stale:'s-stale',damaged:'s-damaged'}[d.state]||'s-none';c.className='card '+cls;
-  const t=d.text.trimEnd();const i=t.indexOf(':');const w=document.createElement('span');w.className='w';w.textContent=t.slice(0,i+1);
-  const pre=document.createElement('pre');pre.append(w,document.createTextNode(t.slice(i+1)));c.append(pre);$('cards').append(c);}
+ const keep=stdout(s).filter(l=>/^(export|verify): |^backup ok: /.test(l)||!/^(scan|proof|next|albumen[^:]*): /.test(l));
+ $('backup-out').textContent=keep.join('\n');$('backup-raw').textContent='exit '+s.exit+'\n'+stdout(s).join('\n');
+ const act=$('backup-act');act.innerHTML='';
+ const h=document.createElement('button');h.className='plain';h.textContent='Open backup health';h.onclick=()=>{pick(d);show('health');};act.append(h);
+ if(stdout(s).some(l=>/^next: /.test(l))){const t=document.createElement('span');t.className='count';t.textContent='The suggested next step is under Show details.';act.append(t);}
+ act.hidden=false;await refreshSide();b.disabled=false;};
+async function refreshSide(){try{sideDests(await j('/api/status'));}catch(e){}}
+// Plain next step for each state; the exact CLI line stays under Show details.
+function nextStep(d,act){const btn=(t,f)=>{const b=document.createElement('button');b.className='plain';b.textContent=t;b.onclick=f;act.append(b);};
+ const say=t=>{const s=document.createElement('span');s.textContent=t;act.append(s);};
+ const back=()=>btn('Back up…',()=>{pick(d.dest);show('backup');});const check=()=>btn('Check this backup',()=>{pick(d.dest);show('proof');});
+ if(d.state=='not backed up'){say('Next: back up to this folder.');back();}
+ else if(d.state=='stale'){say('Next: back up again, or check this backup.');back();check();}
+ else if(d.state=='damaged'){say(/move the changed copy aside/.test(d.next||'')?'Next: move the changed copy aside. The exact command is under Show details.':'Next: see Show details.');check();}
+ else if(d.state=='ok'){check();}
+ else{say('Next: check that this folder is connected and readable, then check again.');btn('Check again',health);}}
+async function health(){const st=await j('/api/status');$('cards').innerHTML='';sideDests(st);
+ $('health-summary').textContent=st.summary||'';$('health-summary').hidden=!st.summary;
+ for(const d of st.destinations){const c=document.createElement('div');c.className='card '+cls(d.state);
+  const lines=d.text.trimEnd().split('\n');const hidden=lines.filter(l=>l==d.dest||/^(next|proof): /.test(l));
+  const t=lines.filter(l=>!hidden.includes(l)).join('\n');const i=t.indexOf(':');
+  const h=document.createElement('h3');h.textContent=base(d.dest);
+  const w=document.createElement('span');w.className='w';w.textContent=t.slice(0,i+1);
+  const p=document.createElement('div');p.className='txt';p.append(w,document.createTextNode(t.slice(i+1)));
+  const act=document.createElement('div');act.className='act';nextStep(d,act);
+  const m=document.createElement('details');m.className='more';m.innerHTML='<summary>Show details</summary>';
+  const pre=document.createElement('pre');pre.textContent=[d.dest,...hidden.filter(l=>l!=d.dest)].join('\n');m.append(pre);
+  c.append(h,p,act,m);$('cards').append(c);}
  $('runs-health').textContent='runs: albumen status '+dests.map(q).join(' ')+'   (exit '+st.exit+')';}
-$('go-verify').onclick=async()=>{const b=$('go-verify');b.disabled=true;$('verified').hidden=true;$('proof-box').hidden=true;$('verify-out').textContent='';
- const s=await job('verify',$('dest-v').value,()=>{});
+$('go-verify').onclick=async()=>{const b=$('go-verify');b.disabled=true;$('verified').hidden=true;$('proof-box').hidden=true;$('verify-act').hidden=true;$('verify-out').textContent='';
+ const d=$('dest-v').value;const s=await job('verify',d,()=>{});
  const md=(stdout(s).find(l=>/^proof: .*\.md$/.test(l))||'').slice(7);
+ let raw='exit '+s.exit+'\n'+stdout(s).join('\n');
  if(s.exit===0&&md){const p=await j('/api/proof?path='+enc(md));const n=(p.text.match(/\| Files \| `(\d+)` \|/)||[])[1];
-  $('match').textContent=n?n+' items match, checked with SHA-256.':'Verified by albumen verify-manifest (exit 0).';$('verified').hidden=false;
+  $('match').textContent=n?n+' items match, checked with SHA-256.':'Verified by albumen verify-manifest.';$('verified').hidden=false;
   $('p-path').textContent=p.path;$('p-open').href='/api/proof?raw=1&path='+enc(p.path);$('p-size').textContent=p.bytes+' bytes';$('p-sha').textContent=p.sha256;$('proof-box').hidden=false;}
  else{const bad=stdout(s).map(l=>l.match(/^(changed|missing) (.+?)(?: expected .*)?$/)).filter(Boolean);
- $('verify-out').textContent='Not verified (exit '+s.exit+').\n'+(bad.length?bad.length+' item(s) no longer match what was backed up:\n'+bad.map(m=>'  '+m[1]+': '+m[2]).join('\n')+'\nverify-manifest only read the backup; your photos folder was not opened\nnext: albumen status '+sq($('dest-v').value):stdout(s).filter(l=>!/^(proof|albumen[^:]*): /.test(l)).join('\n'));}
- b.disabled=false;};
+ $('verify-out').textContent='Not verified.\n'+(bad.length?bad.length+' item(s) no longer match what was backed up:\n'+bad.map(m=>'  '+m[1]+': '+m[2]).join('\n')+'\nverify-manifest only read the backup; your photos folder was not opened':stdout(s).filter(l=>!/^(proof|next|albumen[^:]*): /.test(l)).join('\n'));
+ if(bad.length)raw+='\nnext: albumen status '+sq(d);$('verify-act').hidden=false;}
+ $('verify-raw').textContent=raw;await refreshSide();b.disabled=false;};
 // #screen or #screen:run opens a screen (and presses its button) for a scripted walk-through.
 init().then(()=>{const [s,r,arg,dn]=location.hash.slice(1).split(':');if(!s)return;
  if(r=='job')attach=Number(arg);
- const i=dests.findIndex(d=>d.endsWith('/'+decodeURIComponent((r=='job'?dn:arg)||'')));if(i>=0){$('dest-b').selectedIndex=i;$('dest-v').selectedIndex=i;runsB();runsV();}
+ const i=dests.findIndex(d=>d.endsWith('/'+decodeURIComponent((r=='job'?dn:arg)||'')));if(i>=0)pick(dests[i]);
+ if(s=='photos'&&(r=='run'||r=='job'))$('info').hidden=false;
  show(s);if(r=='run'||r=='job')({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]&&$({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]).click());});
 </script></body></html>

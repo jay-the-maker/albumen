@@ -101,6 +101,18 @@ pub fn synthetic_png(w: u32, h: u32, seed: u32) -> Vec<u8> {
     out
 }
 
+/// [`synthetic_png`] with a capture time, stored the standard PNG way: a
+/// `tEXt` chunk with the keyword `Creation Time`, after the image data.
+pub fn synthetic_png_taken(w: u32, h: u32, seed: u32, taken: &str) -> Vec<u8> {
+    let mut out = synthetic_png(w, h, seed);
+    let iend = out.split_off(out.len() - 12);
+    let mut text = b"Creation Time\0".to_vec();
+    text.extend_from_slice(taken.as_bytes());
+    chunk(&mut out, b"tEXt", &text);
+    out.extend_from_slice(&iend);
+    out
+}
+
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), IngestError> {
     let mut f = dest::open_new(path)?;
     f.write_all(bytes).map_err(|e| io_err(path, e))?;
@@ -111,6 +123,28 @@ const NAMES: [&str; 12] = [
     "harbour", "meadow", "dunes", "ridge", "lake", "orchard", "canyon", "fjord", "steppe", "delta",
     "mesa", "tundra",
 ];
+
+/// When each demo photo was "taken": four days, so Events shows four
+/// events (3, 2, 4 and 3 photos). Written into each PNG and its name.
+pub const TAKEN: [&str; 12] = [
+    "2026-10-03T09:12:00",
+    "2026-10-03T11:40:00",
+    "2026-10-03T17:05:00",
+    "2026-10-04T08:30:00",
+    "2026-10-04T15:20:00",
+    "2026-10-11T07:45:00",
+    "2026-10-11T10:10:00",
+    "2026-10-11T13:55:00",
+    "2026-10-11T18:25:00",
+    "2026-10-18T09:00:00",
+    "2026-10-18T12:15:00",
+    "2026-10-18T16:50:00",
+];
+
+/// File name of demo photo `i`: "2026-10-03 harbour.png".
+fn demo_name(i: usize) -> String {
+    format!("{} {}.png", &TAKEN[i][..10], NAMES[i])
+}
 
 /// Build a new demo folder under `work`.
 pub fn build(work: &Path) -> Result<Demo, IngestError> {
@@ -131,12 +165,9 @@ pub fn build(work: &Path) -> Result<Demo, IngestError> {
     for dir in [&library, &card.join("DCIM/100DEMO"), &volumes, &state] {
         dest::create_dir_all(dir)?;
     }
-    for (i, name) in NAMES.iter().enumerate().take(DEMO_PHOTOS as usize) {
-        let png = synthetic_png(480, 360, i as u32 + 1);
-        write_new(
-            &library.join(format!("2026-10-{:02} {name}.png", i + 1)),
-            &png,
-        )?;
+    for i in 0..DEMO_PHOTOS as usize {
+        let png = synthetic_png_taken(480, 360, i as u32 + 1, TAKEN[i]);
+        write_new(&library.join(demo_name(i)), &png)?;
     }
     for i in 0..3u32 {
         let png = synthetic_png(480, 360, 40 + i);
@@ -163,7 +194,7 @@ pub fn build(work: &Path) -> Result<Demo, IngestError> {
             ))),
         })?;
     }
-    flip_one_byte(&damaged.join(format!("2026-10-05 {}.png", NAMES[4])))?;
+    flip_one_byte(&damaged.join(demo_name(4)))?;
     age_proofs(&stale, Duration::from_secs(12 * 86_400))?;
     let backups = [&demo, &stale, &damaged, &never]
         .iter()
@@ -224,6 +255,14 @@ mod tests {
         assert_eq!(&png[12..16], b"IHDR");
         assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
         assert_ne!(synthetic_png(16, 8, 3), synthetic_png(16, 8, 4));
+    }
+
+    #[test]
+    fn demo_names_carry_the_capture_day() {
+        assert_eq!(demo_name(0), "2026-10-03 harbour.png");
+        assert_eq!(demo_name(4), "2026-10-04 lake.png");
+        let png = synthetic_png_taken(16, 8, 3, TAKEN[0]);
+        assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
     }
 
     #[test]

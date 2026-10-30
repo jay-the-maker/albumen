@@ -19,6 +19,7 @@ use albumen_ingest::{IngestError, SourceRoot};
 
 pub mod demo;
 pub mod http;
+pub mod taken;
 
 const PAGE: &str = include_str!("page.html");
 
@@ -291,15 +292,65 @@ pub fn library_json(library: &Path) -> serde_json::Value {
                 .map(|m| m.len())
                 .unwrap_or(0);
             bytes += len;
-            serde_json::json!({ "path": rel, "bytes": len })
+            let when = taken::taken(library, rel);
+            serde_json::json!({
+                "path": rel,
+                "bytes": len,
+                "taken": when.as_ref().map(|t| t.when.clone()),
+                "taken_from": when.as_ref().map(|t| t.source),
+            })
         })
         .collect();
     serde_json::json!({
         "library": library.display().to_string(),
         "files": files.len(),
+        "events": events(&items),
         "images": items,
         "image_bytes": bytes,
     })
+}
+
+/// Events: photos grouped by the day they were taken, oldest first, each
+/// sorted by time. Photos with no known date go last under "No date".
+pub fn events(images: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut by_day: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    let mut undated = Vec::new();
+    for img in images {
+        let path = img["path"].as_str().unwrap_or_default().to_string();
+        match img["taken"].as_str() {
+            Some(when) if when.len() >= 10 => by_day
+                .entry(when[..10].to_string())
+                .or_default()
+                .push((when.to_string(), path)),
+            _ => undated.push(path),
+        }
+    }
+    let mut out: Vec<serde_json::Value> = by_day
+        .into_iter()
+        .map(|(day, mut photos)| {
+            photos.sort();
+            let paths: Vec<String> = photos.into_iter().map(|(_, p)| p).collect();
+            serde_json::json!({
+                "title": taken::day_title(&day),
+                "day": day,
+                "count": paths.len(),
+                "key": paths[0],
+                "photos": paths,
+            })
+        })
+        .collect();
+    if !undated.is_empty() {
+        undated.sort();
+        out.push(serde_json::json!({
+            "title": "No date",
+            "day": null,
+            "count": undated.len(),
+            "key": undated[0],
+            "photos": undated,
+        }));
+    }
+    out
 }
 
 /// A library image by its relative path. `..`, absolute paths, and anything
@@ -599,5 +650,20 @@ mod tests {
         assert_eq!(&s[4..], ["--previous", "/state/a.jsonl"]);
         let b = job_args(&config, "backup", Some("/b1"), None).unwrap();
         assert_eq!(&b[..5], ["backup", "--from", "/lib", "--to", "/b1"]);
+    }
+
+    #[test]
+    fn events_group_by_capture_day_and_put_undated_last() {
+        let img = |p: &str, t: Option<&str>| serde_json::json!({ "path": p, "taken": t });
+        let ev = events(&[
+            img("b.png", Some("2026-10-04T08:00:00")),
+            img("x.png", None),
+            img("a2.png", Some("2026-10-03T12:00:00")),
+            img("a1.png", Some("2026-10-03T09:00:00")),
+        ]);
+        let titles: Vec<&str> = ev.iter().map(|e| e["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, ["Oct 3, 2026", "Oct 4, 2026", "No date"]);
+        assert_eq!(ev[0]["key"], "a1.png");
+        assert_eq!(ev[0]["count"], 2);
     }
 }
