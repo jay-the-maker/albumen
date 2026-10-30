@@ -14,6 +14,25 @@
 //! The library is opened as a [`SourceRoot`] and only listed and stat'ed. The
 //! saved index lives in the platform data directory (or `--index-dir`), and a
 //! directory inside the library is refused. Writes go through [`crate::dest`].
+//!
+//! More than one process may keep the same index (the GUI and the search
+//! tool both open `<sha256(root)>.idx`). A save never blocks a reader and
+//! takes no lock:
+//!
+//! - The file carries a generation. A save reads the generation on disk; if
+//!   another writer moved it on, the two indexes are merged directory by
+//!   directory (the later listing of each directory wins) before writing, and
+//!   the generation is checked again just before the rename, so an older
+//!   snapshot never replaces a newer one.
+//! - The new file is written beside the old one, `sync_all`ed, renamed over
+//!   it, and the directory is synced, so a kill at any point leaves the old
+//!   index or the new one.
+//! - The file ends with its length and SHA-256, so a short or damaged file is
+//!   refused (and rebuilt) rather than read as a smaller library.
+//! - A rename refused because another program holds the file is retried with
+//!   backoff; a save that still fails is kept pending and retried by the next
+//!   refresh. Leftover temp files from a killed writer are removed by the next
+//!   save.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -28,7 +47,25 @@ use crate::source::SourceRoot;
 /// again on the next refresh.
 pub const RACY_NANOS: u64 = 2_000_000_000;
 
-const FORMAT: &str = "albumen-index/1";
+/// The format written: a generation line after the root, and a footer.
+const FORMAT: &str = "albumen-index/2";
+
+/// The first format: no generation, no footer. Still read.
+const FORMAT_V1: &str = "albumen-index/1";
+
+/// Test hook: `ALBUMEN_INDEX_CRASH=before-rename` aborts after half of the
+/// temp file is written and synced; `after-rename` aborts right after the
+/// rename, before the directory sync. Either is what a kill there leaves.
+pub const CRASH_ENV: &str = "ALBUMEN_INDEX_CRASH";
+
+/// Times a refused rename is tried again, waiting 5 ms, then twice as long
+/// each time (about 2.5 s in all).
+const RENAME_RETRIES: u32 = 9;
+
+/// Times a save starts over because another writer saved meanwhile.
+const SAVE_ATTEMPTS: u32 = 16;
+
+static PARTIAL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Environment override for the index directory.
 pub const INDEX_DIR_ENV: &str = "ALBUMEN_INDEX_DIR";
@@ -64,8 +101,23 @@ pub struct LibraryIndex {
     pub loaded: bool,
     /// Milliseconds the open took, including the first refresh.
     pub open_ms: f64,
-    /// A save that failed. The index still answers from memory.
+    /// A save that failed. The index still answers from memory, and the next
+    /// refresh saves again.
     pub save_error: Option<String>,
+    /// The generation of the saved file this index last read or wrote.
+    generation: Option<u64>,
+    /// A save is owed (an earlier one failed).
+    dirty: bool,
+    /// Saves that found another writer's newer file and merged it.
+    pub merges: u64,
+    /// Renames tried again after the file was held by another program.
+    pub rename_retries: u64,
+}
+
+/// A saved index read from disk.
+struct Saved {
+    generation: u64,
+    dirs: BTreeMap<String, DirRecord>,
 }
 
 /// The default index directory: `ALBUMEN_INDEX_DIR`, else `index` under the
@@ -124,9 +176,14 @@ impl LibraryIndex {
             loaded: false,
             open_ms: 0.0,
             save_error: None,
+            generation: None,
+            dirty: false,
+            merges: 0,
+            rename_retries: 0,
         };
         if let Some(saved) = index.read_saved() {
-            index.dirs = saved;
+            index.dirs = saved.dirs;
+            index.generation = Some(saved.generation);
             index.loaded = true;
         }
         index.refresh_with(on_file)?;
@@ -134,10 +191,13 @@ impl LibraryIndex {
         Ok(index)
     }
 
-    fn read_saved(&self) -> Option<BTreeMap<String, DirRecord>> {
+    fn read_saved(&self) -> Option<Saved> {
         let file = self.file.as_ref()?;
-        let text = std::fs::read_to_string(file).ok()?;
-        parse_saved(&text, &self.root.canonical().to_string_lossy())
+        // `std::fs` opens with FILE_SHARE_READ | WRITE | DELETE on Windows,
+        // so a reader never stops a writer's rename.
+        let bytes = std::fs::read(file).ok()?;
+        let text = std::str::from_utf8(&bytes).ok()?;
+        parse_saved(text, &self.root.canonical().to_string_lossy())
     }
 
     /// Stat every indexed directory and list again the ones that changed.
@@ -149,29 +209,23 @@ impl LibraryIndex {
         let mut stats = RefreshStats::default();
         let now = now_ns();
         let changed = self.sync_dir(String::new(), now, &mut stats, on_file)?;
-        // Drop records for directories that are no longer reachable.
-        let mut reachable = std::collections::BTreeSet::new();
-        let mut stack = vec![String::new()];
-        while let Some(dir) = stack.pop() {
-            if let Some(record) = self.dirs.get(&dir) {
-                for (name, is_dir) in &record.entries {
-                    if *is_dir {
-                        stack.push(join(&dir, name));
-                    }
-                }
-            }
-            reachable.insert(dir);
-        }
         let before = self.dirs.len();
-        self.dirs.retain(|dir, _| reachable.contains(dir));
+        self.prune();
         let pruned = self.dirs.len() != before;
         stats.changed = changed || pruned;
         if stats.changed || (self.paths.is_empty() && !self.dirs.is_empty()) {
             self.flatten();
         }
-        if stats.dirs_listed > 0 || pruned {
-            if let Err(err) = self.save() {
-                self.save_error = Some(err.to_string());
+        if stats.dirs_listed > 0 || pruned || self.dirty {
+            match self.save() {
+                Ok(()) => {
+                    self.save_error = None;
+                    self.dirty = false;
+                }
+                Err(err) => {
+                    self.save_error = Some(err.to_string());
+                    self.dirty = true;
+                }
             }
         }
         Ok(stats)
@@ -236,45 +290,141 @@ impl LibraryIndex {
         path
     }
 
-    fn flatten(&mut self) {
-        let mut paths = Vec::new();
-        let mut stack: Vec<(String, usize)> = vec![(String::new(), 0)];
-        while let Some((dir, position)) = stack.pop() {
-            let Some(record) = self.dirs.get(&dir) else {
-                continue;
-            };
-            let mut next = position;
-            while next < record.entries.len() {
-                let (name, is_dir) = &record.entries[next];
-                next += 1;
-                let relative = join(&dir, name);
-                if *is_dir {
-                    stack.push((dir.clone(), next));
-                    stack.push((relative, 0));
-                    break;
+    /// Drop records for directories no longer reachable from the root.
+    fn prune(&mut self) {
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut stack = vec![String::new()];
+        while let Some(dir) = stack.pop() {
+            if let Some(record) = self.dirs.get(&dir) {
+                for (name, is_dir) in &record.entries {
+                    if *is_dir {
+                        stack.push(join(&dir, name));
+                    }
                 }
-                paths.push(relative);
+            }
+            reachable.insert(dir);
+        }
+        self.dirs.retain(|dir, _| reachable.contains(dir));
+    }
+
+    /// Take each directory's later listing from another writer's index.
+    fn merge(&mut self, other: BTreeMap<String, DirRecord>) {
+        for (dir, theirs) in other {
+            match self.dirs.get(&dir) {
+                Some(ours) if ours.listed_ns >= theirs.listed_ns => {}
+                _ => {
+                    self.dirs.insert(dir, theirs);
+                }
             }
         }
+        self.prune();
+        self.flatten();
+    }
+
+    fn flatten(&mut self) {
+        let paths = flatten_dirs(&self.dirs);
         self.lower = paths.iter().map(|path| path.to_lowercase()).collect();
         self.paths = paths;
     }
 
-    fn save(&self) -> Result<(), IngestError> {
-        let Some(file) = self.file.as_ref() else {
+    fn save(&mut self) -> Result<(), IngestError> {
+        let Some(file) = self.file.clone() else {
             return Ok(());
         };
-        let bytes = render_saved(&self.root.canonical().to_string_lossy(), &self.dirs);
         if let Some(parent) = file.parent() {
             dest::create_dir_all(parent)?;
         }
-        let partial = file.with_extension(format!("idx.partial-{}", std::process::id()));
-        let mut handle = dest::create_file(&partial)?;
-        handle
-            .write_all(&bytes)
-            .map_err(|err| IngestError::io(&partial, err))?;
-        drop(handle);
-        dest::rename(&partial, file)
+        let root = self.root.canonical().to_string_lossy().into_owned();
+        let crash = std::env::var(CRASH_ENV).ok();
+        let mut last_error = None;
+        for _ in 0..SAVE_ATTEMPTS {
+            let disk = self.read_saved();
+            let disk_generation = disk.as_ref().map(|saved| saved.generation);
+            if let Some(saved) = disk {
+                if Some(saved.generation) != self.generation {
+                    self.merges += 1;
+                    self.merge(saved.dirs);
+                }
+            }
+            let generation = disk_generation.max(self.generation).unwrap_or(0) + 1;
+            let bytes = render_saved(&root, generation, &self.dirs);
+            let partial = file.with_extension(format!(
+                "idx.partial-{}-{}",
+                std::process::id(),
+                PARTIAL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            remove_stale_partials(&file, &partial);
+            let mut handle = dest::create_file(&partial)?;
+            let half = crash.as_deref() == Some("before-rename");
+            let body = if half {
+                &bytes[..bytes.len() / 2]
+            } else {
+                &bytes[..]
+            };
+            handle
+                .write_all(body)
+                .and_then(|()| handle.sync_all())
+                .map_err(|err| IngestError::io(&partial, err))?;
+            drop(handle);
+            if half {
+                std::process::abort();
+            }
+            // Compare before rename: another writer that saved since the read
+            // above means this snapshot may be older. Start over from its file.
+            if read_generation(&file) != disk_generation {
+                dest::remove_file_best_effort(&partial);
+                continue;
+            }
+            if let Err(err) = self.rename_with_retry(&partial, &file) {
+                dest::remove_file_best_effort(&partial);
+                // A missing temp file was cleared by another writer's save:
+                // start over. Anything else is returned and retried later.
+                if is_not_found(&err) {
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+            if crash.as_deref() == Some("after-rename") {
+                std::process::abort();
+            }
+            #[cfg(not(windows))]
+            if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+                dest::sync_dir(parent)?;
+            }
+            self.generation = Some(generation);
+            return Ok(());
+        }
+        Err(last_error.unwrap_or_else(|| {
+            IngestError::io(
+                &file,
+                std::io::Error::other("other writers kept saving; save left pending"),
+            )
+        }))
+    }
+
+    /// [`dest::rename`], tried again with backoff while another program holds
+    /// the file (Windows refuses a replace then).
+    fn rename_with_retry(&mut self, from: &Path, to: &Path) -> Result<(), IngestError> {
+        let mut wait = std::time::Duration::from_millis(5);
+        let mut tries = 0;
+        loop {
+            match dest::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(err) if tries < RENAME_RETRIES && !is_not_found(&err) => {
+                    tries += 1;
+                    self.rename_retries += 1;
+                    std::thread::sleep(wait);
+                    wait = (wait * 2).min(std::time::Duration::from_millis(640));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// The generation of the saved file this index last read or wrote.
+    pub fn generation(&self) -> Option<u64> {
+        self.generation
     }
 
     /// Where the index is saved, when it is saved.
@@ -305,6 +455,110 @@ impl LibraryIndex {
             }
         }
     }
+}
+
+fn is_not_found(err: &IngestError) -> bool {
+    matches!(err, IngestError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Remove `<file>.partial-*` temp files other than `keep`. One a live writer
+/// is still writing is refused on Windows (it is open) and, on Unix, makes
+/// that writer's rename fail and start over; neither loses the saved index.
+fn remove_stale_partials(file: &Path, keep: &Path) {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let prefix = format!("{name}.partial-");
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let stale = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with(&prefix));
+        if stale && path != keep && entry.file_type().is_ok_and(|t| t.is_file()) {
+            dest::remove_file_best_effort(&path);
+        }
+    }
+}
+
+/// The generation in the first lines of a saved file, without reading the
+/// rest. A first-format file is generation 0.
+fn read_generation(file: &Path) -> Option<u64> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(file).ok()?);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    match line.trim_end_matches('\n') {
+        FORMAT_V1 => return Some(0),
+        FORMAT => {}
+        _ => return None,
+    }
+    line.clear();
+    reader.read_line(&mut line).ok()?;
+    line.clear();
+    reader.read_line(&mut line).ok()?;
+    line.trim_end_matches('\n')
+        .strip_prefix("gen\t")?
+        .parse()
+        .ok()
+}
+
+/// Every file of a directory map, in walk order.
+fn flatten_dirs(dirs: &BTreeMap<String, DirRecord>) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut stack: Vec<(String, usize)> = vec![(String::new(), 0)];
+    while let Some((dir, position)) = stack.pop() {
+        let Some(record) = dirs.get(&dir) else {
+            continue;
+        };
+        let mut next = position;
+        while next < record.entries.len() {
+            let (name, is_dir) = &record.entries[next];
+            next += 1;
+            let relative = join(&dir, name);
+            if *is_dir {
+                stack.push((dir.clone(), next));
+                stack.push((relative, 0));
+                break;
+            }
+            paths.push(relative);
+        }
+    }
+    paths
+}
+
+/// Read a saved index file as it is on disk, without refreshing it: its
+/// generation and every file, in walk order. A short or damaged file is an
+/// error. For tests and tools that watch the file.
+pub fn read_saved_file(file: &Path) -> Result<(u64, Vec<String>), String> {
+    let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
+    let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
+    let root = text
+        .split('\n')
+        .nth(1)
+        .and_then(|line| line.strip_prefix("root\t"))
+        .ok_or("no root line")?;
+    let saved = parse_saved(text, root).ok_or("damaged or short index file")?;
+    Ok((saved.generation, flatten_dirs(&saved.dirs)))
+}
+
+/// Check a saved index file: format, footer length and checksum. Returns its
+/// generation.
+pub fn check_saved_file(file: &Path) -> Result<u64, String> {
+    let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
+    let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
+    let mut lines = text.split('\n');
+    let _format = lines.next();
+    let root = lines
+        .next()
+        .and_then(|line| line.strip_prefix("root\t"))
+        .ok_or("no root line")?;
+    parse_saved(text, root)
+        .map(|saved| saved.generation)
+        .ok_or_else(|| "damaged or short index file".to_string())
 }
 
 /// List one directory the way [`SourceRoot::walk`] does: symlinks and unsafe
@@ -354,19 +608,24 @@ fn now_ns() -> u64 {
 /// safe separators.
 ///
 /// ```text
-/// albumen-index/1
+/// albumen-index/2
 /// root<TAB><canonical library path>
+/// gen<TAB><generation>
 /// D<TAB><mtime ns><TAB><listed ns><TAB><relative dir>
 /// f<TAB><file name>
 /// d<TAB><directory name>
+/// end<TAB><bytes before this line><TAB><SHA-256 of those bytes, hex>
 /// ```
-fn render_saved(root: &str, dirs: &BTreeMap<String, DirRecord>) -> Vec<u8> {
+///
+/// `albumen-index/1` files (no `gen`, no `end`) are still read.
+fn render_saved(root: &str, generation: u64, dirs: &BTreeMap<String, DirRecord>) -> Vec<u8> {
     let mut out = String::with_capacity(dirs.values().map(|d| d.entries.len() * 24).sum());
     out.push_str(FORMAT);
     out.push('\n');
     out.push_str("root\t");
     out.push_str(root);
     out.push('\n');
+    out.push_str(&format!("gen\t{generation}\n"));
     for (relative, record) in dirs {
         out.push_str(&format!(
             "D\t{}\t{}\t{}\n",
@@ -378,20 +637,51 @@ fn render_saved(root: &str, dirs: &BTreeMap<String, DirRecord>) -> Vec<u8> {
             out.push('\n');
         }
     }
+    let footer = format!("end\t{}\t{}\n", out.len(), sha256_hex(out.as_bytes()));
+    out.push_str(&footer);
     out.into_bytes()
 }
 
-fn parse_saved(text: &str, root: &str) -> Option<BTreeMap<String, DirRecord>> {
-    let mut lines = text.split('\n');
-    if lines.next()? != FORMAT {
-        return None;
-    }
-    if lines.next()?.strip_prefix("root\t")? != root {
-        return None;
-    }
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn parse_saved(text: &str, root: &str) -> Option<Saved> {
+    let (body, generation) = if text.starts_with(&format!("{FORMAT}\n")) {
+        // The footer is the last line; the body is every byte before it.
+        let trimmed = text.strip_suffix('\n')?;
+        let start = trimmed.rfind('\n')? + 1;
+        let mut footer = trimmed[start..].strip_prefix("end\t")?.splitn(2, '\t');
+        let len: usize = footer.next()?.parse().ok()?;
+        let sum = footer.next()?;
+        if len != start || sha256_hex(&text.as_bytes()[..start]) != sum {
+            return None;
+        }
+        let body = &text[..start];
+        let mut lines = body.splitn(4, '\n');
+        lines.next()?;
+        if lines.next()?.strip_prefix("root\t")? != root {
+            return None;
+        }
+        let generation = lines.next()?.strip_prefix("gen\t")?.parse().ok()?;
+        (lines.next().unwrap_or(""), generation)
+    } else {
+        let mut lines = text.splitn(3, '\n');
+        if lines.next()? != FORMAT_V1 {
+            return None;
+        }
+        if lines.next()?.strip_prefix("root\t")? != root {
+            return None;
+        }
+        (lines.next().unwrap_or(""), 0)
+    };
     let mut dirs = BTreeMap::new();
     let mut current: Option<(String, DirRecord)> = None;
-    for line in lines {
+    for line in body.split('\n') {
         if line.is_empty() {
             continue;
         }
@@ -425,5 +715,5 @@ fn parse_saved(text: &str, root: &str) -> Option<BTreeMap<String, DirRecord>> {
     if let Some((relative, record)) = current.take() {
         dirs.insert(relative, record);
     }
-    Some(dirs)
+    Some(Saved { generation, dirs })
 }
