@@ -178,6 +178,11 @@ function nearEnd(){const b=$('grid-more');if(!b||!gridMore)return;const v=$('pho
 // first, and the scroll handler also refills/empties blocks itself.
 const next=f=>{let d=false;const g=()=>{if(!d){d=true;f();}};requestAnimationFrame(g);setTimeout(g,50);};
 let nearQ=false;$('photos').addEventListener('scroll',()=>{if(nearQ)return;nearQ=true;next(()=>{nearQ=false;nearEnd();sweep();});},{passive:true});
+// A backgrounded tab gets no frames, timers or intersection callbacks, so
+// coming back must not rely on them: re-check the grid at once, refill what
+// is near view (the first 200 included when at the top) and keep growing.
+function regrid(){if(document.visibilityState==='hidden')return;sweep();nearEnd();}
+document.addEventListener('visibilitychange',regrid);window.addEventListener('focus',regrid);window.addEventListener('pageshow',regrid);
 // Blocks are in page order, so a binary search finds the ones near view.
 function sweep(){if(!gs||!gs.blocks||!gs.blocks.length)return;const P=$('photos'),top=P.scrollTop-4000,bot=P.scrollTop+P.clientHeight+4000,B=gs.blocks;
  let lo=0,hi=B.length-1;while(lo<hi){const mid=(lo+hi)>>1;const g=B[mid];if(g.offsetTop+g.offsetHeight<top)lo=mid+1;else hi=mid;}
