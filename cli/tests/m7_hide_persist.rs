@@ -1364,8 +1364,10 @@ fn m7_recheck_and_img_diagnostics() {
             .unwrap();
             written += 1;
         }
+        // 100 re-check samples per level (criterion 2 needs 100+); /img
+        // has its own loop below with 200 samples.
         let mut recheck = Vec::new();
-        for k in 0..20 {
+        for k in 0..100 {
             if k % 2 == 0 {
                 fs::write(&touch, b"x").unwrap();
             } else {

@@ -47,6 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Build the index tests and X1
+        id: build
         # Prebuilt here so /usr/bin/time -v in m6-one.sh measures the tests, not rustc.
         run: |
           cargo test --release --locked -p albumen-ingest --test index_shared --no-run
@@ -83,8 +84,9 @@ jobs:
             bash .github/m6-one.sh readers_keep_answering_while_one_writer_saves X1
 
       - name: M7 hidden photos stay hidden at ${{ github.event.inputs.files || '380000' }} files (M6 bars)
-        # Runs even when an X2/X3/X1 step failed; the job still fails on them.
-        if: always()
+        # Runs even when an X2/X3/X1 step failed (not on cancel or a failed
+        # build); the job still fails on them.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           # hide_poll_ms (one /api/found hide-line refresh after the listing) is
           # PROVISIONAL and non-blocking: printed ("M7 HIDE_POLL_BAR PROVISIONAL
@@ -96,7 +98,7 @@ jobs:
             bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7
 
       - name: The rest of the M7 hide tests
-        if: always()
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
@@ -108,14 +110,20 @@ jobs:
 
       - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (print-only)
         # Non-blocking: prints "M7 RECHECK_DIAG tombstones=N ... recheck_p95_ms ... img_p95_ms"
-        # for 0, 1k and 10k tombstones; nothing is gated on it.
-        if: always()
-        continue-on-error: true
+        # for 0, 1k and 10k tombstones (100 re-check samples each). Timing is
+        # print-only (criterion 2 bars pending 100 samples), but the step fails
+        # unless the test ran (exactly 1 passed) and printed 3+ RECHECK_DIAG lines.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
+          set -o pipefail
           ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -E '^M7 RECHECK_DIAG' m7-recheck.log || true
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out' m7-recheck.log \
+            || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
+          n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
+          [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
+          grep -E '^M7 RECHECK_DIAG' m7-recheck.log
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
         run: |
@@ -196,11 +204,17 @@ jobs:
       - name: M7 re-check and /img diagnostics at 50,000 files (print-only)
         # Non-blocking. 50k, not 380k: writing and listing 380k files on a
         # Windows runner would take a large share of the job; 50k keeps it
-        # short. Raise it once a run shows the time.
-        if: always()
-        continue-on-error: true
+        # short. Raise it once a run shows the time. Timing is print-only, but
+        # the step fails unless exactly 1 passed and 3+ RECHECK_DIAG lines printed.
+        # No separate build step on Windows: the M7 hide tests step builds.
+        if: ${{ !cancelled() }}
         run: |
+          set -o pipefail
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -E '^M7 RECHECK_DIAG' m7-recheck.log || true
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out' m7-recheck.log \
+            || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
+          n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
+          [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
+          grep -E '^M7 RECHECK_DIAG' m7-recheck.log
