@@ -92,10 +92,16 @@ jobs:
           # PROVISIONAL and non-blocking: printed ("M7 HIDE_POLL_BAR PROVISIONAL
           # non-blocking ...") until 3+ CI samples exist; not asserted, not gated here.
           # First tile <= 2 s, full listing (ready_ms) <= 60 s, and gui child peak RSS <= 332 MiB, with no hidden photo shown.
+          set -o pipefail
+          rc=0
           ALBUMEN_M7_FILES=$FILES ALBUMEN_M7_BARS=1 M6_TREE_RSS=diag \
             M6_PKG=albumen M6_TEST=m7_hide_persist M6_FEATURES=test-hooks \
             M6_RESULT_MAX="first_tile_ms=2000 ready_ms=60000 gui_child_peak_rss_kb=339968 hidden_shown=0" \
-            bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7
+            bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7 2>&1 | tee m7-scale.log || rc=$?
+          # PL (5ee2cec): memory with the full-body cache at this scale,
+          # printed (the 332 MiB bar above is unchanged).
+          echo "M7 R2_MEM files=$FILES body_cache=on $(grep -oE 'gui_child_peak_rss_kb=[0-9a-z]+' m7-scale.log | tail -1)"
+          exit $rc
 
       - name: The rest of the M7 hide tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -188,6 +194,27 @@ jobs:
           grep -E 'M7 NO_FLICKER_RETAKE variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_RETAKE lines"; exit 1; }
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
+
+      - name: M7 body-cache mutant (5ee2cec 1073 fix; merge-blocking)
+        # The full /api/library answer of an unchanged view is sent from its
+        # cached bytes (common.rs:1073 request p95 root cause: re-serializing
+        # every entry on every request). With
+        # ALBUMEN_TEST_MUTATE=gui-no-body-cache every full answer is
+        # serialized again and the no-flicker test must fail on
+        # lib_body_hits (not on timing).
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          if ALBUMEN_TEST_MUTATE=gui-no-body-cache cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
+            m7_no_flicker_worker_error -- --exact --nocapture --test-threads=1 > m7-body-mutant.log 2>&1; then
+            echo "::error::mutant gui-no-body-cache survived"; exit 1
+          fi
+          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out' m7-body-mutant.log \
+            || { echo "::error::mutant gui-no-body-cache did not fail exactly m7_no_flicker_worker_error"; tail -50 m7-body-mutant.log; exit 1; }
+          grep -Eq 'full answers re-serialized per request: lib_body_hits 0 of [0-9]+ requests' m7-body-mutant.log \
+            || { echo "::error::mutant gui-no-body-cache failed, but not on lib_body_hits"; tail -50 m7-body-mutant.log; exit 1; }
+          grep -E 'full answers re-serialized per request' m7-body-mutant.log
+          echo "M7 MUTATION gui-no-body-cache test=m7_no_flicker_worker_error outcome=FAILED_AS_REQUIRED"
 
       - name: M7 timing tests under background CPU load (print-only; FRAGO 10:22Z (3))
         # Not a gate: the m7_timing binary run once more, serially and then
@@ -520,6 +547,27 @@ jobs:
           grep -E 'M7 NO_FLICKER_RETAKE variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_RETAKE lines"; exit 1; }
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
+
+      - name: M7 body-cache mutant (Windows) (5ee2cec 1073 fix; merge-blocking)
+        # The full /api/library answer of an unchanged view is sent from its
+        # cached bytes (common.rs:1073 request p95 root cause: re-serializing
+        # every entry on every request). With
+        # ALBUMEN_TEST_MUTATE=gui-no-body-cache every full answer is
+        # serialized again and the no-flicker test must fail on
+        # lib_body_hits (not on timing).
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          if ALBUMEN_TEST_MUTATE=gui-no-body-cache cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
+            m7_no_flicker_worker_error -- --exact --nocapture --test-threads=1 > m7-body-mutant.log 2>&1; then
+            echo "::error::mutant gui-no-body-cache survived"; exit 1
+          fi
+          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out' m7-body-mutant.log \
+            || { echo "::error::mutant gui-no-body-cache did not fail exactly m7_no_flicker_worker_error"; tail -50 m7-body-mutant.log; exit 1; }
+          grep -Eq 'full answers re-serialized per request: lib_body_hits 0 of [0-9]+ requests' m7-body-mutant.log \
+            || { echo "::error::mutant gui-no-body-cache failed, but not on lib_body_hits"; tail -50 m7-body-mutant.log; exit 1; }
+          grep -E 'full answers re-serialized per request' m7-body-mutant.log
+          echo "M7 MUTATION gui-no-body-cache test=m7_no_flicker_worker_error outcome=FAILED_AS_REQUIRED"
 
       - name: M7 synced-in photos, unhide while pending, PENDING_LIMIT and exhausted panics (XO 04:41Z; merge-blocking)
         # Synced-in photos show with no unhide or scan; a photo unhidden while
