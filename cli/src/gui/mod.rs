@@ -127,6 +127,11 @@ struct LibraryView {
     record_ends: Vec<u32>,
     /// Length of the full answer once ready, counted on first request.
     full_len: std::sync::OnceLock<usize>,
+    /// The full answer's bytes once ready, built once per view (1073 root
+    /// cause: re-serializing every path on every request was ~3 ms of CPU
+    /// of a ~4 ms debug request, so any CPU contention pushed requests
+    /// past the 10 ms p95 bar). A view never changes once built.
+    full_body: std::sync::OnceLock<Vec<u8>>,
     paths: Vec<u8>,
     path_ends: Vec<u32>,
     events: Vec<EventIdx>,
@@ -284,6 +289,15 @@ impl LibraryView {
                 Ok(())
             }
         }
+        if self.ready && !body_cache_mutant() && self.full_body.get().is_none() {
+            let mut b = Vec::with_capacity(self.full_len.get().copied().unwrap_or(1 << 16));
+            if self.write_json(&mut b, None).is_ok() {
+                LIB_BODY_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.full_len.set(b.len());
+                let _ = self.full_body.set(b);
+            }
+            return;
+        }
         if self.ready && self.full_len.get().is_none() {
             let mut c = Count(0);
             if self.write_json(&mut c, None).is_ok() {
@@ -306,6 +320,11 @@ impl LibraryView {
                 len
             )
         };
+        if let (None, true, Some(b)) = (page, self.ready, self.full_body.get()) {
+            LIB_BODY_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            header(stream, b.len())?;
+            return stream.write_all(b);
+        }
         if let (None, true, Some(&n)) = (page, self.ready, self.full_len.get()) {
             header(stream, n)?;
             let mut w = std::io::BufWriter::with_capacity(1 << 16, &mut *stream);
@@ -314,11 +333,16 @@ impl LibraryView {
         }
         let mut buf = Vec::with_capacity(self.full_len.get().copied().unwrap_or(1 << 16));
         self.write_json(&mut buf, page)?;
+        header(stream, buf.len())?;
+        let r = stream.write_all(&buf);
         if page.is_none() && self.ready {
             let _ = self.full_len.set(buf.len());
+            if !body_cache_mutant() {
+                LIB_BODY_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.full_body.set(buf);
+            }
         }
-        header(stream, buf.len())?;
-        stream.write_all(&buf)
+        r
     }
 }
 
@@ -777,6 +801,7 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             // D2: per-request timing (ALBUMEN_HIDE_DIAG_FILE): what each
             // listing request waited on.
             let t0 = std::time::Instant::now();
+            let (c0, q0) = (inline_t::cpu_us(), inline_t::rq_ns());
             let walks = WALKS_RUNNING.load(std::sync::atomic::Ordering::Relaxed);
             let cur = server.library.lock().unwrap().clone();
             let t_lock = t0.elapsed();
@@ -801,12 +826,17 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
                     let t_resp = t0.elapsed();
                     let r = v.respond(&mut stream, page);
                     lib_req_record(t_lock, t_view, t_resp, t0.elapsed());
+                    // 1073 root cause: CPU and run-queue wait of the whole
+                    // request, and the respond (body write) step on its own.
                     hide_diag::line(&format!(
-                        "lib_req gen={} walks={walks} lock_ms={:.2} view_ms={:.2} total_ms={:.2}",
+                        "lib_req gen={} walks={walks} lock_ms={:.2} view_ms={:.2} respond_ms={:.2} total_ms={:.2} cpu_ms={:.2} runq_ms={:.2}",
                         v.generation,
                         t_lock.as_secs_f64() * 1e3,
                         (t_view - t_lock).as_secs_f64() * 1e3,
-                        t0.elapsed().as_secs_f64() * 1e3
+                        (t0.elapsed() - t_resp).as_secs_f64() * 1e3,
+                        t0.elapsed().as_secs_f64() * 1e3,
+                        inline_t::cpu_us().saturating_sub(c0) as f64 / 1e3,
+                        (inline_t::rq_ns() - q0) as f64 / 1e6
                     ));
                     r
                 }
@@ -3818,6 +3848,24 @@ fn prestamp_stamps(
 
 /// CI mutant `gui-trust-cache`: skip the live folder stats and trust the
 /// notification-driven cache alone (must make the silent-miss test fail).
+/// Full /api/library answers sent from a view's cached bytes, and those
+/// bytes built (`lib_body_hits`, `lib_body_builds`).
+static LIB_BODY_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LIB_BODY_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `ALBUMEN_TEST_MUTATE=gui-no-body-cache` (test-hooks/debug only): every
+/// full answer is serialized again, as before the 1073 fix.
+fn body_cache_mutant() -> bool {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    {
+        std::env::var("ALBUMEN_TEST_MUTATE").is_ok_and(|v| v == "gui-no-body-cache")
+    }
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+    {
+        false
+    }
+}
+
 fn trust_cache_mutant() -> bool {
     #[cfg(any(debug_assertions, feature = "test-hooks"))]
     {
@@ -4653,7 +4701,7 @@ mod inline_t {
     /// This thread's run-queue wait in ns from
     /// /proc/thread-self/schedstat field 2 (Linux, print-only); -1 when
     /// unavailable (no procfs or schedstats).
-    fn rq_ns() -> i64 {
+    pub fn rq_ns() -> i64 {
         #[cfg(target_os = "linux")]
         {
             if let Ok(t) = std::fs::read_to_string("/proc/thread-self/schedstat") {
@@ -4991,6 +5039,12 @@ fn found_json(server: &Server) -> serde_json::Value {
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
     out["hide_req_retake_stale"] = REQ_RETAKE_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["lib_body_hits"] = LIB_BODY_HITS
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["lib_body_builds"] = LIB_BODY_BUILDS
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["hide_reverified"] = HID_REVERIFIED

@@ -1015,6 +1015,22 @@ fn no_flicker(variant: &str) {
         rewalks, MAX_REWALKS,
         "{rewalks} library re-walks (exactly {MAX_REWALKS})"
     );
+    // 1073 root cause: every request time in order (k=0 first).
+    println!(
+        "M7 NO_FLICKER_TIMES variant={variant} prestamp_req_stale={} ms=[{}]",
+        found_page(&addr)["hide_prestamp_req_stale"],
+        times.iter().map(|t| format!("{t:.1}")).collect::<Vec<_>>().join(",")
+    );
+    // 1073 fix: an unchanged view's full answer is sent from its cached
+    // bytes, not serialized again on every request (fails under
+    // ALBUMEN_TEST_MUTATE=gui-no-body-cache): most of the timed requests
+    // re-fetch a view already answered.
+    let hits = found_page(&addr)["lib_body_hits"].as_u64().unwrap_or(0);
+    assert!(
+        hits as usize >= times.len() / 2,
+        "full answers re-serialized per request: lib_body_hits {hits} of {} requests",
+        times.len()
+    );
     let r_p95 = pct(&mut times.clone(), 0.95);
     let r_max = pct(&mut times.clone(), 1.0);
     let e2e = e2e.into_inner();
@@ -1049,7 +1065,7 @@ fn no_flicker(variant: &str) {
     println!(
         "M7 NO_FLICKER_REQ variant={variant} requests={} tomb_io_total={} tomb_io_max={} \
          lock_wait_max_ms={} drain_max_ms={} total_max_ms={} tombstone_reads={} recheck_reads={} \
-         keep_stats={} lock_hold={}",
+         keep_stats={} lock_hold={} lib_body_hits={} lib_body_builds={}",
         r["requests"],
         r["tomb_io_total"],
         r["tomb_io_max"],
@@ -1060,6 +1076,8 @@ fn no_flicker(variant: &str) {
         f["hide_recheck_reads"],
         f["hide_keep_stats"],
         f["hide_lock_hold"],
+        f["lib_body_hits"],
+        f["lib_body_builds"],
     );
     assert!(
         keep <= INLINE_CAP_MS && build <= INLINE_CAP_MS,
