@@ -194,10 +194,14 @@ itself after the first answer:
 - Each check stamps every folder (one stat each). An unchanged trusted folder
   is handled inline as before. Any other folder is handed to background
   workers (up to 8 threads) that list it and read its tombstones.
-- The request waits at most 40 ms (INLINE_BUDGET) for that work. A folder not
-  confirmed by then is *pending*: every photo in it is hidden (A8, fail
-  closed) until a later check applies the worker's result. A new hide is
-  therefore hidden on the first request either way.
+- Once primed the request does not wait for that work (XO 04:08Z; the
+  40 ms INLINE_BUDGET is gone), except up to 40 ms (BLINK_BUDGET) when a
+  photo on screen would otherwise be withheld. A folder not confirmed is
+  *pending*: a photo shown before stays shown only if its own tombstone is
+  absent or unchanged since a trusted show (one stat); every other photo
+  in it is withheld (A8, fail closed) until a background applier puts the
+  worker's result in place. A new hide is therefore hidden on the first
+  request either way.
 - A result is applied by folder name across a new listing generation; its
   stamp was taken before the listing, so a folder that changed again is
   simply listed again. A photo only withheld comes back by restoring the
@@ -246,3 +250,73 @@ Folder listing across a sync (`only_changed_folders_are_listed_across_a_sync`,
 box ctime): first request after a hide in one of three folders lists 1
 folder; after its window 1 more; then 0 over 3 checks; a recreated folder
 lists 1 and its new hide applies on the first request.
+
+## XO 04:08Z: Windows k=1/k=2 stalls, withheld time, no-flicker test
+
+Root cause of the Windows 10k miss (job 124431323931; note
+1zgYReyhVIS9D5v4HnyohSvlLIGRwy96n): the 40 ms budget capped only the wait
+for workers. The request still rebuilt the 50k filtered view and the
+hidden/withheld set inline, and a landed folder was applied only by the
+next request, so k=1 and k=2 each paid a full rebuild while 8 workers
+competed for the cores (246.9 ms at k=1, 109.5 ms at k=2). Withheld time
+was high because nothing applied results between requests and the page
+polled every 10 s. The same cause shows on Linux 380k (job 124431323728:
+max 150.5 ms, withheld 523.9 ms at k=2). The split on Windows is from the
+code and the log, not measured on Windows.
+
+Changes (branch m7-noflicker from d96e701; the tree difference between
+d96e701 and 6c8d50c is one file mode, accepted by the Product Lead):
+
+- No inline wait once primed (BLINK_BUDGET 40 ms only when a shown photo
+  would be withheld); a single-flight, coalescing background applier puts
+  each finished folder and the rebuilt view in place.
+- Workers use available cores minus one (1..8), so requests keep a core.
+- A worker panic is caught, logged (`hide: worker panicked; retrying
+  <dir> (attempt N)`), counted (`hide_worker_panics`) and re-queued up to
+  3 times; after that the folder is unlisted (its photos hidden).
+- Bug found by the no-flicker test and fixed: a photo hidden, then
+  withheld while its folder was pending, then shown when the folder landed
+  was not treated as an unhide (it was only "released"), so the gui never
+  listed the library again; the photo and any new photos stayed missing
+  until another unhide. `hard`/`hard_w` now track it.
+- The page polls `/api/found` every 200 ms while a folder is pending.
+- CI: withheld and UI p95/max <= 1 s are asserted by
+  `.github/m7-recheck-bar.sh` (no `|| true`); a YAML error in the 380k
+  step name (`bar: `) is fixed.
+
+No-flicker acceptance (PL doc 1Ak9gqDUQp4BfibMVlw4fd4qLw8CKUxPH section
+2): `m7_no_flicker_ctime` (Linux) / `m7_no_flicker_changetime` (Windows),
+`_coarse_window`, `_worker_error`, `_worker_panic`. Folder d00 is held
+pending by `ALBUMEN_TEST_RELIST_GATE=d00` while `<library>/.albumen-test-gate`
+exists. 5,000 photos in 50 folders, 250 hides, 50 show tombstones; the
+sync adds 20 photos and a new hide h in d00 and a non-photo file, and
+removes one hide in d01 (deviation: the gui lists new photos only after
+an unhide or a scan, so the unhide is what brings them in). At >= 20
+requests while gated: no photo of V0 except h disappears, h never shows,
+no new photo shows, no H0 photo shows, `hide_pending_dirs >= 1` (a gate
+not honoured fails). After the release the new photos show within 1 s,
+the set is exact and stable for 5 requests. Then 20 syncs measure the
+withheld time (p95 and max <= 1 s, asserted) and request time (p95 <= 10,
+max <= 100 ms, asserted, the whole `/api/library` call). Variants:
+coarse forces the 2 s same-tick window (Linux: ext + whole-second ctime
+hooks; Windows: already 2 s) and does not wait it out; worker_error makes
+h's tombstone unreadable (`ALBUMEN_TEST_TOMB_ERROR`), asserted in
+`hide_note` and stderr; worker_panic panics the gated re-list
+(`ALBUMEN_TEST_RELIST_PANIC_AFTER_GATE=1`) and asserts the log line and
+`hide_worker_panics >= 1`. Deviation: the PL's five variants are ctime,
+ChangeTime, coarse, error, panic; each platform runs four (the key variant
+is compiled for its own platform), so CI requires "4 passed; 0 failed;
+0 ignored" and one `M7 NO_FLICKER` line per variant on each.
+
+Box (Linux ctime, not CI evidence): all 4 pass; disappearances=0,
+h_shown=0, release-to-new ~56 ms, withheld p95 ~420-430 ms, max <= 633 ms,
+request p95 7.6-9.8 ms, max <= 49 ms. 50k diag (3 runs): 10k re-check
+p95 11.6 / 9.2 / 7.6 ms, max 41.2 / 34.5 / 34.1 ms; withheld p95 <= 15.2
+ms, max <= 22.4 ms; UI p95/max <= 24.3/28.0 ms. One of the three runs
+missed p95 <= 10 ms at 10k on the box; d96e701 on the box gave 5.0 ms
+p95 / 22.2 ms max, so the p95 is not better than d96e701 here and the
+max is. Windows is unverified until CI runs.
+
+Gaps: the UI still refetches the full library on a version change (380k);
+PENDING_LIMIT re-dispatch has no dedicated test; deny-write is not
+verified on Windows; GUI DOM harness open.

@@ -1374,9 +1374,32 @@ fn an_unchanged_request_reads_no_tombstone() {
     assert!(reads(&addr) > after);
 }
 
+/// Whether the ALBUMEN_TEST_RELIST_* hooks are honoured by this build.
+const HOOKS: bool = cfg!(any(debug_assertions, feature = "test-hooks"));
+
+/// Wait until no folder is pending (every background re-list applied), so
+/// counters read after it are final (XO 03:36Z (7): no race with a worker).
+fn settled(addr: &str) -> serde_json::Value {
+    let began = Instant::now();
+    loop {
+        let f = found_page(addr);
+        if f["hide_pending_dirs"].as_u64() == Some(0) {
+            return f;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "still pending: {f}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// XO 03:22Z (1): across a sync only the changed folder is listed again,
 /// a new hide is hidden on the first request, a recreated folder is listed
-/// again, and unchanged folders are listed 0 times.
+/// again, and unchanged folders are listed 0 times. XO 03:36Z (7): each
+/// count is read only once no folder is pending, and (with the test hooks)
+/// every re-list is held 300 ms so the changed folder is really pending
+/// while the first request is answered.
 #[test]
 fn only_changed_folders_are_listed_across_a_sync() {
     let library = tempfile::tempdir().unwrap();
@@ -1400,7 +1423,13 @@ fn only_changed_folders_are_listed_across_a_sync() {
     set_mtime(library.path(), old);
     // Let every ctime (changed by the writes above) leave the window.
     std::thread::sleep(Duration::from_millis(2100));
-    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    let (_gui, addr, _) = start_env(
+        library.path(),
+        work.path(),
+        index.path(),
+        home.path(),
+        &[("ALBUMEN_TEST_RELIST_DELAY_MS", "300")],
+    );
     ready_found(&addr);
     let all = [
         "a/IMG_0001.JPG",
@@ -1415,10 +1444,12 @@ fn only_changed_folders_are_listed_across_a_sync() {
     // Settle: a folder first listed inside its window is listed once more.
     std::thread::sleep(Duration::from_millis(2100));
     listed(&addr);
+    settled(&addr);
     let before = dirs(&addr);
     for _ in 0..3 {
         assert_eq!(listed(&addr), all);
     }
+    settled(&addr);
     assert_eq!(dirs(&addr) - before, 0, "an unchanged folder was listed");
     // Sync: a hide lands in b only.
     fs::write(
@@ -1439,18 +1470,27 @@ fn only_changed_folders_are_listed_across_a_sync() {
         hid_b,
         "the new hide was not hidden on the first request"
     );
+    let pending = found_page(&addr)["hide_pending_dirs"].as_u64().unwrap();
+    if HOOKS {
+        assert_eq!(pending, 1, "b was not pending on the first request");
+    }
+    settled(&addr);
     let first = dirs(&addr) - before;
     // Wait out b's window: b may be listed once more, a and c never.
     std::thread::sleep(Duration::from_millis(2100));
     let before = dirs(&addr);
     assert_eq!(listed(&addr), hid_b);
+    settled(&addr);
     let settle = dirs(&addr) - before;
     let before = dirs(&addr);
     for _ in 0..3 {
         assert_eq!(listed(&addr), hid_b);
     }
+    settled(&addr);
     let steady = dirs(&addr) - before;
-    println!("M7 FOLDERS_LISTED sync_first={first} after_window={settle} unchanged={steady}");
+    println!(
+        "M7 FOLDERS_LISTED sync_first={first} after_window={settle} unchanged={steady} pending_at_first={pending}"
+    );
     assert_eq!(
         first, 1,
         "only the changed folder is listed on the first request"
@@ -1482,9 +1522,190 @@ fn only_changed_folders_are_listed_across_a_sync() {
         ],
         "the recreated folder was not listed again"
     );
+    settled(&addr);
     let recreated = dirs(&addr) - before;
     println!("M7 FOLDERS_LISTED recreated={recreated} key={key}");
     assert_eq!(recreated, 1, "only the recreated folder is listed");
+}
+
+/// XO 03:36Z (4): a folder held pending (each re-list delayed 1.5 s by
+/// the test hook) hides no photo that was on screen and whose own
+/// tombstone is absent or unchanged; only the photo whose tombstone is
+/// new or changed is withheld, and it is back, following the page's own
+/// poll, within 1 s of its folder being confirmed.
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs a debug build or --features test-hooks"
+)]
+fn a_pending_folder_hides_no_visible_photo() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    for d in ["a", "b"] {
+        let dir = library.path().join(d);
+        fs::create_dir_all(&dir).unwrap();
+        for n in 1..=4 {
+            let p = dir.join(format!("IMG_000{n}.JPG"));
+            fs::write(&p, format!("synthetic-m7-pending-{d}-{n}")).unwrap();
+            set_mtime(&p, old);
+        }
+    }
+    // a/2 and a/4: a tombstone that says show (a/2 stays unchanged).
+    for n in [2, 4] {
+        fs::write(
+            library
+                .path()
+                .join(format!("a/IMG_000{n}.JPG.albumen-tombstone")),
+            br#"{"hidden":false,"reason":"unhide"}"#,
+        )
+        .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(2100));
+    let (_gui, addr, _) = start_env(
+        library.path(),
+        work.path(),
+        index.path(),
+        home.path(),
+        &[("ALBUMEN_TEST_RELIST_DELAY_MS", "1500")],
+    );
+    ready_found(&addr);
+    let all: Vec<String> = ["a", "b"]
+        .iter()
+        .flat_map(|d| (1..=4).map(move |n| format!("{d}/IMG_000{n}.JPG")))
+        .collect();
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    // Sync into a: a new hide on a/3, a/4's show tombstone rewritten, a
+    // file that is not a photo added.
+    fs::write(
+        library.path().join("a/IMG_0003.JPG.albumen-tombstone"),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    fs::write(
+        library.path().join("a/IMG_0004.JPG.albumen-tombstone"),
+        br#"{"hidden":false,"reason":"unhide again"}"#,
+    )
+    .unwrap();
+    fs::write(library.path().join("a/notes.txt"), b"synthetic").unwrap();
+    // Out of the same-tick window (2 s where it is coarse), so a is listed
+    // once: what is measured is the pending time, not a second re-list.
+    std::thread::sleep(Duration::from_millis(2100));
+    let t = Instant::now();
+    let first = listed(&addr);
+    let f = found_page(&addr);
+    assert_eq!(f["hide_pending_dirs"], 1, "a was not pending: {f}");
+    let must = [
+        "a/IMG_0001.JPG",
+        "a/IMG_0002.JPG",
+        "b/IMG_0001.JPG",
+        "b/IMG_0004.JPG",
+    ];
+    for p in must {
+        assert!(first.contains(&p.to_string()), "{p} blinked out: {first:?}");
+    }
+    assert!(
+        !first.contains(&"a/IMG_0003.JPG".to_string()),
+        "the new hide showed"
+    );
+    assert!(
+        !first.contains(&"a/IMG_0004.JPG".to_string()),
+        "a changed tombstone was trusted"
+    );
+    // While a is pending: every view still has them.
+    let mut views = 1;
+    let mut ver = f["hide_version"].as_u64().unwrap();
+    let mut back = None;
+    while back.is_none() {
+        assert!(t.elapsed() < Duration::from_secs(10), "a/4 never came back");
+        std::thread::sleep(Duration::from_millis(200));
+        let f = found_page(&addr);
+        let v = f["hide_version"].as_u64().unwrap();
+        if v == ver && f["hide_pending_dirs"].as_u64() != Some(0) {
+            let now = listed(&addr);
+            views += 1;
+            for p in must {
+                assert!(
+                    now.contains(&p.to_string()),
+                    "{p} blinked out while a was pending"
+                );
+            }
+            continue;
+        }
+        ver = v;
+        let now = listed(&addr);
+        views += 1;
+        for p in must {
+            assert!(now.contains(&p.to_string()), "{p} blinked out");
+        }
+        if now.contains(&"a/IMG_0004.JPG".to_string()) {
+            back = Some(t.elapsed());
+        }
+    }
+    let back = back.unwrap().as_secs_f64() * 1000.0;
+    let f = settled(&addr);
+    let confirmed = f["hide_withheld_last_ms"].as_f64().unwrap();
+    println!(
+        "M7 PENDING_KEEP views={views} back_after_ms={back:.0} withheld_ms={confirmed:.0} keep_stats={}",
+        f["hide_keep_stats"]
+    );
+    assert!(
+        back - confirmed <= 1000.0 && back <= 2500.0,
+        "a/4 came back {back:.0} ms after the sync, {confirmed:.0} ms of it pending"
+    );
+    let mut want = all.clone();
+    want.retain(|p| p != "a/IMG_0003.JPG");
+    assert_eq!(listed(&addr), want);
+}
+
+/// XO 03:36Z (5): a re-list worker that panics is caught and logged; its
+/// folder's photos are hidden meanwhile (fail closed) and the folder is
+/// listed again, so it never stays pending.
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs a debug build or --features test-hooks"
+)]
+fn a_relist_worker_that_panics_is_retried() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for d in ["a", "b"] {
+        fs::create_dir_all(library.path().join(d)).unwrap();
+        fs::write(library.path().join(format!("{d}/IMG_0001.JPG")), d).unwrap();
+    }
+    let (_gui, addr, _) = start_env(
+        library.path(),
+        work.path(),
+        index.path(),
+        home.path(),
+        &[("ALBUMEN_TEST_RELIST_PANIC", "a")],
+    );
+    ready_found(&addr);
+    let began = Instant::now();
+    loop {
+        let now = listed(&addr);
+        assert!(now.contains(&"b/IMG_0001.JPG".to_string()));
+        if now.contains(&"a/IMG_0001.JPG".to_string()) {
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(10), "a stayed hidden");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let f = settled(&addr);
+    println!(
+        "M7 WORKER_PANIC panics={} back_after_ms={}",
+        f["hide_worker_panics"],
+        began.elapsed().as_millis()
+    );
+    assert_eq!(f["hide_worker_panics"], 1, "{f}");
 }
 
 /// XO 02:30Z (b): the change key is the platform's own (ctime on Unix,
@@ -1898,15 +2119,67 @@ fn m7_recheck_and_img_diagnostics() {
             assert_eq!(code, 200);
         }
         let _ = fs::remove_file(&touch);
+        // XO 03:36Z (3): how long a withheld photo stays off screen, as the
+        // page sees it: a visible photo's show tombstone is rewritten (so it
+        // is withheld until its folder is confirmed), one request is made,
+        // then the page's own poll is followed (/api/found every 200 ms while
+        // a folder is pending, the grid fetched when hide_version moves)
+        // until /img serves the photo again. 20 samples, 20 folders.
+        let mut ui = Vec::new();
+        let mut withheld_k0 = 0;
+        for s in 0..20usize {
+            let p = rel(s + 50 * (s + 1));
+            let tomb = library.path().join(format!("{p}.albumen-tombstone"));
+            fs::write(&tomb, br#"{"hidden":false,"reason":"m7-ui"}"#).unwrap();
+            let t = Instant::now();
+            get(&addr, "/api/library?offset=0&limit=1");
+            let mut ver = found_page(&addr)["hide_version"].as_u64().unwrap();
+            if get(&addr, &format!("/img?p={p}")).0 != 200 {
+                withheld_k0 += 1;
+                loop {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let f = found_page(&addr);
+                    let v = f["hide_version"].as_u64().unwrap();
+                    if v != ver {
+                        ver = v;
+                        get(&addr, "/api/library?offset=0&limit=1");
+                        if get(&addr, &format!("/img?p={p}")).0 == 200 {
+                            break;
+                        }
+                    }
+                    assert!(t.elapsed() < Duration::from_secs(30), "{p} never came back");
+                }
+            }
+            ui.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let ui_p95 = pct(&mut ui.clone(), 0.95);
+        let ui_max = pct(&mut ui.clone(), 1.0);
         let f = found_page(&addr);
         println!(
             "M7 WITHHELD files={files} tombstones={written} key={} withheld_ms={} confirmed_at_k={} \
-             withheld_max_ms={} withheld_dirs={}",
+             withheld_max_ms={} withheld_p95_ms={} withheld_dirs={} ui_samples={} ui_withheld_at_k0={withheld_k0} \
+             ui_p95_ms={ui_p95:.1} ui_max_ms={ui_max:.1} keep_stats={} keep_max_ms={} worker_panics={} redispatched={}",
             f["hide_key"].as_str().unwrap_or("?"),
             withheld.map_or("n/a".into(), |w| format!("{:.1}", w.0)),
             withheld.map_or("n/a".into(), |w| w.1.to_string()),
             f["hide_withheld_max_ms"],
+            f["hide_withheld_p95_ms"],
             f["hide_withheld_dirs"],
+            ui.len(),
+            f["hide_keep_stats"],
+            f["hide_keep_max_ms"],
+            f["hide_worker_panics"],
+            f["hide_redispatched"],
+        );
+        assert!(
+            ui_p95 <= 1000.0 && ui_max <= 1000.0,
+            "a withheld photo stayed off screen too long: p95 {ui_p95:.1} ms, max {ui_max:.1} ms"
+        );
+        let wmax = f["hide_withheld_max_ms"].as_f64().unwrap();
+        let wp95 = f["hide_withheld_p95_ms"].as_f64().unwrap();
+        assert!(
+            wp95 <= 1000.0 && wmax <= 1000.0,
+            "a folder stayed pending too long: p95 {wp95} ms, max {wmax} ms"
         );
         let p95 = |v: &[f64]| {
             if v.is_empty() {
@@ -1979,4 +2252,380 @@ fn m7_recheck_and_img_diagnostics() {
              (pending 100 samples; print-only)"
         );
     }
+}
+
+/// `start_env` with the gui's stderr kept, for log-line assertions.
+fn start_logged(
+    library: &Path,
+    work: &Path,
+    index: &Path,
+    home: &Path,
+    env: &[(&str, &str)],
+) -> (Gui, String, std::sync::Arc<std::sync::Mutex<String>>) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .envs(env.iter().copied())
+        .args(["gui", "--no-open", "--port", "0", "--library"])
+        .arg(library)
+        .arg("--work")
+        .arg(work)
+        .env("ALBUMEN_INDEX_DIR", index)
+        .env("ALBUMEN_HOME", home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let err = BufReader::new(child.stderr.take().unwrap());
+    let sink = std::sync::Arc::clone(&log);
+    std::thread::spawn(move || {
+        for l in err.lines().map_while(Result::ok) {
+            let mut s = sink.lock().unwrap();
+            s.push_str(&l);
+            s.push('\n');
+        }
+    });
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut addr = None;
+    for line in lines.by_ref().map_while(Result::ok) {
+        if let Some(url) = line.strip_prefix("albumen gui: http://") {
+            addr = Some(url.trim_end_matches('/').to_string());
+            break;
+        }
+    }
+    std::thread::spawn(move || for _ in lines.map_while(Result::ok) {});
+    (Gui(child), addr.expect("gui prints its URL"), log)
+}
+
+/// Product Lead acceptance (doc 1Ak9gqDUQp4BfibMVlw4fd4qLw8CKUxPH, XO
+/// 04:08Z): while a folder is pending after a sync no visible photo
+/// disappears, a new hide never shows, new photos are withheld until the
+/// folder is confirmed, and then show within 1 s. The folder is held
+/// pending by the ALBUMEN_TEST_RELIST_GATE hook (certain, not timed); a
+/// gate that is not honoured is a failure. Then 20 more syncs measure the
+/// withheld-new-photo time (p95 and max <= 1 s, blocking).
+fn no_flicker(variant: &str) {
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(HOOKS, "needs a debug build or --features test-hooks");
+    }
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let lib = library.path();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let photo = |d: usize, n: usize| format!("d{d:02}/IMG_{n:04}.JPG");
+    let tomb = |p: &str| lib.join(format!("{p}.albumen-tombstone"));
+    // N = 5,000 photos in 50 folders. F = d00 (gated), G = d01 (the hides
+    // whose removal is the sync that brings the new photos in).
+    for d in 0..50 {
+        fs::create_dir_all(lib.join(format!("d{d:02}"))).unwrap();
+        for n in 0..100 {
+            let p = lib.join(photo(d, n));
+            fs::write(&p, format!("synthetic-m7-nf-{d}-{n}")).unwrap();
+            set_mtime(&p, old);
+        }
+    }
+    // H0: 250 hidden over 10 folders (d01..d10, 25 each).
+    let mut h0 = Vec::new();
+    for d in 1..=10 {
+        for n in 0..25 {
+            let p = photo(d, n);
+            fs::write(tomb(&p), br#"{"hidden":true,"reason":"hide"}"#).unwrap();
+            h0.push(p);
+        }
+    }
+    // 50 showing tombstones, 25 of them in F.
+    for d in [0, 20] {
+        for n in 50..75 {
+            fs::write(tomb(&photo(d, n)), br#"{"hidden":false,"reason":"unhide"}"#).unwrap();
+        }
+    }
+    std::thread::sleep(Duration::from_millis(2100));
+    let mut env = vec![("ALBUMEN_TEST_RELIST_GATE", "d00")];
+    let h = photo(0, 10);
+    let h_tomb = format!("{h}.albumen-tombstone");
+    match variant {
+        "coarse" if cfg!(unix) => {
+            env.push(("ALBUMEN_TEST_FS_MAGIC", "0xef53"));
+            env.push(("ALBUMEN_TEST_COARSE_CTIME", "1"));
+        }
+        "worker_error" => env.push(("ALBUMEN_TEST_TOMB_ERROR", &h_tomb)),
+        "worker_panic" => {
+            env.push(("ALBUMEN_TEST_RELIST_PANIC", "d00"));
+            env.push(("ALBUMEN_TEST_RELIST_PANIC_AFTER_GATE", "1"));
+        }
+        _ => {}
+    }
+    let (_gui, addr, log) = start_logged(lib, work.path(), index.path(), home.path(), &env);
+    let f0 = ready_found(&addr);
+    let key = f0["hide_key"].as_str().unwrap_or("").to_string();
+    let want = if cfg!(windows) { "changetime" } else { "ctime" };
+    assert_eq!(key, want, "key does not match the platform");
+    if variant == "coarse" {
+        assert_eq!(
+            f0["hide_same_tick_ms"], 2000,
+            "coarse window not in force: {f0}"
+        );
+    }
+    listed(&addr);
+    settled(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    let v0 = listed(&addr);
+    settled(&addr);
+    assert_eq!(v0.len(), 4750, "|V0|");
+    let set = |v: &[String]| {
+        v.iter()
+            .cloned()
+            .collect::<std::collections::HashSet<String>>()
+    };
+    let v0s = set(&v0);
+    assert!(
+        h0.iter().all(|p| !v0s.contains(p)),
+        "V0 shows a hidden photo"
+    );
+    assert!(v0s.contains(&h));
+    // Sync on F: 20 new photos, a new hide on h, an unrelated file; and the
+    // unhide in G that makes the gui list the library again.
+    let gate = lib.join(".albumen-test-gate");
+    fs::write(&gate, b"").unwrap();
+    let p_new: Vec<String> = (0..20).map(|n| format!("d00/NEW_{n:04}.JPG")).collect();
+    for p in &p_new {
+        fs::write(lib.join(p), format!("synthetic-m7-nf-new-{p}")).unwrap();
+    }
+    fs::write(lib.join(&h_tomb), br#"{"hidden":true,"reason":"hide"}"#).unwrap();
+    fs::write(lib.join("d00/notes.txt"), b"synthetic").unwrap();
+    let u = photo(1, 0);
+    fs::remove_file(tomb(&u)).unwrap();
+    if variant != "coarse" {
+        // Out of the same-tick window, so F is listed once (coarse: not).
+        std::thread::sleep(Duration::from_millis(2100));
+    }
+    let mut unhidden = std::collections::HashSet::from([u.clone()]);
+    let mut disappearances = 0usize;
+    let mut h_shown = 0usize;
+    let mut times = Vec::new();
+    let check = |r: &[String],
+                 unhidden: &std::collections::HashSet<String>,
+                 dis: &mut usize,
+                 hs: &mut usize,
+                 new_ok: bool| {
+        let rs = set(r);
+        *dis += v0.iter().filter(|p| **p != h && !rs.contains(*p)).count();
+        *hs += usize::from(rs.contains(&h));
+        assert!(
+            h0.iter().all(|p| unhidden.contains(p) || !rs.contains(p)),
+            "a hidden photo showed"
+        );
+        if !new_ok {
+            assert!(
+                p_new.iter().all(|p| !rs.contains(p)),
+                "a new photo showed while pending"
+            );
+        }
+    };
+    let timed = |addr: &str, times: &mut Vec<f64>| {
+        let t = Instant::now();
+        let r = listed(addr);
+        times.push(t.elapsed().as_secs_f64() * 1000.0);
+        r
+    };
+    let r1 = timed(&addr, &mut times);
+    check(&r1, &unhidden, &mut disappearances, &mut h_shown, false);
+    let f = found_page(&addr);
+    assert!(
+        f["hide_pending_dirs"].as_u64().unwrap_or(0) >= 1,
+        "the gate was not honoured (no folder pending): {f}"
+    );
+    // Pending: at least 20 requests at ~50 ms, and until the unhide's new
+    // listing (with the new photos in it) is in place.
+    let began = Instant::now();
+    let mut k = 1;
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let r = timed(&addr, &mut times);
+        k += 1;
+        check(&r, &unhidden, &mut disappearances, &mut h_shown, false);
+        let f = found_page(&addr);
+        assert!(
+            f["hide_pending_dirs"].as_u64().unwrap_or(0) >= 1,
+            "F stopped being pending before the release: {f}"
+        );
+        let seen_u = r.contains(&u);
+        if k >= 20 && seen_u && (variant != "coarse" || began.elapsed() > Duration::from_secs(2)) {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the unhide never applied"
+        );
+    }
+    // Release.
+    fs::remove_file(&gate).unwrap();
+    let t = Instant::now();
+    let mut back = None;
+    while back.is_none() {
+        std::thread::sleep(Duration::from_millis(50));
+        let r = timed(&addr, &mut times);
+        let rs = set(&r);
+        check(&r, &unhidden, &mut disappearances, &mut h_shown, true);
+        if p_new.iter().all(|p| rs.contains(p)) {
+            back = Some(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "new photos never showed"
+        );
+    }
+    let back = back.unwrap();
+    settled(&addr);
+    let mut want_set = v0s.clone();
+    want_set.remove(&h);
+    want_set.extend(p_new.iter().cloned());
+    want_set.insert(u.clone());
+    let fin = listed(&addr);
+    assert_eq!(set(&fin), want_set, "final set");
+    for _ in 0..5 {
+        assert_eq!(listed(&addr), fin, "the grid oscillated");
+    }
+    if variant == "worker_panic" {
+        let l = log.lock().unwrap().clone();
+        assert!(
+            l.contains("hide: worker panicked; retrying d00"),
+            "no panic log line: {l}"
+        );
+        assert!(found_page(&addr)["hide_worker_panics"].as_u64() >= Some(1));
+    }
+    if variant == "worker_error" {
+        let note = found_page(&addr)["hide_note"].to_string();
+        assert!(
+            note.contains("test hook: unreadable"),
+            "error not in the note: {note}"
+        );
+        assert!(
+            log.lock().unwrap().contains("test hook: unreadable"),
+            "error not on stderr"
+        );
+    }
+    // 20 syncs: one new photo in F and one unhide in G each, timed from the
+    // writes to the new photo in /api/library (polled at 200 ms, as the
+    // page polls while a folder is pending).
+    let mut withheld = Vec::new();
+    let mut known = fin.clone();
+    for r in 1..=20 {
+        let np = format!("d00/NEW_R{r:03}.JPG");
+        fs::write(lib.join(&np), format!("synthetic-m7-nf-{np}")).unwrap();
+        let ur = photo(1, r);
+        fs::remove_file(tomb(&ur)).unwrap();
+        unhidden.insert(ur.clone());
+        let t = Instant::now();
+        loop {
+            let rr = timed(&addr, &mut times);
+            let rs = set(&rr);
+            let lost = known.iter().filter(|p| !rs.contains(*p)).count();
+            disappearances += lost;
+            h_shown += usize::from(rs.contains(&h));
+            if rs.contains(&np) {
+                withheld.push(t.elapsed().as_secs_f64() * 1000.0);
+                known = rr;
+                break;
+            }
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "{np} never showed (u {} shown: {}; in found: new {} u {}; tomb gone {}): {}",
+                ur,
+                rs.contains(&ur),
+                found_page(&addr)["paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p == &np),
+                found_page(&addr)["paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p == &ur),
+                !tomb(&ur).exists(),
+                {
+                    let mut f = found_page(&addr);
+                    f["paths"] = serde_json::Value::Null;
+                    f
+                }
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    let w_p95 = pct(&mut withheld.clone(), 0.95);
+    let w_max = pct(&mut withheld.clone(), 1.0);
+    let r_p95 = pct(&mut times.clone(), 0.95);
+    let r_max = pct(&mut times.clone(), 1.0);
+    println!(
+        "M7 NO_FLICKER variant={variant} key={key} requests={} disappearances={disappearances} \
+         h_shown={h_shown} release_to_new_ms={back:.1} withheld_samples={} withheld_p95_ms={w_p95:.1} \
+         withheld_max_ms={w_max:.1} recheck_p95_ms={r_p95:.1} recheck_max_ms={r_max:.1}",
+        times.len(),
+        withheld.len()
+    );
+    assert_eq!(disappearances, 0, "a visible photo disappeared");
+    assert_eq!(h_shown, 0, "the new hide showed");
+    assert!(back <= 1000.0, "new photos {back:.1} ms after the release");
+    assert!(
+        w_p95 <= 1000.0 && w_max <= 1000.0,
+        "withheld p95 {w_p95:.1} max {w_max:.1}"
+    );
+    assert!(
+        r_p95 <= 10.0 && r_max <= 100.0,
+        "requests p95 {r_p95:.1} max {r_max:.1}"
+    );
+}
+
+// The PL's five variants are ctime (Linux), ChangeTime (Windows), the coarse
+// 2 s window, a worker error and a worker panic: four run on each platform
+// (the key variant is compiled for its own platform only, so CI sees "4
+// passed; 0 ignored" on both).
+#[cfg(not(windows))]
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs test hooks"
+)]
+fn m7_no_flicker_ctime() {
+    no_flicker("platform");
+}
+
+#[cfg(windows)]
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs test hooks"
+)]
+fn m7_no_flicker_changetime() {
+    no_flicker("platform");
+}
+
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs test hooks"
+)]
+fn m7_no_flicker_coarse_window() {
+    no_flicker("coarse");
+}
+
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs test hooks"
+)]
+fn m7_no_flicker_worker_error() {
+    no_flicker("worker_error");
+}
+
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs test hooks"
+)]
+fn m7_no_flicker_worker_panic() {
+    no_flicker("worker_panic");
 }

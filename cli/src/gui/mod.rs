@@ -930,6 +930,22 @@ struct Fresh {
     hidden: Arc<std::collections::HashSet<String>>,
     /// The part of `hidden` that is only withheld (pending folders).
     withheld: std::collections::HashSet<String>,
+    /// The part of `hidden` hidden by a tombstone, family log or unlisted
+    /// folder at the last check (not only withheld).
+    hard: Arc<std::collections::HashSet<String>>,
+    /// Withheld photos that were in `hard` (or `hard_w`) before.
+    hard_w: std::collections::HashSet<String>,
+    /// The previous generation's view, kept until this generation's first
+    /// check has decided which photos of a pending folder were on screen.
+    prev: Option<Prev>,
+}
+
+/// What the previous generation showed, by folder (XO 03:36Z (1)).
+struct Prev {
+    dir_idx: std::collections::HashMap<String, usize>,
+    photos_in: Vec<Vec<u32>>,
+    base: Arc<LibraryView>,
+    hidden: Arc<std::collections::HashSet<String>>,
 }
 
 #[derive(Default)]
@@ -944,6 +960,10 @@ struct DirState {
     /// is done, every photo in the folder is hidden (fail closed). The
     /// state itself is with the worker; `since` is when it was handed over.
     pending: Option<std::time::Instant>,
+    /// For a pending folder: the photos that were on screen and whose own
+    /// tombstone is absent, or unchanged with a trusted show verdict. They
+    /// stay shown; the folder's other photos are withheld (XO 03:36Z (1)).
+    keep: std::collections::HashSet<String>,
     tombs: std::collections::BTreeMap<String, TombState>,
 }
 
@@ -1061,6 +1081,13 @@ fn read_tomb(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
 fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
     let path = lib.join(rel);
     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(err) = tomb_error_hook(rel) {
+        return TombState {
+            stamp: None,
+            trusted: false,
+            verdict: Err(format!("{rel}: {err}; hiding it")),
+        };
+    }
     #[cfg(windows)]
     if key_kind() == KeyKind::ChangeTime {
         // One open (XO 03:12Z): stamp from the handle, then read it.
@@ -1574,15 +1601,31 @@ fn hidden_for(
         // trusted is not listed again, as within one generation, so the
         // first check after a sync lists and reads only what changed. Its
         // trust rests on the same stamp test, so this stays fail-closed.
-        let (mut carried, primed) = match fresh.take() {
-            Some(old) => (
-                old.dirs
-                    .into_iter()
-                    .zip(old.state)
-                    .collect::<std::collections::HashMap<_, _>>(),
-                old.primed,
-            ),
-            None => (Default::default(), false),
+        let (mut carried, primed, prev, (hard, hard_w)) = match fresh.take() {
+            Some(old) => {
+                let dir_idx = old
+                    .dirs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| (d.clone(), i))
+                    .collect();
+                let prev = Prev {
+                    dir_idx,
+                    photos_in: old.photos_in,
+                    base: old.base,
+                    hidden: old.hidden,
+                };
+                (
+                    old.dirs
+                        .into_iter()
+                        .zip(old.state)
+                        .collect::<std::collections::HashMap<_, _>>(),
+                    old.primed,
+                    Some(prev),
+                    (old.hard, old.hard_w),
+                )
+            }
+            None => (Default::default(), false, None, Default::default()),
         };
         let (dirs, photos_in): (Vec<String>, Vec<Vec<u32>>) = by_dir.into_iter().unzip();
         let state = dirs
@@ -1601,6 +1644,9 @@ fn hidden_for(
             version,
             hidden: Default::default(),
             withheld: Default::default(),
+            hard,
+            hard_w,
+            prev,
         });
     }
     let f = fresh.as_mut().unwrap();
@@ -1636,20 +1682,33 @@ fn hidden_for(
     // Stamp every folder first (one stat each). Unchanged trusted folders
     // take the cheap path; the rest are listed again and their tombstones
     // read on up to 8 threads. Before the first answer that is done in
-    // full; after it, the request waits at most INLINE_BUDGET for that work
-    // and every folder not done by then stays pending (all its photos
-    // hidden, fail closed) until the background finishes it (XO 03:22Z),
+    // full; after it, the request waits only if a shown photo would blink (BLINK_BUDGET)
+    // and every folder not done by then stays pending (its photos withheld
+    // but for the carried show, fail closed) until the background finishes it (XO 03:22Z),
     // so a request never waits on thousands of tombstone reads.
     let mut changed = !primed;
     changed |= drain_relists(f);
     let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
     let mut jobs: Vec<RelistJob> = Vec::new();
     for (i, ((d, ds), st)) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts).enumerate() {
-        if ds.pending.is_some() {
-            continue;
+        if let Some(since) = ds.pending {
+            // XO 03:36Z (5): a folder never stays pending silently. A worker
+            // that died or hangs is logged and the folder sent again (its
+            // photos stay withheld meanwhile).
+            if since.elapsed() < PENDING_LIMIT {
+                continue;
+            }
+            eprintln!(
+                "albumen gui: hide: {d} still pending after {:?}; listing it again",
+                since.elapsed()
+            );
+            REDISPATCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if primed && ds.trusted && st.is_some() && st == ds.stamp {
             changed |= cheap(ds);
+        } else if APPLY_ONLY.get() {
+            // A worker applying its results starts no re-list; the next
+            // request does.
         } else {
             let taken = std::mem::take(ds);
             ds.pending = Some(std::time::Instant::now());
@@ -1661,11 +1720,39 @@ fn hidden_for(
             });
         }
     }
+    let mut blink = false;
+    if !jobs.is_empty() && primed {
+        // Which photos of each folder about to go pending stay on screen:
+        // one stat of each shown photo's own tombstone, on up to 8 threads.
+        let t = std::time::Instant::now();
+        let (keeps, b) = keep_shown(lib, f, &jobs);
+        blink = b;
+        for (j, keep) in jobs.iter().zip(keeps) {
+            f.state[j.i].keep = keep;
+        }
+        let us = t.elapsed().as_micros() as u64;
+        KEEP_STAT_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
+        KEEP_STAT_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
+    }
+    // The previous view has served once this generation has been checked.
+    if !APPLY_ONLY.get() {
+        f.prev = None;
+    }
     if !jobs.is_empty() {
         changed = true;
-        PENDING_DIRS.fetch_add(jobs.len() as u64, std::sync::atomic::Ordering::Relaxed);
         let rx = spawn_relists(lib.to_path_buf(), jobs, checked_at, f.generation);
-        let deadline = (primed).then(|| std::time::Instant::now() + INLINE_BUDGET);
+        // Once primed the request does not wait at all (XO 04:08Z): the
+        // per-photo carried show keeps what is on screen, and a coalescing
+        // background applier puts finished folders (and the rebuilt view)
+        // in place. Only the very first answer is done in full.
+        let deadline = primed.then(|| {
+            std::time::Instant::now()
+                + if blink {
+                    BLINK_BUDGET
+                } else {
+                    Default::default()
+                }
+        });
         loop {
             let got = match deadline {
                 None => rx.recv().ok(),
@@ -1681,6 +1768,10 @@ fn hidden_for(
         // Whatever is still running reports through the shared queue.
         RELISTS.lock().unwrap().push(rx);
     }
+    PENDING_DIRS.store(
+        f.state.iter().filter(|d| d.pending.is_some()).count() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if lib.join("genesis.json").is_file() {
         let st: Vec<_> = family_logs(lib).iter().map(|p| mtime(p)).collect();
         let fresh_family = f
@@ -1719,7 +1810,13 @@ fn hidden_for(
             hidden.extend(photos.iter().map(|&i| v.path(i).to_string()));
         }
         if ds.pending.is_some() {
-            withheld.extend(photos.iter().map(|&i| v.path(i).to_string()));
+            withheld.extend(
+                photos
+                    .iter()
+                    .map(|&i| v.path(i))
+                    .filter(|p| !ds.keep.contains(*p))
+                    .map(str::to_string),
+            );
         }
         for (rel, t) in &ds.tombs {
             tombs.push(rel.clone());
@@ -1747,10 +1844,17 @@ fn hidden_for(
     // again in the background (hides only ever narrow the view here). A
     // photo only withheld (pending folder) is in the base view, so putting
     // that back is enough.
+    // A photo hidden, then withheld while its folder was pending, then
+    // shown is an unhide too: test against the hard-hidden set, not only
+    // the photos withheld at the last check (the base view lacks it).
     let unhid = f
         .hidden
         .iter()
-        .any(|p| !hidden.contains(p) && !f.withheld.contains(p));
+        .any(|p| !hidden.contains(p) && !f.withheld.contains(p))
+        || f.hard
+            .iter()
+            .chain(&f.hard_w)
+            .any(|p| !hidden.contains(p) && !withheld.contains(p));
     let released = f
         .withheld
         .iter()
@@ -1760,8 +1864,17 @@ fn hidden_for(
     if unhid || released || all != *f.hidden {
         f.version += 1;
     }
+    // Hard-hidden before and now only withheld (iterates the withheld
+    // photos only); the hard-hidden set itself is moved, not copied.
+    f.hard_w = withheld
+        .iter()
+        .filter(|p| !hidden.contains(*p) && (f.hard.contains(*p) || f.hard_w.contains(*p)))
+        .cloned()
+        .collect();
+    f.hard = Arc::new(hidden);
     f.withheld = withheld;
     f.hidden = Arc::new(all);
+    HIDE_VERSION.store(f.version, std::sync::atomic::Ordering::Relaxed);
     let out = (Arc::clone(&f.hidden), f.version);
     if released {
         let mut lv = server.library.lock().unwrap();
@@ -1794,9 +1907,10 @@ struct RelistDone {
     ds: DirState,
 }
 
-/// The longest a request waits for re-lists before leaving the rest
-/// pending (hidden) in the background (XO 03:22Z, max <= 100 ms at k=0).
-const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
+/// Once primed, a request waits for re-lists only when a photo on screen
+/// would otherwise be withheld (its tombstone changed or is untrusted), and
+/// then at most this long (XO 03:22Z / 04:08Z).
+const BLINK_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
 
 /// Re-list workers still running, drained by each check.
 static RELISTS: Mutex<Vec<std::sync::mpsc::Receiver<RelistDone>>> = Mutex::new(Vec::new());
@@ -1807,6 +1921,221 @@ static WITHHELD_DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 static WITHHELD_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static WITHHELD_LAST_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Every withheld time (us, hand-over to applied), for the p95 in
+/// `/api/found` (capped).
+static WITHHELD_SAMPLES: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+/// The hidden set's version, so the page can redraw when it changes.
+static HIDE_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Time to decide which photos of the folders going pending stay shown.
+static KEEP_STAT_LAST_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static KEEP_STAT_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static KEEP_STATS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Worker panics caught, and folders sent again after `PENDING_LIMIT`.
+static WORKER_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REDISPATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// A folder pending this long is logged and listed again (XO 03:36Z (5)).
+const PENDING_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// A worker applies what it has finished at least this often, so a
+/// withheld photo comes back without waiting for the next request.
+const APPLY_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// For each folder about to go pending: the photos the previous view showed
+/// whose own tombstone is absent, or unchanged since a trusted read that
+/// said show. One stat per shown photo, on up to 8 threads. A stat that
+/// fails other than "not found" withholds the photo (fail closed).
+/// Also says whether any shown photo is withheld (it would blink out).
+fn keep_shown(
+    lib: &Path,
+    f: &Fresh,
+    jobs: &[RelistJob],
+) -> (Vec<std::collections::HashSet<String>>, bool) {
+    use albumen_ingest::hides::TOMBSTONE_SUFFIX;
+    let v = &f.base;
+    // Photos of each folder that were on screen.
+    let shown: Vec<Vec<String>> = jobs
+        .iter()
+        .map(|j| {
+            if j.ds.unlisted {
+                return Vec::new();
+            }
+            match &f.prev {
+                None => f.photos_in[j.i]
+                    .iter()
+                    .map(|&p| v.path(p))
+                    .filter(|p| !f.hidden.contains(*p))
+                    .map(str::to_string)
+                    .collect(),
+                Some(prev) => {
+                    let Some(&k) = prev.dir_idx.get(&j.dir) else {
+                        return Vec::new();
+                    };
+                    prev.photos_in[k]
+                        .iter()
+                        .map(|&p| prev.base.path(p))
+                        .filter(|p| !prev.hidden.contains(*p))
+                        .map(str::to_string)
+                        .collect()
+                }
+            }
+        })
+        .collect();
+    let threads = hide_threads();
+    let check = |j: &RelistJob, photos: &Vec<String>| -> std::collections::HashSet<String> {
+        photos
+            .iter()
+            .filter(|p| {
+                let rel = format!("{p}{TOMBSTONE_SUFFIX}");
+                let path = lib.join(&rel);
+                KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match std::fs::symlink_metadata(&path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                    Err(_) => false,
+                    Ok(_) => j.ds.tombs.get(&rel).is_some_and(|t| {
+                        t.trusted
+                            && t.verdict == Ok(false)
+                            && t.stamp.is_some()
+                            && mtime(&path) == t.stamp
+                    }),
+                }
+            })
+            .cloned()
+            .collect()
+    };
+    let total: usize = shown.iter().map(Vec::len).sum();
+    let blinks = |out: &[std::collections::HashSet<String>]| {
+        out.iter().zip(&shown).any(|(k, s)| k.len() < s.len())
+    };
+    if threads == 1 || total < 256 {
+        let out: Vec<_> = jobs.iter().zip(&shown).map(|(j, s)| check(j, s)).collect();
+        let b = blinks(&out);
+        return (out, b);
+    }
+    let mut out: Vec<std::collections::HashSet<String>> = vec![Default::default(); jobs.len()];
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<Mutex<&mut std::collections::HashSet<String>>> =
+        out.iter_mut().map(Mutex::new).collect();
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n >= jobs.len() {
+                    return;
+                }
+                let k = check(&jobs[n], &shown[n]);
+                **slots[n].lock().unwrap() = k;
+            });
+        }
+    });
+    drop(slots);
+    let b = blinks(&out);
+    (out, b)
+}
+
+/// Test hook: `ALBUMEN_TEST_RELIST_DELAY_MS` delays each background
+/// re-list, so a test can hold a folder pending (XO 03:36Z (4)).
+/// `ALBUMEN_TEST_RELIST_PANIC=<dir>` makes the re-list of that folder panic
+/// once (XO 03:36Z (5)). Honoured only in debug builds or with the
+/// `test-hooks` feature.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn relist_hooks(lib: &Path, dir: &str) {
+    // `ALBUMEN_TEST_RELIST_GATE=<dir>` (XO 04:08Z): a test holds that
+    // folder pending for certain rather than by timing.
+    // While the file `<library>/.albumen-test-gate` exists the re-list
+    // blocks; removing it releases the gate.
+    static GATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if std::env::var("ALBUMEN_TEST_RELIST_GATE").is_ok_and(|d| d == dir) {
+        let flag = lib.join(".albumen-test-gate");
+        while flag.exists() {
+            GATED.store(true, std::sync::atomic::Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    // `ALBUMEN_TEST_RELIST_PANIC_AFTER_GATE=1`: the panic below fires only
+    // on a re-list that was held at the gate (not the startup listing).
+    if std::env::var("ALBUMEN_TEST_RELIST_PANIC_AFTER_GATE").is_ok_and(|v| v == "1")
+        && !GATED.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    static DELAY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY.get_or_init(|| {
+        std::env::var("ALBUMEN_TEST_RELIST_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if std::env::var("ALBUMEN_TEST_RELIST_PANIC").is_ok_and(|d| d == dir)
+        && !PANICKED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        panic!("ALBUMEN_TEST_RELIST_PANIC {dir}");
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+fn relist_hooks(_: &Path, _: &str) {}
+
+/// Test hook: `ALBUMEN_TEST_TOMB_ERROR=<rel>` makes reading that tombstone
+/// fail (the worker_error variant of the no-flicker test).
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn tomb_error_hook(rel: &str) -> Option<&'static str> {
+    std::env::var("ALBUMEN_TEST_TOMB_ERROR")
+        .is_ok_and(|r| r == rel)
+        .then_some("test hook: unreadable")
+}
+
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+fn tomb_error_hook(_: &str) -> Option<&'static str> {
+    None
+}
+
+thread_local! {
+    /// Set on the thread that applies finished re-lists for a worker.
+    static APPLY_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Apply finished re-lists now (from a worker), so a withheld photo comes
+/// back without waiting for the next request (XO 03:36Z (2)).
+fn apply_landed() {
+    use std::sync::atomic::Ordering::SeqCst;
+    // One applier at a time; a landing meanwhile makes it run once more,
+    // so N finished folders cost a few rebuilds, not N.
+    APPLY_AGAIN.store(true, SeqCst);
+    if APPLYING.swap(true, SeqCst) {
+        return;
+    }
+    APPLY_ONLY.set(true);
+    while APPLY_AGAIN.swap(false, SeqCst) {
+        let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) else {
+            break;
+        };
+        let cur = s.library.lock().unwrap().clone();
+        if let Some(v) = cur {
+            current_view(&s, v);
+        }
+    }
+    APPLYING.store(false, SeqCst);
+    // A landing between the last pass and the release above.
+    if APPLY_AGAIN.load(SeqCst) {
+        apply_landed();
+    }
+}
+
+static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static APPLY_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Threads for re-lists and the carried-show stats: one core is left for
+/// requests (XO 04:08Z, the Windows k=1/k=2 stalls).
+fn hide_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .saturating_sub(1)
+        .clamp(1, 8)
+}
+
 /// List and read `jobs` on up to 8 threads, off the request; each folder
 /// is sent as soon as it is done.
 fn spawn_relists(
@@ -1816,10 +2145,7 @@ fn spawn_relists(
     generation: u64,
 ) -> std::sync::mpsc::Receiver<RelistDone> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .clamp(1, 8)
-        .min(jobs.len());
+    let threads = hide_threads().min(jobs.len());
     let mut work: Vec<Vec<RelistJob>> = (0..threads).map(|_| Vec::new()).collect();
     for (n, j) in jobs.into_iter().enumerate() {
         work[n % threads].push(j);
@@ -1827,20 +2153,75 @@ fn spawn_relists(
     for w in work {
         let tx = tx.clone();
         let lib = lib.clone();
-        std::thread::spawn(move || {
-            for mut j in w {
-                relist_dir(&lib, &j.dir, &mut j.ds, j.st, checked_at);
+        let run = move || {
+            let mut applied = std::time::Instant::now();
+            let n = w.len();
+            for (k, mut j) in w.into_iter().enumerate() {
+                let mut first = Some(std::mem::take(&mut j.ds));
+                let mut out = None;
+                for attempt in 0..3 {
+                    // A retry starts from nothing (every tombstone read
+                    // again); the folder stays pending meanwhile, so what is
+                    // on screen stays and nothing new shows.
+                    let mut ds = first.take().unwrap_or_default();
+                    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        relist_hooks(&lib, &j.dir);
+                        relist_dir(&lib, &j.dir, &mut ds, j.st, checked_at);
+                        ds
+                    }));
+                    match ok {
+                        Ok(ds) => {
+                            out = Some(ds);
+                            break;
+                        }
+                        Err(_) => {
+                            // XO 03:36Z (5) / 04:08Z: logged and retried.
+                            eprintln!(
+                                "albumen gui: hide: worker panicked; retrying {} (attempt {})",
+                                j.dir,
+                                attempt + 2
+                            );
+                            WORKER_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+                let ds = out.unwrap_or_else(|| {
+                    eprintln!(
+                        "albumen gui: hide: listing {} kept panicking; hiding its photos and listing it again",
+                        j.dir
+                    );
+                    DirState {
+                        unlisted: true,
+                        ..Default::default()
+                    }
+                });
                 let done = RelistDone {
                     generation,
                     i: j.i,
                     dir: j.dir,
-                    ds: j.ds,
+                    ds,
                 };
                 if tx.send(done).is_err() {
                     return;
                 }
+                if k + 1 == n || applied.elapsed() >= APPLY_EVERY {
+                    // On its own thread: a request may hold the lock while
+                    // it waits for this worker's next folder.
+                    let _ = std::thread::Builder::new()
+                        .name("albumen-hide-apply".into())
+                        .spawn(apply_landed);
+                    applied = std::time::Instant::now();
+                }
             }
-        });
+        };
+        if let Err(e) = std::thread::Builder::new()
+            .name("albumen-relist".into())
+            .spawn(run)
+        {
+            // No thread: the folders stay pending and are sent again after
+            // PENDING_LIMIT.
+            eprintln!("albumen gui: hide: can't start a re-list worker ({e})");
+        }
     }
     rx
 }
@@ -1848,7 +2229,6 @@ fn spawn_relists(
 /// Put a finished folder back (by index if the generation is the same,
 /// else by name; a folder no longer listed is dropped).
 fn apply_relist(f: &mut Fresh, done: RelistDone) {
-    PENDING_DIRS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     let i = if done.generation == f.generation {
         Some(done.i)
     } else {
@@ -1862,6 +2242,10 @@ fn apply_relist(f: &mut Fresh, done: RelistDone) {
         WITHHELD_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         WITHHELD_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
         WITHHELD_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
+        let mut w = WITHHELD_SAMPLES.lock().unwrap();
+        if w.len() < 100_000 {
+            w.push(us);
+        }
     }
     *slot = done.ds;
     slot.pending = None;
@@ -2076,6 +2460,15 @@ fn library_files_indexed(
 }
 
 /// The `/api/found` answer: the running count and the photos found so far.
+fn withheld_p95_ms() -> f64 {
+    let mut w = WITHHELD_SAMPLES.lock().unwrap().clone();
+    if w.is_empty() {
+        return 0.0;
+    }
+    w.sort_unstable();
+    w[((w.len() * 95).div_ceil(100)).saturating_sub(1)] as f64 / 1000.0
+}
+
 fn found_json(server: &Server) -> serde_json::Value {
     let paths = server.found_paths.lock().unwrap().clone();
     serde_json::json!({
@@ -2096,6 +2489,14 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_withheld_dirs": WITHHELD_DIRS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_withheld_max_ms": WITHHELD_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
         "hide_withheld_last_ms": WITHHELD_LAST_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
+        "hide_withheld_p95_ms": withheld_p95_ms(),
+        "hide_withheld_samples": WITHHELD_SAMPLES.lock().unwrap().len(),
+        "hide_version": HIDE_VERSION.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_keep_stats": KEEP_STATS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_keep_last_ms": KEEP_STAT_LAST_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
+        "hide_keep_max_ms": KEEP_STAT_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
+        "hide_worker_panics": WORKER_PANICS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_redispatched": REDISPATCHED.load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -2755,6 +3156,72 @@ mod tests {
             // close moved the stamp on, so the next check reads again.
             assert_ne!(st_after, st_open);
         }
+    }
+
+    /// XO 03:36Z (6): would deny-write sharing (FILE_SHARE_READ only) in
+    /// change_time() be safe? The probe opens a tombstone as change_time()
+    /// would with it (read, share read only). It does see an open writer
+    /// (sharing violation, which would count as untrusted), and a writer
+    /// opening after the check is fine; but a writer opening WHILE the
+    /// check holds its handle is refused (ERROR_SHARING_VIOLATION, 32), which
+    /// is a failed write for a sync tool. So change_time() keeps sharing
+    /// read/write/delete (docs/m7-hide-limits.md: a hidden photo can show).
+    /// This test prints how many such writes failed here.
+    #[cfg(windows)]
+    #[test]
+    fn deny_write_sharing_would_refuse_a_sync_tools_write() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        const SHARING_VIOLATION: i32 = 32;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("IMG_0001.JPG.albumen-tombstone");
+        std::fs::write(&p, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+        let probe = |p: &Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(p)
+        };
+        let writer = |p: &Path| std::fs::OpenOptions::new().write(true).open(p);
+        // A writer already open: the probe is refused (would be untrusted).
+        let w = writer(&p).unwrap();
+        let seen = probe(&p).err().and_then(|e| e.raw_os_error());
+        drop(w);
+        assert_eq!(seen, Some(SHARING_VIOLATION), "an open writer went unseen");
+        // A writer opening after the check: fine.
+        drop(probe(&p).unwrap());
+        writer(&p).unwrap();
+        // A writer opening during checks: count the refused writes.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let checker = {
+            let (p, stop) = (p.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 0u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok(h) = probe(&p) {
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+                        drop(h);
+                    }
+                    n += 1;
+                }
+                n
+            })
+        };
+        let (mut ok, mut refused) = (0u32, 0u32);
+        for _ in 0..2000 {
+            match writer(&p) {
+                Ok(_) => ok += 1,
+                Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => refused += 1,
+                Err(e) => panic!("writer: {e}"),
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let checks = checker.join().unwrap();
+        println!("M7 DENY_WRITE checks={checks} writer_ok={ok} writer_refused={refused}");
+        // change_time() itself must never refuse a writer: it shares all.
+        let w = writer(&p).unwrap();
+        assert!(change_time(&p).is_some());
+        drop(w);
     }
 
     /// F1: the compact listing streams the same images and events as the

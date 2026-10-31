@@ -102,29 +102,52 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 23 + 2 = 25 (the coarse-ctime test is Unix-only).
+          # so they are filtered out here and run in their own steps: 25 + 2 + 4 no-flicker = 31 (the coarse-ctime test is Unix-only).
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
-            --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 23 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 23 tests green (2 filtered out)"; exit 1; }
+            --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics --skip m7_no_flicker 2>&1 | tee m7.log
+          grep -Eq '^test result: ok\. 25 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 25 tests green (6 filtered out)"; exit 1; }
 
-      - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (print-only)
+      - name: M7 no-flicker acceptance (ctime, coarse 2 s window, worker error, worker panic; merge-blocking)
+        # Product Lead doc 1Ak9gqDUQp4BfibMVlw4fd4qLw8CKUxPH section 2 (XO 04:08Z):
+        # a folder held pending by ALBUMEN_TEST_RELIST_GATE; no visible photo
+        # disappears, the new hide never shows, new photos show within 1 s
+        # of the release, withheld p95 and max <= 1 s. Exactly 4 passed and
+        # 0 ignored, and one NO_FLICKER line per variant.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
+            m7_no_flicker -- --nocapture --test-threads=1 2>&1 | tee m7-nf.log
+          grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-nf.log \
+            || { echo "::error::the no-flicker tests did not run exactly 4 green with 0 ignored"; exit 1; }
+          for v in platform coarse worker_error worker_panic; do
+            grep -E "^M7 NO_FLICKER variant=$v key=ctime .* disappearances=0 h_shown=0 " m7-nf.log \
+              || { echo "::error::no passing M7 NO_FLICKER line for $v"; exit 1; }
+          done
+
+      - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (bar re-check p95 <= 10 ms, max <= 100 ms; withheld p95 and max <= 1 s)
         # Blocking: prints "M7 RECHECK_DIAG tombstones=N ... recheck_p95_ms ... img_p95_ms"
         # and "M7 WITHHELD ..." for 0, 1k and 10k tombstones (100 re-check
-        # samples each); fails unless exactly 1 passed, 3+ RECHECK_DIAG lines
-        # printed, and every line meets p95 <= 10 ms and max <= 100 ms.
+        # samples each, 20 withheld samples); fails unless exactly 1 passed,
+        # 3+ RECHECK_DIAG lines printed, every line meets p95 <= 10 ms and
+        # max <= 100 ms, and every WITHHELD line has withheld and UI p95 and
+        # max <= 1 s.
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           set -o pipefail
           ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
           grep -E '^M7 RECHECK_DIAG' m7-recheck.log
-          grep -E '^M7 WITHHELD' m7-recheck.log || true
+          # XO 03:36Z (3): withheld time (server, and as the page sees it
+          # through its 200 ms poll) p95 and max <= 1 s, checked by the bar
+          # script on every M7 WITHHELD line (no line fails it).
+          grep -E '^M7 WITHHELD' m7-recheck.log
           # XO 02:53Z/03:09Z bar (blocking): both fields required on every line,
           # p95 <= 10 ms and max <= 100 ms over ALL samples.
           bash .github/m7-recheck-bar.sh m7-recheck.log
@@ -199,11 +222,29 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 22 + 2 = 24.
+          # so they are filtered out here and run in their own steps: 24 + 2 + 4 no-flicker = 30.
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
-            --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 22 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 22 tests green (2 filtered out) on Windows"; exit 1; }
+            --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics --skip m7_no_flicker 2>&1 | tee m7.log
+          grep -Eq '^test result: ok\. 24 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 24 tests green (6 filtered out) on Windows"; exit 1; }
+
+      - name: M7 no-flicker acceptance (changetime, coarse 2 s window, worker error, worker panic; merge-blocking)
+        # Product Lead doc 1Ak9gqDUQp4BfibMVlw4fd4qLw8CKUxPH section 2 (XO 04:08Z):
+        # a folder held pending by ALBUMEN_TEST_RELIST_GATE; no visible photo
+        # disappears, the new hide never shows, new photos show within 1 s
+        # of the release, withheld p95 and max <= 1 s. Exactly 4 passed and
+        # 0 ignored, and one NO_FLICKER line per variant.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
+            m7_no_flicker -- --nocapture --test-threads=1 2>&1 | tee m7-nf.log
+          grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-nf.log \
+            || { echo "::error::the no-flicker tests did not run exactly 4 green with 0 ignored"; exit 1; }
+          for v in platform coarse worker_error worker_panic; do
+            grep -E "^M7 NO_FLICKER variant=$v key=changetime .* disappearances=0 h_shown=0 " m7-nf.log \
+              || { echo "::error::no passing M7 NO_FLICKER line for $v"; exit 1; }
+          done
 
       - name: M7 change key is ChangeTime (printed and asserted)
         # XO 03:12Z: the step above runs without --nocapture, so the test's
@@ -233,6 +274,20 @@ jobs:
           grep -E '^M7 NTFS_CHANGETIME ' m7-ntfs.log \
             || { echo "::error::no 'M7 NTFS_CHANGETIME' line"; exit 1; }
 
+      - name: Deny-write sharing vs a sync tool's write (printed and asserted)
+        # XO 03:36Z (6): FILE_SHARE_READ only would see an open writer, but
+        # refuses a writer opening during the check, so change_time() keeps
+        # sharing all; this prints how many writes it would have refused.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --features test-hooks --bin albumen \
+            gui::tests::deny_write_sharing_would_refuse_a_sync_tools_write -- --exact --nocapture 2>&1 | tee m7-deny.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-deny.log \
+            || { echo "::error::the deny-write test did not run exactly 1 test green"; exit 1; }
+          grep -E '^M7 DENY_WRITE ' m7-deny.log \
+            || { echo "::error::no 'M7 DENY_WRITE' line"; exit 1; }
+
       - name: M7 re-check and /img diagnostics at 50,000 files (bar p95 <= 10 ms, max <= 100 ms)
         # Blocking (XO 03:22Z; Product Lead: max <= 100 ms at k=0 after a
         # 10k-hide sync, not relaxed). 50k, not 380k: writing and listing
@@ -246,11 +301,14 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
           grep -E '^M7 RECHECK_DIAG' m7-recheck.log
-          grep -E '^M7 WITHHELD' m7-recheck.log || true
+          # XO 03:36Z (3): withheld time (server, and as the page sees it
+          # through its 200 ms poll) p95 and max <= 1 s, checked by the bar
+          # script on every M7 WITHHELD line (no line fails it).
+          grep -E '^M7 WITHHELD' m7-recheck.log
           # XO 03:12Z: the same bar on Windows 50k (blocking).
           bash .github/m7-recheck-bar.sh m7-recheck.log
