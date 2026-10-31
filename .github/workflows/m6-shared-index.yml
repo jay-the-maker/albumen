@@ -157,13 +157,15 @@ jobs:
         continue-on-error: true
         run: |
           pids=""
+          # The busy loops never outlive this step (XO FRAGO 10:44Z (E)):
+          # killed on any exit, and timeout caps each at 900 s regardless.
+          trap 'kill $pids 2>/dev/null; wait $pids 2>/dev/null' EXIT
           for i in $(seq 1 "$(nproc)"); do timeout 900 bash -c 'while :; do :; done' & pids="$pids $!"; done
           for a in --test-threads=1 --test-threads=4; do
             echo "== m7_timing under load, $a"
             cargo test --release --locked -p albumen --features test-hooks --test m7_timing -- --nocapture $a 2>&1 \
               | grep -E '^test |test result|M7 NO_FLICKER_INLINE|M7 UNTRUSTED_REREADS|panicked|inline work' || true
           done
-          kill $pids 2>/dev/null || true
           exit 0
 
       - name: M7 synced-in photos, unhide while pending, PENDING_LIMIT and exhausted panics (XO 04:41Z; merge-blocking)
