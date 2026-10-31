@@ -239,6 +239,9 @@ fn readers_keep_answering_while_one_writer_saves() {
     let fallbacks = Arc::new(AtomicU64::new(0));
     let partials = Arc::new(AtomicU64::new(0));
     let read_ms = Arc::new(Mutex::new(Vec::new()));
+    // Diagnostic only (no bar): reads of a generation the writer had not
+    // recorded yet, by generation.
+    let unknown: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     // Diagnostics only (no bar): when each slow read started, and when each
     // writer refresh (walk + save) ran, on one clock.
     let t0 = Instant::now();
@@ -248,6 +251,7 @@ fn readers_keep_answering_while_one_writer_saves() {
         .map(|_| {
             let (file, stop, counts) = (file.clone(), stop.clone(), counts.clone());
             let checked = checked.clone();
+            let unknown = unknown.clone();
             let slow_reads = slow_reads.clone();
             let (reads, parse_failures, fallbacks, partials, read_ms) = (
                 reads.clone(),
@@ -270,6 +274,9 @@ fn readers_keep_answering_while_one_writer_saves() {
                     match got {
                         Ok((generation, paths)) => {
                             let want = counts.lock().unwrap().get(&generation).copied();
+                            if want.is_none() {
+                                *unknown.lock().unwrap().entry(generation).or_insert(0) += 1;
+                            }
                             if let Some(want) = want {
                                 checked.fetch_add(1, Ordering::Relaxed);
                                 if want != paths.len() && partials.fetch_add(1, Ordering::Relaxed) < 5 {
@@ -426,6 +433,19 @@ fn readers_keep_answering_while_one_writer_saves() {
         p50 / base_p50,
         gui.0.id()
     );
+    {
+        let (u, c) = (unknown.lock().unwrap(), counts.lock().unwrap());
+        let late = u.iter().filter(|(g, _)| c.contains_key(g));
+        let (late_g, late_r) = late.fold((0, 0), |a, (_, n)| (a.0 + 1, a.1 + n));
+        let never: Vec<_> = u.iter().filter(|(g, _)| !c.contains_key(g)).collect();
+        println!(
+            "M6 X1 UNCHECKED reads={reads} unchecked={} recorded_after_read_gens={late_g} recorded_after_read_reads={late_r} never_recorded_gens={} never_recorded_reads={} writer_gens={}",
+            reads - checked.load(Ordering::Relaxed),
+            never.len(),
+            never.iter().map(|(_, n)| **n).sum::<u64>(),
+            c.len()
+        );
+    }
     // Correctness first (XO 22:03Z): a freeze voids only the timing bars,
     // so a real correctness bug still FAILs even on a frozen box.
     assert_eq!(parse_failures, 0);
