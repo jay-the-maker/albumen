@@ -1016,56 +1016,15 @@ fn current_hide_note(library: &Path) -> Option<String> {
         let checked_at = SystemTime::now();
         let mut errors = Vec::new();
         {
-            // One listing per folder: each tombstone's metadata comes with
-            // it (Windows: no stat per tombstone, FRAGO 06:13Z (2)); a
-            // tombstone the listing lacks gets the plain stat.
-            // One enumeration per folder (Windows, FRAGO 06:29Z (1)): the
-            // handle-based directory listing carries each entry's
-            // ChangeTime and LastWriteTime, so a tombstone's stamp costs no
-            // open of its own; only a tombstone whose stamp moved is opened
-            // and read again. Elsewhere (and with the portable key) the
-            // plain stat, as before (Linux: a stat is what a listing entry
-            // costs; the listing made p50 0.25 -> 5 ms on the box).
-            // XO 08:22Z (1): Windows CI 435dadd listed every watched folder
-            // (all of its entries) on every poll, so 20 tombstones in 20
-            // folders of 1,000 photos cost 20,000 entries a poll (/api/found
-            // p50 46.7 ms at 0 tombstones). A folder is listed only when it
-            // holds enough tombstones that one listing beats a stat each
-            // (LIST_MIN); otherwise each tombstone gets its own stamp. Every
-            // tombstone is still stamped on every poll (a hide corrupted in
-            // place shows within one poll).
-            const LIST_MIN: usize = 64;
-            let mut per_dir: std::collections::HashMap<&str, usize> = Default::default();
-            for rel in watch.iter() {
-                *per_dir
-                    .entry(rel.rsplit_once('/').map_or("", |(d, _)| d))
-                    .or_default() += 1;
-            }
-            // XO 09:16Z (2): Linux CI 649dc1e /api/found p95 22.15 ms at
-            // 50k/10k (p50 18.86, 1.9 us per watched tombstone): the 10k
-            // stamps ran one after another on the request thread. They are
-            // taken on up to `hide_threads()` threads now, still one stamp
-            // of each tombstone's own file on every poll (no gate skips
-            // one), and outside the cache lock.
-            let listed: std::collections::HashMap<
-                &str,
-                std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)>,
-            > = if key_kind() == KeyKind::ChangeTime {
-                per_dir
-                    .iter()
-                    .filter(|(_, &n)| n >= LIST_MIN)
-                    .map(|(&d, _)| (d, dir_change_stamps(&library.join(d))))
-                    .collect()
-            } else {
-                Default::default()
-            };
-            let stamps = par_map(&watch, |rel: &String| {
-                let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
-                listed
-                    .get(dir)
-                    .and_then(|m| m.get(std::ffi::OsStr::new(name)).copied())
-                    .or_else(|| mtime(&library.join(rel)))
-            });
+            // Windows CI 8e83a30 (XO 09:46Z): a tombstone rewritten in place
+            // while its writer still holds it open kept its OLD stamp in the
+            // folder listing (hide_dir_listed=288, reads 144 -> 144, no note):
+            // NTFS updates the directory entry's times lazily (on close), so
+            // a listing cannot see an open writer. The listing path is gone;
+            // every tombstone gets its own handle stamp (`mtime`), which sees
+            // the writer and leaves the stamp untrusted (fail closed). The
+            // stamps run on `hide_threads()` threads (r12), outside the lock.
+            let stamps = par_map(&watch, |rel: &String| mtime(&library.join(rel)));
             let mut guard = FOUND_TOMBS.lock().unwrap();
             let cache = guard.get_or_insert_with(Default::default);
             let keep: std::collections::HashSet<&String> = watch.iter().collect();
@@ -1625,9 +1584,9 @@ fn key_kind() -> KeyKind {
 /// (shown in `/api/found` so a test proves the ChangeTime path is used).
 static CHANGETIME_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Tombstone stamps taken from a folder listing only (Windows masked
-/// NtQueryDirectoryFile path), never from a stat: `hide_dir_listed`
-/// (Product Lead 0905Z D2: proves the listing path ran).
+/// Tombstone stamps taken from a folder listing: `hide_dir_listed`. Always
+/// 0 since XO 09:46Z (a listing can't see an open writer on NTFS); kept so
+/// a test proves no listing stamp is used.
 static DIR_LISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Tombstone file touches (reads, plus stamps on the request path; on
@@ -1877,122 +1836,6 @@ fn end_of_file(file: &std::fs::File) -> Option<u64> {
 /// Tombstones left untrusted because their size or times moved during
 /// the read (a writer still open, Windows): `hide_writer_untrusted`.
 static WRITER_UNTRUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Every tombstone's stamp in one folder from ONE directory handle
-/// (Windows, FileIdBothDirectoryInfo): (LastWriteTime as std gives it,
-/// ChangeTime), the same stamp [`mtime`] takes with a file open each.
-/// Directories, reparse points and entries with no ChangeTime are left out
-/// (the caller stats those). Empty if the folder can't be listed.
-#[cfg(windows)]
-fn dir_change_stamps(
-    dir: &Path,
-) -> std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)> {
-    use std::os::windows::ffi::OsStringExt;
-    use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Wdk::Storage::FileSystem::{
-        FileIdBothDirectoryInformation, NtQueryDirectoryFile,
-    };
-    use windows_sys::Win32::Foundation::UNICODE_STRING;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
-    };
-    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
-    let mut out = std::collections::HashMap::new();
-    let suffix: Vec<u16> = albumen_ingest::hides::TOMBSTONE_SUFFIX
-        .encode_utf16()
-        .collect();
-    let Ok(file) = std::fs::OpenOptions::new()
-        .access_mode(FILE_LIST_DIRECTORY)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(dir)
-    else {
-        return out;
-    };
-    // u64 words keep the buffer 8-byte aligned, as the records need.
-    let mut buf = vec![0u64; 8 * 1024];
-    // FRAGO 08:55Z (B): Windows CI 1fb9028 spent p95 68.6 ms at 50k/10k
-    // copying every photo's record out of the listing only to drop it.
-    // NtQueryDirectoryFile takes a name mask ("*" + the tombstone suffix,
-    // no wildcard in the suffix), so the file system returns only the
-    // tombstones: still one listing per folder with each entry's own
-    // ChangeTime. A tombstone the mask misses gets the plain stat from the
-    // caller (fail closed); an extra match is dropped by the suffix check.
-    let mut mask: Vec<u16> = "*".encode_utf16().chain(suffix.iter().copied()).collect();
-    let name = UNICODE_STRING {
-        Length: (mask.len() * 2) as u16,
-        MaximumLength: (mask.len() * 2) as u16,
-        Buffer: mask.as_mut_ptr(),
-    };
-    let mut restart = 1u8;
-    loop {
-        let mut iosb: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
-        // SAFETY: the handle is open for the call, the buffer is the size
-        // passed, and the mask outlives the call. Synchronous handle: no
-        // event or APC.
-        let status = unsafe {
-            NtQueryDirectoryFile(
-                file.as_raw_handle() as _,
-                std::ptr::null_mut(),
-                None,
-                std::ptr::null(),
-                &mut iosb,
-                buf.as_mut_ptr().cast(),
-                (buf.len() * 8) as u32,
-                FileIdBothDirectoryInformation,
-                0,
-                &name,
-                restart,
-            )
-        };
-        // Any non-success (no more files, no match, an error) ends it.
-        if status != 0 || iosb.Information == 0 {
-            break;
-        }
-        restart = 0;
-        let base = buf.as_ptr() as *const u8;
-        let mut off = 0usize;
-        loop {
-            // SAFETY: `off` follows NextEntryOffset within the buffer the
-            // call filled; each record is aligned and holds FileNameLength
-            // bytes of name after its header.
-            let rec = unsafe { &*(base.add(off) as *const FILE_ID_BOTH_DIR_INFO) };
-            let len = rec.FileNameLength as usize / 2;
-            let name = unsafe { std::slice::from_raw_parts(rec.FileName.as_ptr(), len) };
-            let plain =
-                rec.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-            // Only tombstones are kept (no name copy for the photos).
-            let tomb = name.len() > suffix.len() && name.ends_with(&suffix);
-            if tomb && plain && rec.ChangeTime != 0 && rec.LastWriteTime > 0 {
-                // FILETIME (100 ns since 1601) -> SystemTime, as std does.
-                const EPOCH_DIFF: i64 = 116_444_736_000_000_000;
-                let t = rec.LastWriteTime - EPOCH_DIFF;
-                let when = if t >= 0 {
-                    SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(t as u64 * 100)
-                } else {
-                    SystemTime::UNIX_EPOCH - std::time::Duration::from_nanos((-t) as u64 * 100)
-                };
-                CHANGETIME_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                DIR_LISTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                out.insert(
-                    std::ffi::OsString::from_wide(name),
-                    (when, rec.ChangeTime as u64),
-                );
-            }
-            if rec.NextEntryOffset == 0 {
-                break;
-            }
-            off += rec.NextEntryOffset as usize;
-        }
-    }
-    out
-}
-
-#[cfg(not(windows))]
-fn dir_change_stamps(_: &Path) -> std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)> {
-    Default::default()
-}
 
 #[cfg(not(windows))]
 fn change_time(_: &Path) -> Option<u64> {

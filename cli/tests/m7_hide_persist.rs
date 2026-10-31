@@ -2151,9 +2151,9 @@ fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
 }
 
 /// FRAGO 08:55Z (B): the same with 70 more show tombstones in the folder,
-/// past LIST_MIN (64), so Windows stamps the folder's tombstones from its
-/// one masked directory listing (per-file ChangeTime) rather than a stat
-/// each. The in-place corruption must still be in the note on the next poll.
+/// (once past the removed LIST_MIN listing threshold; since XO 09:46Z each
+/// tombstone gets its own handle stamp, and the test proves no listing
+/// stamp is used). The in-place corruption must still be in the note on the next poll.
 #[test]
 fn a_corrupted_tombstone_in_a_listed_folder_is_in_the_note_within_one_poll() {
     corrupted_tombstone_note_case(70, false);
@@ -2460,6 +2460,13 @@ fn a_corrupted_tombstone_held_open_in_a_listed_folder_is_in_the_note_within_one_
     corrupted_tombstone_note_case(70, true);
 }
 
+/// XO 09:46Z: held open in a folder of a few tombstones (each one gets its
+/// own handle stamp), beside the 70-extra case above.
+#[test]
+fn a_corrupted_tombstone_held_open_is_in_the_note_within_one_poll() {
+    corrupted_tombstone_note_case(0, true);
+}
+
 fn corrupted_tombstone_note_case(extra: usize, hold_open: bool) {
     let library = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -2521,16 +2528,13 @@ fn corrupted_tombstone_note_case(extra: usize, hold_open: bool) {
         None
     };
     let polled = found_page(&addr);
-    if cfg!(windows) && extra >= 70 {
-        // Product Lead 0912Z: this poll's own listing (a delta), not the
-        // earlier polls'.
-        let n = |f: &serde_json::Value| f["hide_dir_listed"].as_u64().unwrap_or(0);
-        let listed = n(&polled) - n(&quiet);
-        assert!(
-            listed >= 72,
-            "listing path not used by this poll: hide_dir_listed delta={listed}"
-        );
-    }
+    // XO 09:46Z: no tombstone stamp comes from a folder listing (NTFS
+    // listings miss an open writer; Windows CI 8e83a30 had no note here).
+    assert_eq!(
+        polled["hide_dir_listed"].as_u64().unwrap_or(0),
+        0,
+        "a listing stamp was used"
+    );
     let note = polled["hide_note"].as_str().unwrap_or_default().to_string();
     println!(
         "M7 corrupted-tombstone note after one poll: {note} (reads {} -> {})",
