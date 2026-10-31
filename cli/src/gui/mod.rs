@@ -1037,6 +1037,7 @@ fn current_hide_note(library: &Path) -> Option<String> {
             // every tombstone gets its own handle stamp (`mtime`), which sees
             // the writer and leaves the stamp untrusted (fail closed). The
             // stamps run on `hide_threads()` threads (r12), outside the lock.
+            let t_stamp = std::time::Instant::now();
             let stamps = par_map(
                 &watch,
                 |rel: &String| {
@@ -1045,6 +1046,7 @@ fn current_hide_note(library: &Path) -> Option<String> {
                 },
                 |_| None,
             );
+            found_note_t::stamped(t_stamp.elapsed(), watch.len());
             let mut guard = FOUND_TOMBS.lock().unwrap();
             let cache = guard.get_or_insert_with(Default::default);
             let keep: std::collections::HashSet<&String> = watch.iter().collect();
@@ -1075,6 +1077,7 @@ fn current_hide_note(library: &Path) -> Option<String> {
             }
         }
         set_hide_note(hide_note(&errors));
+        found_note_t::done(checked_at);
         return HIDE_NOTE.lock().unwrap().clone();
     }
     HIDE_NOTE
@@ -1082,6 +1085,39 @@ fn current_hide_note(library: &Path) -> Option<String> {
         .unwrap()
         .clone()
         .or_else(|| hide_note(&serve))
+}
+
+/// XO FRAGO 10:42Z: where /api/found's hide line spends its time (the
+/// per-tombstone handle stamps vs the rest), last and max, so the Windows
+/// /api/found POLL line can print it beside `hide_lock_hold`.
+mod found_note_t {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static STAMP_LAST_US: AtomicU64 = AtomicU64::new(0);
+    static STAMP_MAX_US: AtomicU64 = AtomicU64::new(0);
+    static TOTAL_LAST_US: AtomicU64 = AtomicU64::new(0);
+    static TOTAL_MAX_US: AtomicU64 = AtomicU64::new(0);
+    static TOMBS: AtomicU64 = AtomicU64::new(0);
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    pub fn stamped(d: std::time::Duration, n: usize) {
+        let us = d.as_micros() as u64;
+        STAMP_LAST_US.store(us, Relaxed);
+        STAMP_MAX_US.fetch_max(us, Relaxed);
+        TOMBS.store(n as u64, Relaxed);
+    }
+    pub fn done(start: std::time::SystemTime) {
+        let us = start.elapsed().map_or(0, |d| d.as_micros() as u64);
+        TOTAL_LAST_US.store(us, Relaxed);
+        TOTAL_MAX_US.fetch_max(us, Relaxed);
+        CALLS.fetch_add(1, Relaxed);
+    }
+    pub fn json() -> serde_json::Value {
+        let ms = |a: &AtomicU64| a.load(Relaxed) as f64 / 1000.0;
+        serde_json::json!({
+            "tombs": TOMBS.load(Relaxed), "calls": CALLS.load(Relaxed),
+            "stamp_last_ms": ms(&STAMP_LAST_US), "stamp_max_ms": ms(&STAMP_MAX_US),
+            "total_last_ms": ms(&TOTAL_LAST_US), "total_max_ms": ms(&TOTAL_MAX_US),
+        })
+    }
 }
 
 /// `paths` minus what the hide files (receiver tombstones, the family log)
@@ -3990,6 +4026,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_inline": inline_t::json(),
         "lib_req_last": LIB_REQ_LAST.lock().unwrap().clone(),
     });
+    out["hide_found_note"] = found_note_t::json();
     out["hide_apply_stale"] = APPLY_STALE
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();

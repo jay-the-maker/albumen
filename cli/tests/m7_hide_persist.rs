@@ -2083,8 +2083,20 @@ fn m7_recheck_and_img_diagnostics() {
                 assert_eq!(code, 200);
                 bytes = body.len();
             }
+            // XO FRAGO 10:42Z: the /api/found line carries its server-side
+            // split (handle stamps vs the rest) and hide_lock_hold, on every
+            // platform.
+            let extra = if path == "/api/found" {
+                let f = found_page(&addr);
+                format!(
+                    " found_note={} hide_lock_hold={}",
+                    f["hide_found_note"], f["hide_lock_hold"]
+                )
+            } else {
+                String::new()
+            };
             println!(
-                "M7 POLL files={files} tombstones={written} samples={} path={path} bytes={bytes} p50_ms={:.2} p95_ms={:.2} max_ms={:.2}",
+                "M7 POLL files={files} tombstones={written} samples={} path={path} bytes={bytes} p50_ms={:.2} p95_ms={:.2} max_ms={:.2}{extra}",
                 ms.len(),
                 pct(&mut ms.clone(), 0.5),
                 pct(&mut ms.clone(), 0.95),
