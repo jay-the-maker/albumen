@@ -1273,3 +1273,119 @@ fn a_same_size_tombstone_swap_with_old_mtimes_restored_still_applies() {
     );
     assert_eq!(get(&addr, "/img?p=sub/IMG_0003.JPG").0, 404);
 }
+
+fn pct(v: &mut [f64], p: f64) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[((v.len() as f64 * p).ceil() as usize).clamp(1, v.len()) - 1]
+}
+
+/// CI diagnostic, print-only (XO 00:37Z): the per-request hide re-check
+/// time and the /img p95 at `ALBUMEN_M7_RECHECK_FILES` files with 0, 1k and
+/// 10k tombstones (`ALBUMEN_M7_RECHECK_TOMBSTONES`, cumulative, default
+/// "0,1000,10000"). Off unless the files variable is set. Nothing is
+/// asserted on timing; box timing is not evidence.
+///
+/// `recheck_*`: one `/api/library?offset=0&limit=1` right after a folder
+/// in the library changed, so the request re-reads the hide state.
+/// `img_*`: `/img` of visible photos once the state is cached (2.5 s after
+/// the last change, past the 2 s same-tick window).
+#[test]
+fn m7_recheck_and_img_diagnostics() {
+    let Some(files) = std::env::var("ALBUMEN_M7_RECHECK_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    else {
+        println!("M7 RECHECK_DIAG skipped: set ALBUMEN_M7_RECHECK_FILES (e.g. 380000)");
+        return;
+    };
+    let levels: Vec<usize> = std::env::var("ALBUMEN_M7_RECHECK_TOMBSTONES")
+        .unwrap_or_else(|_| "0,1000,10000".into())
+        .split(',')
+        .map(|n| n.trim().parse().unwrap())
+        .collect();
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let rel = |i: usize| format!("d{:02}/IMG_{i:07}.jpg", i % 50);
+    for d in 0..50 {
+        fs::create_dir_all(library.path().join(format!("d{d:02}"))).unwrap();
+    }
+    for i in 0..files {
+        fs::write(
+            library.path().join(rel(i)),
+            format!("synthetic-m7-recheck-{i}"),
+        )
+        .unwrap();
+    }
+    let began = Instant::now();
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    loop {
+        let (_, body) = get(&addr, "/api/library?offset=0&limit=1");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v["status"] == "ready" {
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(1800), "never ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let ready_ms = began.elapsed().as_secs_f64() * 1000.0;
+    println!("M7 RECHECK_DIAG_READY files={files} ready_ms={ready_ms:.1}");
+    // Tombstones go on every k-th photo from the end, so the visible
+    // photos /img samples (from the start) stay visible.
+    // Only the second half is ever tombstoned (capped at files / 2).
+    let half = files / 2;
+    let step = (half / levels.iter().copied().max().unwrap_or(1).max(1)).max(1);
+    let mut written = 0usize;
+    let touch = library.path().join("d00").join(".m7-recheck-touch");
+    for &n in &levels {
+        let n = n.min(half);
+        while written < n {
+            let i = files - 1 - written * step;
+            fs::write(
+                library.path().join(format!("{}.albumen-tombstone", rel(i))),
+                br#"{"hidden":true,"reason":"hide"}"#,
+            )
+            .unwrap();
+            written += 1;
+        }
+        let mut recheck = Vec::new();
+        for k in 0..20 {
+            if k % 2 == 0 {
+                fs::write(&touch, b"x").unwrap();
+            } else {
+                fs::remove_file(&touch).unwrap();
+            }
+            let t = Instant::now();
+            let (code, _) = get(&addr, "/api/library?offset=0&limit=1");
+            recheck.push(t.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(code, 200);
+        }
+        std::thread::sleep(Duration::from_millis(2500));
+        get(&addr, "/api/library?offset=0&limit=1");
+        let mut img = Vec::new();
+        for k in 0..200 {
+            let t = Instant::now();
+            let (code, _) = get(&addr, &format!("/img?p={}", rel(k * 7 % half.max(1))));
+            img.push(t.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(code, 200);
+        }
+        let (_, body) = get(&addr, "/api/library");
+        let shown = serde_json::from_str::<serde_json::Value>(&body).unwrap()["images"]
+            .as_array()
+            .unwrap()
+            .len();
+        println!(
+            "M7 RECHECK_DIAG files={files} tombstones={written} shown={shown} \
+             recheck_p50_ms={:.1} recheck_p95_ms={:.1} recheck_max_ms={:.1} \
+             img_p50_ms={:.1} img_p95_ms={:.1} samples_recheck={} samples_img={}",
+            pct(&mut recheck.clone(), 0.5),
+            pct(&mut recheck.clone(), 0.95),
+            pct(&mut recheck.clone(), 1.0),
+            pct(&mut img.clone(), 0.5),
+            pct(&mut img.clone(), 0.95),
+            recheck.len(),
+            img.len(),
+        );
+    }
+}

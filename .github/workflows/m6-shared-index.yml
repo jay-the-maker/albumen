@@ -97,9 +97,19 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
-          # 18 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
-          grep -Eq '^test result: ok\. 18 passed; 0 failed; 0 ignored' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 18 tests green"; exit 1; }
+          # 19 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
+          grep -Eq '^test result: ok\. 19 passed; 0 failed; 0 ignored' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 19 tests green"; exit 1; }
+
+      - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (print-only)
+        # Non-blocking: prints "M7 RECHECK_DIAG tombstones=N ... recheck_p95_ms ... img_p95_ms"
+        # for 0, 1k and 10k tombstones; nothing is gated on it.
+        continue-on-error: true
+        run: |
+          ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
+            cargo test --release --locked -p albumen --test m7_hide_persist \
+            m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
+          grep -E '^M7 RECHECK_DIAG' m7-recheck.log || true
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
         run: |
@@ -165,10 +175,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.2
 
+      # No exiftool or ffmpeg: the M7 tests use synthetic files and pass on
+      # the box with an empty PATH (gui.rs needs exiftool; it is not run here).
       - name: M7 hide tests
         run: |
           set -o pipefail
           cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
-          # 18 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
-          grep -Eq '^test result: ok\. 18 passed; 0 failed; 0 ignored' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 18 tests green on Windows"; exit 1; }
+          # 19 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
+          grep -Eq '^test result: ok\. 19 passed; 0 failed; 0 ignored' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 19 tests green on Windows"; exit 1; }
+
+      - name: M7 re-check and /img diagnostics at 50,000 files (print-only)
+        # Non-blocking. 50k, not 380k: writing and listing 380k files on a
+        # Windows runner would take a large share of the job; 50k keeps it
+        # short. Raise it once a run shows the time.
+        continue-on-error: true
+        run: |
+          ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
+            cargo test --release --locked -p albumen --test m7_hide_persist \
+            m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
+          grep -E '^M7 RECHECK_DIAG' m7-recheck.log || true
