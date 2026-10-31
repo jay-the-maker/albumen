@@ -974,7 +974,7 @@ fn hide_note(errors: &[String]) -> Option<String> {
 /// The hide files the last listing read (receiver tombstones). None until
 /// a listing exists. `/api/found` re-reads them (and the family log) on
 /// each poll so the quiet line follows a file that breaks or is fixed.
-static HIDE_WATCH: Mutex<Option<Vec<String>>> = Mutex::new(None);
+static HIDE_WATCH: Mutex<Option<std::sync::Arc<Vec<String>>>> = Mutex::new(None);
 
 /// Per-tombstone state `/api/found` keeps between polls (XO 02:30Z (c)).
 static FOUND_TOMBS: Mutex<Option<std::collections::HashMap<String, TombState>>> = Mutex::new(None);
@@ -993,10 +993,6 @@ fn current_hide_note(library: &Path) -> Option<String> {
         let checked_at = SystemTime::now();
         let mut errors = Vec::new();
         {
-            let mut guard = FOUND_TOMBS.lock().unwrap();
-            let cache = guard.get_or_insert_with(Default::default);
-            let keep: std::collections::HashSet<&String> = watch.iter().collect();
-            cache.retain(|k, _| keep.contains(k));
             // One listing per folder: each tombstone's metadata comes with
             // it (Windows: no stat per tombstone, FRAGO 06:13Z (2)); a
             // tombstone the listing lacks gets the plain stat.
@@ -1017,31 +1013,41 @@ fn current_hide_note(library: &Path) -> Option<String> {
             // place shows within one poll).
             const LIST_MIN: usize = 64;
             let mut per_dir: std::collections::HashMap<&str, usize> = Default::default();
-            for rel in &watch {
+            for rel in watch.iter() {
                 *per_dir
                     .entry(rel.rsplit_once('/').map_or("", |(d, _)| d))
                     .or_default() += 1;
             }
-            let mut listed: std::collections::HashMap<
+            // XO 09:16Z (2): Linux CI 649dc1e /api/found p95 22.15 ms at
+            // 50k/10k (p50 18.86, 1.9 us per watched tombstone): the 10k
+            // stamps ran one after another on the request thread. They are
+            // taken on up to `hide_threads()` threads now, still one stamp
+            // of each tombstone's own file on every poll (no gate skips
+            // one), and outside the cache lock.
+            let listed: std::collections::HashMap<
                 &str,
                 std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)>,
-            > = Default::default();
-            for rel in &watch {
+            > = if key_kind() == KeyKind::ChangeTime {
+                per_dir
+                    .iter()
+                    .filter(|(_, &n)| n >= LIST_MIN)
+                    .map(|(&d, _)| (d, dir_change_stamps(&library.join(d))))
+                    .collect()
+            } else {
+                Default::default()
+            };
+            let stamps = par_map(&watch, |rel: &String| {
                 let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
-                let st = if per_dir.get(dir).copied().unwrap_or(0) < LIST_MIN {
-                    mtime(&library.join(rel))
-                } else {
-                    let entries = listed.entry(dir).or_insert_with(|| {
-                        if key_kind() != KeyKind::ChangeTime {
-                            return Default::default();
-                        }
-                        dir_change_stamps(&library.join(dir))
-                    });
-                    match entries.get(std::ffi::OsStr::new(name)) {
-                        Some(st) => Some(*st),
-                        None => mtime(&library.join(rel)),
-                    }
-                };
+                listed
+                    .get(dir)
+                    .and_then(|m| m.get(std::ffi::OsStr::new(name)).copied())
+                    .or_else(|| mtime(&library.join(rel)))
+            });
+            let mut guard = FOUND_TOMBS.lock().unwrap();
+            let cache = guard.get_or_insert_with(Default::default);
+            let keep: std::collections::HashSet<&String> = watch.iter().collect();
+            cache.retain(|k, _| keep.contains(k));
+            for (rel, st) in watch.iter().zip(stamps) {
                 if key_kind() == KeyKind::Portable {
                     // mtime() hashed the bytes.
                     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1086,13 +1092,13 @@ fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
         eprintln!("albumen gui: hide: {}", err.replace('\n', ": "));
     }
     set_hide_note(hide_note(&hidden.errors));
-    *HIDE_WATCH.lock().unwrap() = Some(
+    *HIDE_WATCH.lock().unwrap() = Some(std::sync::Arc::new(
         paths
             .iter()
             .filter(|p| p.ends_with(albumen_ingest::hides::TOMBSTONE_SUFFIX))
             .cloned()
             .collect(),
-    );
+    ));
     if !hidden.paths.is_empty() {
         paths.retain(|p| !hidden.paths.contains(p));
     }
@@ -2543,12 +2549,12 @@ fn hidden_for(
         set_hide_note(hide_note(&errors));
     }
     if watch_changed {
-        *HIDE_WATCH.lock().unwrap() = Some(
+        *HIDE_WATCH.lock().unwrap() = Some(std::sync::Arc::new(
             f.contrib
                 .iter()
                 .flat_map(|c| c.tombs.iter().cloned())
                 .collect(),
-        );
+        ));
     }
     let hidden: &std::collections::HashSet<String> = &hard;
     // An unhide needs the photo back, which the view no longer holds: list
@@ -2814,8 +2820,14 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
         // Folded photo name -> tombstone file name, for tombstones present.
         // The entry's metadata rides along (Windows: from the listing itself,
         // no per-tombstone stat; Windows CI 90f10f2 keep_max 100 ms at 10k).
-        let mut tombs: std::collections::HashMap<String, Option<std::fs::Metadata>> =
-            Default::default();
+        // XO 09:16Z (1): Linux CI 649dc1e keep_shown 156.5 ms at 380k/10k
+        // (50 ms at 1k, same folders): every listed tombstone got a stat
+        // here (`metadata()` is an fstatat off Windows) and every withheld
+        // one a second stat of its photo. Now the entry is kept and its
+        // metadata taken only for a tombstone that was a trusted show (the
+        // only case that can keep a photo; it still gets its own stamp),
+        // and the photo stat only until the folder is known to blink.
+        let mut tombs: std::collections::HashMap<String, std::fs::DirEntry> = Default::default();
         match std::fs::read_dir(lib.join(&j.dir)) {
             Ok(rd) => {
                 for e in rd {
@@ -2839,7 +2851,8 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
                     }
                     let n = n.to_string_lossy();
                     let stem = &n[..n.len() - TOMBSTONE_SUFFIX.len()];
-                    tombs.insert(fold(stem), e.metadata().ok());
+                    let stem = fold(stem);
+                    tombs.insert(stem, e);
                 }
             }
             Err(_) => return all,
@@ -2880,7 +2893,7 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
                 continue;
             }
             let name = p.rsplit_once('/').map_or(p.as_str(), |(_, n)| n);
-            let Some(meta) = tombs.get(&fold(name)) else {
+            let Some(entry) = tombs.get(&fold(name)) else {
                 continue;
             };
             let rel = format!("{p}{TOMBSTONE_SUFFIX}");
@@ -2888,18 +2901,18 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
             KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Listed, so present: its metadata came with the listing (an
             // entry whose metadata could not be read is not kept).
-            let kept = meta.as_ref().is_some_and(|m| {
-                j.ds.tombs.get(&rel).is_some_and(|t| {
-                    t.trusted && t.verdict == Ok(false) && t.stamp.is_some() && {
-                        tomb_io();
-                        stamp_of(&path, m) == t.stamp
-                    }
-                })
+            let kept = j.ds.tombs.get(&rel).is_some_and(|t| {
+                t.trusted && t.verdict == Ok(false) && t.stamp.is_some() && {
+                    tomb_io();
+                    entry
+                        .metadata()
+                        .is_ok_and(|m| stamp_of(&path, &m) == t.stamp)
+                }
             });
             if !kept {
                 // Only a photo on screen blinks out (Linux: the tombstone's
                 // photo file exists; Windows: taken from the view).
-                blink |= cfg!(windows) || lib.join(&p).is_file();
+                blink = blink || cfg!(windows) || lib.join(&p).is_file();
                 set.insert(p);
             }
         }
@@ -3033,6 +3046,26 @@ static APPLY_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 /// Threads for re-lists and the carried-show stats: one core is left for
 /// requests (XO 04:08Z, the Windows k=1/k=2 stalls).
+/// `f` over `items` on up to `hide_threads()` scoped threads (in order);
+/// one thread under 1,024 items.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = hide_threads();
+    if threads <= 1 || items.len() < 1024 {
+        return items.iter().map(f).collect();
+    }
+    let chunk = items.len().div_ceil(threads);
+    let f = &f;
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = items
+            .chunks(chunk)
+            .map(|c| sc.spawn(move || c.iter().map(f).collect::<Vec<R>>()))
+            .collect();
+        hs.into_iter()
+            .flat_map(|h| h.join().expect("stamp thread"))
+            .collect()
+    })
+}
+
 fn hide_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, |n| n.get())
