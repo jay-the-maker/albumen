@@ -1432,7 +1432,14 @@ fn the_change_key_is_the_platform_key_with_no_fallback() {
 /// keep a fine ctime; a forced unknown or network type (statfs f_type hook)
 /// falls back to 2 s, and a tombstone written 0.5 s ago is then read again
 /// on every poll until it is 2 s old.
+///
+/// Needs the ALBUMEN_TEST_FS_MAGIC hook: a debug build, or a release build
+/// with `--features test-hooks` (as CI runs it); plain release ignores it.
 #[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs a debug build or --features test-hooks"
+)]
 fn an_unknown_or_network_filesystem_falls_back_to_the_2s_window() {
     let library = tempfile::tempdir().unwrap();
     fs::write(library.path().join("IMG_0001.JPG"), b"synthetic-m7-fs-1").unwrap();
@@ -1454,7 +1461,7 @@ fn an_unknown_or_network_filesystem_falls_back_to_the_2s_window() {
             "M7 fs window default: fs={} same_tick_ms={}",
             f["hide_fs"], f["hide_same_tick_ms"]
         );
-        let fine = ["ext4", "xfs", "btrfs", "tmpfs", "f2fs", "zfs", "apfs"];
+        let fine = ["xfs", "btrfs", "tmpfs", "f2fs", "zfs", "apfs"];
         let want = if fine.contains(&f["hide_fs"].as_str().unwrap_or_default()) {
             50
         } else {
@@ -1464,6 +1471,8 @@ fn an_unknown_or_network_filesystem_falls_back_to_the_2s_window() {
     }
     for (magic, name) in [
         ("0x6969", "nfs"),
+        // ext2/3/4 share 0xEF53 and may store whole seconds: coarse.
+        ("0xef53", "ext2/3/4"),
         ("0x65735546", "fuse"),
         ("0x4d44", "msdos"),
         ("0x2011bab0", "exfat"),
@@ -1647,6 +1656,8 @@ fn m7_recheck_and_img_diagnostics() {
         let synced = Instant::now();
         let mut recheck = Vec::new();
         let mut sync_window = Vec::new();
+        // (ms, sample index, ms after the tombstone writes it started)
+        let mut slow: Vec<(f64, usize, f64)> = Vec::new();
         for k in 0..100 {
             if k % 2 == 0 {
                 fs::write(&touch, b"x").unwrap();
@@ -1657,6 +1668,7 @@ fn m7_recheck_and_img_diagnostics() {
             let (code, _) = get(&addr, "/api/library?offset=0&limit=1");
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             recheck.push(ms);
+            slow.push((ms, k, synced.elapsed().as_secs_f64() * 1000.0 - ms));
             if synced.elapsed() < Duration::from_secs(2) {
                 sync_window.push(ms);
             }
@@ -1688,12 +1700,31 @@ fn m7_recheck_and_img_diagnostics() {
         };
         println!(
             "M7 RECHECK_SPLIT files={files} tombstones={written} \
-             sync2s_p95_ms={} sync2s_samples={} steady_p95_ms={} steady_p50_ms={:.1} steady_samples={}",
+             sync2s_p95_ms={} sync2s_max_ms={} sync2s_samples={} steady_p95_ms={} steady_p50_ms={:.1} \
+             steady_max_ms={:.1} steady_samples={}",
             p95(&sync_window),
+            if sync_window.is_empty() {
+                "n/a".to_string()
+            } else {
+                format!("{:.1}", pct(&mut sync_window.clone(), 1.0))
+            },
             sync_window.len(),
             p95(&steady),
             pct(&mut steady.clone(), 0.5),
+            pct(&mut steady.clone(), 1.0),
             steady.len()
+        );
+        // Where the slowest re-checks fall (k=0 is the first request after
+        // this level's tombstone writes).
+        slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let top: Vec<String> = slow
+            .iter()
+            .take(3)
+            .map(|(ms, k, at)| format!("{ms:.1}ms@k={k},+{at:.0}ms"))
+            .collect();
+        println!(
+            "M7 RECHECK_SLOWEST files={files} tombstones={written} {}",
+            top.join(" ")
         );
         std::thread::sleep(Duration::from_millis(2500));
         get(&addr, "/api/library?offset=0&limit=1");
@@ -1712,12 +1743,13 @@ fn m7_recheck_and_img_diagnostics() {
         println!(
             "M7 RECHECK_DIAG files={files} tombstones={written} shown={shown} \
              recheck_p50_ms={:.1} recheck_p95_ms={:.1} recheck_max_ms={:.1} \
-             img_p50_ms={:.1} img_p95_ms={:.1} samples_recheck={} samples_img={}",
+             img_p50_ms={:.1} img_p95_ms={:.1} img_max_ms={:.1} samples_recheck={} samples_img={}",
             pct(&mut recheck.clone(), 0.5),
             pct(&mut recheck.clone(), 0.95),
             pct(&mut recheck.clone(), 1.0),
             pct(&mut img.clone(), 0.5),
             pct(&mut img.clone(), 0.95),
+            pct(&mut img.clone(), 1.0),
             recheck.len(),
             img.len(),
         );

@@ -154,3 +154,9 @@ Until the next listing:
   the 10 ms bar; on Windows it is no longer used (ChangeTime), but
   Windows keeps the 2 s window, so its first-2 s figures will be higher
   than Linux's. Windows not yet measured.
+
+## XO 02:44Z follow-up
+
+- **ext2/3/4 coarse.** 0xEF53 is shared by ext2, ext3 and ext4, and ext2/3 (or ext4 with 128-byte inodes) keep whole seconds, so 0xEF53 now gets the 2 s window (`hide_fs` = `ext2/3/4`). No probe was used: an inode cached in memory can show nanoseconds that are cut off on disk, so reading ctime nanoseconds isn't a robust test. The cost is only in the first 2 s after a change.
+- **Test hook.** `ALBUMEN_TEST_FS_MAGIC` works only in debug builds or with the `test-hooks` cargo feature; a plain release build ignores it. CI's M7 commands (and the scale step, via `M6_FEATURES` in `.github/m6-one.sh`) pass `--features test-hooks` to every M7 command, so one release build serves every step and the forced-fallback test still runs under `--release`. Without the feature, the release test is `ignore`d (20 passed, 1 ignored), so CI's `0 ignored` guard catches a missing feature.
+- **Maxima (box, release; box timing isn't evidence).** At 380k files, the largest re-check is always sample k=0, the first request after the tombstone batch is written: 125.8 ms at 1k and 187.9 ms at 10k (forced fine window); 128.2 ms and 202.5 ms with the ext 2 s window. The cause is the one-off rebuild after the batch: re-listing the changed folders and reading the new tombstones. The files were just written, so they're in page cache, and Rust has no GC. Under the 2 s window, every request within 2 s of the writes repeats that work (sync2s p95 93.1 / 202.5 ms); the steady state is unchanged (p95 2.6–3.7 ms, max ≤ 4.1 ms). New `M7 RECHECK_SLOWEST` lines print the three slowest samples with their index and their time after the writes.

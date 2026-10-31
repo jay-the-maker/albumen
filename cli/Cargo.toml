@@ -8,6 +8,10 @@ publish.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+# Honour test-only env hooks (ALBUMEN_TEST_FS_MAGIC) in release test builds.
+test-hooks = []
+
 [[bin]]
 name = "albumen"
 path = "src/main.rs"

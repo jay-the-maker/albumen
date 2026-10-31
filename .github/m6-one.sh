@@ -53,7 +53,7 @@ ticks=$(mktemp)
 ( while :; do echo "$(date +%s.%N) $(cut -d' ' -f1 /proc/uptime)"; sleep 0.2; done ) > "$ticks" &
 ticker=$!
 rc=0
-/usr/bin/time -v -o "$timelog" cargo test --release --locked -p "${M6_PKG:-albumen-ingest}" --test "${M6_TEST:-index_shared}" -- \
+/usr/bin/time -v -o "$timelog" cargo test --release --locked -p "${M6_PKG:-albumen-ingest}" ${M6_FEATURES:+--features "$M6_FEATURES"} --test "${M6_TEST:-index_shared}" -- \
   --exact "$name" --nocapture --test-threads=1 2>&1 | tee "$log" || rc=$?
 kill "$ticker" 2>/dev/null || true
 wait "$ticker" 2>/dev/null || true

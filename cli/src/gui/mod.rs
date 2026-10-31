@@ -1005,7 +1005,15 @@ fn recent() -> std::time::Duration {
 
 /// Test hook: `ALBUMEN_TEST_FS_MAGIC` (a Linux statfs f_type, hex `0x...`
 /// or decimal) replaces the real filesystem type, on any platform, so a
-/// test can force the 2 s fallback (or the fine window).
+/// test can force the 2 s fallback (or the fine window). Honoured only in
+/// debug builds or with the `test-hooks` cargo feature (CI's `--release`
+/// test builds enable it); a plain release build ignores it.
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+fn fs_magic_override() -> Option<u64> {
+    None
+}
+
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 fn fs_magic_override() -> Option<u64> {
     let v = std::env::var("ALBUMEN_TEST_FS_MAGIC").ok()?;
     let v = v.trim();
@@ -1016,8 +1024,10 @@ fn fs_magic_override() -> Option<u64> {
 }
 
 /// Linux statfs f_type magics with a fine-grained (ns) ctime.
+/// ext2/3/4 (0xEF53) is NOT here: all three share the magic, and ext2/3 or
+/// an ext4 made with 128-byte inodes stores whole seconds only, so it gets
+/// the 2 s window (safe; costs only the first 2 s after a change).
 const FINE_MAGICS: &[(u64, &str)] = &[
-    (0xEF53, "ext4"),
     (0x5846_5342, "xfs"),
     (0x9123_683E, "btrfs"),
     (0x0102_1994, "tmpfs"),
@@ -1028,6 +1038,7 @@ const FINE_MAGICS: &[(u64, &str)] = &[
 /// Known coarse or untrusted ones (named in `/api/found` only; anything not
 /// in [`FINE_MAGICS`] gets the 2 s window).
 const COARSE_MAGICS: &[(u64, &str)] = &[
+    (0xEF53, "ext2/3/4"),
     (0x6969, "nfs"),
     (0x517B, "smb"),
     (0xFF53_4D42, "cifs"),
@@ -2242,15 +2253,25 @@ mod tests {
     #[test]
     fn the_same_tick_window_is_fine_only_on_known_fine_ctime_filesystems() {
         use std::time::Duration;
-        for m in [0xEF53u64, 0x5846_5342, 0x9123_683E, 0x0102_1994] {
+        for m in [
+            0x5846_5342u64,
+            0x9123_683E,
+            0x0102_1994,
+            0xF2F5_2010,
+            0x2FC1_2FC1,
+        ] {
             assert_eq!(
                 window_for_magic(Some(m)).0,
                 Duration::from_millis(50),
                 "{m:#x}"
             );
         }
+        // ext2/3/4 share 0xEF53 and may have 1 s timestamps: coarse.
+        assert_eq!(window_for_magic(Some(0xEF53)).0, Duration::from_secs(2));
+        assert_eq!(window_for_magic(Some(0xEF53)).1, "ext2/3/4");
         for m in [
-            0x6969u64,
+            0xEF53u64,
+            0x6969,
             0x517B,
             0xFF53_4D42,
             0xFE53_4D42,
