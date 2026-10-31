@@ -1400,7 +1400,7 @@ fn an_unchanged_request_reads_no_tombstone() {
 /// 50k files, and 100 ms (inside the request max) above that.
 const INLINE_CAP_MS: f64 = 40.0;
 const INLINE_CAP_LARGE_MS: f64 = 100.0;
-/// Library re-walks allowed in the no-flicker run: the first walk plus one
+/// Library re-walks in the no-flicker run (exact): the first walk plus one
 /// per grown listing (1 release + 20 syncs), XO 05:41Z (3).
 const MAX_REWALKS: u64 = 22;
 
@@ -2622,13 +2622,18 @@ fn no_flicker(variant: &str) {
     let (_, st) = get(&addr, "/api/hide-status");
     let st: serde_json::Value = serde_json::from_str(&st).unwrap();
     let rewalks = st["generation"].as_u64().unwrap_or(0);
+    // FRAGO 06:13Z (3): the cause of each re-walk, so an extra one on
+    // another platform names its photo and tombstone state.
+    let causes = found_page(&addr)["hide_rewalk_causes"].clone();
+    println!("M7 NO_FLICKER_REWALK_CAUSES variant={variant} causes={causes}");
     println!("M7 NO_FLICKER_REWALKS variant={variant} generation={rewalks} max={MAX_REWALKS}");
     // XO 05:41Z (3): asserted, not only printed. One walk at the start and
     // at most one per grown listing (21); a re-list of the folder with the
     // hidden photo starting one would push this over.
-    assert!(
-        rewalks <= MAX_REWALKS,
-        "{rewalks} library re-walks (at most {MAX_REWALKS})"
+    // XO 06:08Z (1): exactly, not at most (no headroom).
+    assert_eq!(
+        rewalks, MAX_REWALKS,
+        "{rewalks} library re-walks (exactly {MAX_REWALKS})"
     );
     let r_p95 = pct(&mut times.clone(), 0.95);
     let r_max = pct(&mut times.clone(), 1.0);
@@ -2858,7 +2863,16 @@ fn m7_unhide_while_pending_shows_the_photo() {
     let ms = l.until(5, "the unhidden photo never showed", |s| s.contains(u));
     settled(&l.addr);
     assert_eq!(l.set(), all.iter().cloned().collect(), "final set");
-    println!("M7 UNHIDE_WHILE_PENDING shown_ms={ms:.1}");
+    let causes = found_page(&l.addr)["hide_rewalk_causes"].clone();
+    println!("M7 UNHIDE_WHILE_PENDING shown_ms={ms:.1} causes={causes}");
+    // XO 06:08Z (2): the photo must come back as an unhide (the carried
+    // hard-then-withheld set), not only because its re-listed folder grew.
+    assert!(
+        causes.as_array().is_some_and(|c| c
+            .iter()
+            .any(|c| c == &serde_json::json!(format!("unhid {u}")))),
+        "the unhide was not seen as one (only a grown folder brought it back): {causes}"
+    );
     assert!(ms <= 1000.0, "unhidden photo {ms:.1} ms after the release");
 }
 

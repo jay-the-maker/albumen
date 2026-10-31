@@ -128,8 +128,8 @@ jobs:
           done
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_INLINE variant=' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_INLINE lines (keep_shown and set build under the cap)"; exit 1; }
-          grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=([0-9]|1[0-9]|2[0-2]) max=22$' m7-nf.log | grep -qx 4 \
-            || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation <= 22"; exit 1; }
+          grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
+            || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
 
       - name: M7 synced-in photos, unhide while pending, PENDING_LIMIT and exhausted panics (XO 04:41Z; merge-blocking)
         # Synced-in photos show with no unhide or scan; a photo unhidden while
@@ -269,8 +269,8 @@ jobs:
           done
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_INLINE variant=' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_INLINE lines (keep_shown and set build under the cap)"; exit 1; }
-          grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=([0-9]|1[0-9]|2[0-2]) max=22$' m7-nf.log | grep -qx 4 \
-            || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation <= 22"; exit 1; }
+          grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
+            || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
 
       - name: M7 synced-in photos, unhide while pending, PENDING_LIMIT and exhausted panics (XO 04:41Z; merge-blocking)
         # Synced-in photos show with no unhide or scan; a photo unhidden while

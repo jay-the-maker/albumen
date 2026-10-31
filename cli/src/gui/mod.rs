@@ -855,8 +855,42 @@ fn current_hide_note(library: &Path) -> Option<String> {
             let cache = guard.get_or_insert_with(Default::default);
             let keep: std::collections::HashSet<&String> = watch.iter().collect();
             cache.retain(|k, _| keep.contains(k));
+            // One listing per folder: each tombstone's metadata comes with
+            // it (Windows: no stat per tombstone, FRAGO 06:13Z (2)); a
+            // tombstone the listing lacks gets the plain stat.
+            let mut listed: std::collections::HashMap<
+                &str,
+                std::collections::HashMap<std::ffi::OsString, std::fs::Metadata>,
+            > = Default::default();
             for rel in &watch {
-                let st = mtime(&library.join(rel));
+                let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+                let entries = listed.entry(dir).or_insert_with(|| {
+                    let mut m = std::collections::HashMap::new();
+                    // Linux: a stat costs what the entry's metadata does,
+                    // so only Windows lists (the 0-tombstone /api/found
+                    // p50 went 0.25 -> 5 ms on the box with a listing).
+                    if !cfg!(windows) {
+                        return m;
+                    }
+                    if let Ok(rd) = std::fs::read_dir(library.join(dir)) {
+                        for e in rd.flatten() {
+                            let n = e.file_name();
+                            if n.as_encoded_bytes()
+                                .ends_with(albumen_ingest::hides::TOMBSTONE_SUFFIX.as_bytes())
+                            {
+                                if let Ok(md) = e.metadata() {
+                                    m.insert(n, md);
+                                }
+                            }
+                        }
+                    }
+                    m
+                });
+                let path = library.join(rel);
+                let st = match entries.get(std::ffi::OsStr::new(name)) {
+                    Some(md) => stamp_of(&path, md),
+                    None => mtime(&path),
+                };
                 if key_kind() == KeyKind::Portable {
                     // mtime() hashed the bytes.
                     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -987,6 +1021,10 @@ struct Fresh {
     /// A confirmed listing holds a photo the view lacks: list the library
     /// again (XO 04:41Z (1)).
     grew: bool,
+    /// Photos that already started a re-walk this generation: a re-list
+    /// while that walk runs (slow on Windows CI: 41/42 walks for 22)
+    /// must not start another for the same photo.
+    grew_sent: std::collections::HashSet<String>,
     /// The previous generation's view, kept until this generation's first
     /// check has decided which photos of a pending folder were on screen.
     prev: Option<Prev>,
@@ -1342,7 +1380,13 @@ static SERVE_NOTES: Mutex<std::collections::BTreeMap<String, String>> =
 /// and is read again (fail closed, and counted, never a silent fallback).
 fn mtime(p: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::symlink_metadata(p).ok()?;
-    let key = os_key(p, &m)?;
+    stamp_of(p, &m)
+}
+
+/// The stamp from metadata already in hand (a folder listing's entry: free
+/// on Windows, where a stat costs a file open on NTFS).
+fn stamp_of(p: &Path, m: &std::fs::Metadata) -> Option<(SystemTime, u64)> {
+    let key = os_key(p, m)?;
     Some((m.modified().ok()?, key))
 }
 
@@ -1766,6 +1810,7 @@ fn hidden_for(
             fam_contrib: Vec::new(),
             fam_dirty: true,
             grew: false,
+            grew_sent: Default::default(),
             prev,
         });
     }
@@ -2143,10 +2188,14 @@ fn hidden_for(
     // A photo hidden, then withheld while its folder was pending, then
     // shown is an unhide too: test against the hard-hidden set, not only
     // the photos withheld at the last check (the base view lacks it).
-    unhid |= removed
+    if let Some(p) = removed
         .iter()
         .chain(&f.hard_w)
-        .any(|p| !hidden.contains(p) && !withheld.contains(p));
+        .find(|p| !hidden.contains(*p) && !withheld.contains(*p))
+    {
+        unhid = true;
+        rewalk_cause(format!("unhid {p}"));
+    }
     // Hard-hidden before and now only withheld; walks the (small) hard sets.
     let hard_w: std::collections::HashSet<String> = removed
         .iter()
@@ -2246,6 +2295,17 @@ static REDISPATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// confirmed folder held a photo synced in.
 static EXHAUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static GREW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Why each library re-walk from the hide checks started (FRAGO 06:13Z
+/// (3)): "grew <photo> <tombstone state>" or "unhid <photo>", first 200.
+static REWALK_CAUSES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn rewalk_cause(c: String) {
+    eprintln!("albumen gui: hide: re-walk: {c}");
+    let mut v = REWALK_CAUSES.lock().unwrap();
+    if v.len() < 200 {
+        v.push(c);
+    }
+}
 /// Time to build the hidden and withheld sets (the last and longest).
 static BUILD_LAST_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BUILD_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2311,24 +2371,34 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
         }
         KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Folded photo name -> tombstone file name, for tombstones present.
-        let mut tombs: std::collections::HashMap<String, String> = Default::default();
+        // The entry's metadata rides along (Windows: from the listing itself,
+        // no per-tombstone stat; Windows CI 90f10f2 keep_max 100 ms at 10k).
+        let mut tombs: std::collections::HashMap<String, Option<std::fs::Metadata>> =
+            Default::default();
         match std::fs::read_dir(lib.join(&j.dir)) {
             Ok(rd) => {
                 for e in rd {
                     let Ok(e) = e else { return all };
                     let n = e.file_name();
                     // Only a tombstone's name is copied: a folder of
-                    // thousands of photos costs no allocation per photo.
-                    if !cfg!(windows)
-                        && !n.as_encoded_bytes().ends_with(TOMBSTONE_SUFFIX.as_bytes())
-                    {
+                    // thousands of photos costs no allocation per photo
+                    // (Windows: the suffix compared case-insensitively).
+                    let b = n.as_encoded_bytes();
+                    let sfx = TOMBSTONE_SUFFIX.as_bytes();
+                    let is_tomb = b.len() >= sfx.len() && {
+                        let tail = &b[b.len() - sfx.len()..];
+                        if cfg!(windows) {
+                            tail.eq_ignore_ascii_case(sfx)
+                        } else {
+                            tail == sfx
+                        }
+                    };
+                    if !is_tomb {
                         continue;
                     }
-                    let n = n.to_string_lossy().into_owned();
-                    let fl = fold(&n);
-                    if let Some(stem) = fl.strip_suffix(&fold(TOMBSTONE_SUFFIX)) {
-                        tombs.insert(stem.to_string(), n);
-                    }
+                    let n = n.to_string_lossy();
+                    let stem = &n[..n.len() - TOMBSTONE_SUFFIX.len()];
+                    tombs.insert(fold(stem), e.metadata().ok());
                 }
             }
             Err(_) => return all,
@@ -2369,22 +2439,22 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
                 continue;
             }
             let name = p.rsplit_once('/').map_or(p.as_str(), |(_, n)| n);
-            if !tombs.contains_key(&fold(name)) {
+            let Some(meta) = tombs.get(&fold(name)) else {
                 continue;
-            }
+            };
             let rel = format!("{p}{TOMBSTONE_SUFFIX}");
             let path = lib.join(&rel);
             KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let kept = match std::fs::symlink_metadata(&path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                Err(_) => false,
-                Ok(_) => j.ds.tombs.get(&rel).is_some_and(|t| {
+            // Listed, so present: its metadata came with the listing (an
+            // entry whose metadata could not be read is not kept).
+            let kept = meta.as_ref().is_some_and(|m| {
+                j.ds.tombs.get(&rel).is_some_and(|t| {
                     t.trusted
                         && t.verdict == Ok(false)
                         && t.stamp.is_some()
-                        && mtime(&path) == t.stamp
-                }),
-            };
+                        && stamp_of(&path, m) == t.stamp
+                })
+            });
             if !kept {
                 // Only a photo on screen blinks out (Linux: the tombstone's
                 // photo file exists; Windows: taken from the view).
@@ -2649,13 +2719,34 @@ fn apply_relist(f: &mut Fresh, done: RelistDone) {
     if !photos.is_empty() && !f.grew {
         let have: std::collections::HashSet<&str> =
             f.photos_in[i].iter().map(|&j| f.base.path(j)).collect();
-        f.grew = photos.iter().any(|p| {
-            !have.contains(p.as_str())
-                && ds
-                    .tombs
-                    .get(&format!("{p}{}", albumen_ingest::hides::TOMBSTONE_SUFFIX))
-                    .is_none_or(|t| t.verdict == Ok(false))
+        let why = photos.iter().find_map(|p| {
+            let t = ds
+                .tombs
+                .get(&format!("{p}{}", albumen_ingest::hides::TOMBSTONE_SUFFIX));
+            (!have.contains(p.as_str())
+                && !f.grew_sent.contains(p)
+                && t.is_none_or(|t| t.verdict == Ok(false)))
+            .then(|| {
+                format!(
+                    "grew {p} tomb={} view_dir_photos={}",
+                    match t {
+                        None => "none".to_string(),
+                        Some(t) => format!("{:?}", t.verdict),
+                    },
+                    have.len()
+                )
+            })
         });
+        f.grew = why.is_some();
+        if let Some(w) = why {
+            // Every new photo this listing brings rides the same walk.
+            for p in &photos {
+                if !have.contains(p.as_str()) {
+                    f.grew_sent.insert(p.clone());
+                }
+            }
+            rewalk_cause(w);
+        }
     }
     let slot = &mut f.state[i];
     if let Some(since) = slot.pending {
@@ -3085,6 +3176,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_redispatched": REDISPATCHED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_exhausted": EXHAUSTED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_grew": GREW.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_rewalk_causes": REWALK_CAUSES.lock().unwrap().clone(),
         "hide_build_last_ms": BUILD_LAST_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
         "hide_build_max_ms": BUILD_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
     })
