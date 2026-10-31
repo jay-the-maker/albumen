@@ -1169,6 +1169,57 @@ mod check_cache_tests {
     }
 
     #[test]
+    fn slot_under_two_seconds_old_is_never_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        replace(&path, &body(5, "one.jpg"));
+        let before = check_hashes_on_this_thread();
+        for _ in 0..3 {
+            assert_eq!(check_saved_file(&path), Ok(5));
+        }
+        // Still young (well under MIN_AGE_NS): every check hashed.
+        assert_eq!(check_hashes_on_this_thread() - before, 3);
+    }
+
+    #[test]
+    fn wrong_footer_length_with_intact_size_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        let good = body(5, "one.jpg");
+        let text = String::from_utf8(good.clone()).unwrap();
+        let footer_at = text.trim_end_matches('\n').rfind('\n').unwrap() + 1;
+        let len_text = format!("end\t{footer_at}\t");
+        assert!(text[footer_at..].starts_with(&len_text));
+        let width = footer_at.to_string().len();
+        let lies = [
+            format!("{:0width$}", footer_at - 1),
+            format!("{:0width$}", footer_at + 1),
+            format!("{:0width$}", 0),
+            "9".repeat(width),
+        ];
+        for lie in lies {
+            let bad = text.replacen(&len_text, &format!("end\t{lie}\t"), 1);
+            assert_eq!(bad.len(), good.len(), "size must stay intact");
+            replace(&path, bad.as_bytes());
+            assert!(
+                check_saved_file(&path).is_err(),
+                "served a footer claiming {lie}"
+            );
+        }
+        // Overflowing and non-numeric lengths, too (size changes here).
+        for lie in ["99999999999999999999999", "-1", "x"] {
+            replace(
+                &path,
+                text.replacen(&len_text, &format!("end\t{lie}\t"), 1)
+                    .as_bytes(),
+            );
+            assert!(check_saved_file(&path).is_err());
+        }
+        replace(&path, &good);
+        assert_eq!(check_saved_file(&path), Ok(5));
+    }
+
+    #[test]
     fn large_body_is_hashed_in_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.idx.a");
