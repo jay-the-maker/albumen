@@ -2481,6 +2481,7 @@ fn hidden_for(
                         HID_REVERIFIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
+                    HID_AGE_REREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let new = read_tomb(lib, rel, checked_at);
                     changed |= new.verdict != t.verdict;
                     *t = new;
@@ -3879,6 +3880,9 @@ fn trust_cache_mutant() -> bool {
 
 /// Confirmed-hidden tombstones re-verified unchanged (bounded age).
 static HID_REVERIFIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Hiding tombstones read again by the HID_REVERIFY bounded age (their
+/// stamp moved or is not trusted); part of `hide_recheck_reads`.
+static HID_AGE_REREADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Request prestamps run and their total time.
 static PRESTAMP_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -5045,6 +5049,9 @@ fn found_json(server: &Server) -> serde_json::Value {
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["lib_body_builds"] = LIB_BODY_BUILDS
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_age_rereads"] = HID_AGE_REREADS
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["hide_reverified"] = HID_REVERIFIED

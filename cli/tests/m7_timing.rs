@@ -48,13 +48,22 @@ fn an_untrusted_real_tombstone_reread_cost_is_measured() {
     let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
     ready_found(&addr);
     std::thread::sleep(Duration::from_millis(2100));
-    let reads = || found_page(&addr)["hide_recheck_reads"].as_u64().unwrap();
     assert_eq!(
         listed(&addr),
         want,
         "a hidden photo showed, or a shown one did not"
     );
-    let r0 = reads();
+    // One /api/found per snapshot: reads and age re-reads from the same
+    // instant.
+    let snap = || {
+        let f = found_page(&addr);
+        (
+            f["hide_recheck_reads"].as_u64().unwrap(),
+            f["hide_age_rereads"].as_u64().unwrap(),
+        )
+    };
+    let w = Instant::now();
+    let (r0, a0) = snap();
     let mut worst = 0.0f64;
     let t = Instant::now();
     for _ in 0..10 {
@@ -67,8 +76,14 @@ fn an_untrusted_real_tombstone_reread_cost_is_measured() {
         worst = worst.max(q.elapsed().as_secs_f64() * 1000.0);
     }
     let ms = t.elapsed().as_secs_f64() * 1000.0 / 10.0;
-    let r1 = reads();
-    let reads = r1 - r0;
+    let (r1, a1) = snap();
+    let window_ms = w.elapsed().as_millis() as u64;
+    // The hidden tombstone's future mtime is not trusted, so the PL 14:36Z
+    // bounded age (HID_REVERIFY, 500 ms) reads it again once per 500 ms by
+    // design; CI 1471012 caught one such read (2561 vs 2560). Those are
+    // counted apart and bounded by the window, never ignored.
+    let age_reads = a1 - a0;
+    let reads = r1 - r0 - age_reads;
     let key = found_page(&addr)["hide_key"]
         .as_str()
         .unwrap_or("?")
@@ -79,7 +94,7 @@ fn an_untrusted_real_tombstone_reread_cost_is_measured() {
     // measured=no, never as a pass.
     let measured = cfg!(unix);
     println!(
-        "M7 UNTRUSTED_REREADS key={key} measured={} tombstones={N} requests=10 reads={reads} \
+        "M7 UNTRUSTED_REREADS key={key} measured={} tombstones={N} requests=10 reads={reads} age_rereads={age_reads} \
          reads_per_request={:.1} per_request_ms={ms:.2} max_request_ms={worst:.2}",
         if measured { "yes" } else { "no" },
         reads as f64 / 10.0
@@ -88,6 +103,10 @@ fn an_untrusted_real_tombstone_reread_cost_is_measured() {
         // Exactly one re-read per untrusted SHOW per request: a lower bound
         // (they ARE re-read) and, with each show read once, an exact 0 for
         // the hidden one.
+        assert!(
+            age_reads <= window_ms / 500 + 1,
+            "hidden tombstone re-read {age_reads} times by the 500 ms bounded age in {window_ms} ms"
+        );
         assert_eq!(
             reads,
             10 * N as u64,
