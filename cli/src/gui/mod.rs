@@ -2279,6 +2279,15 @@ fn hidden_for(
                     if waits && blinking.is_empty() {
                         break;
                     }
+                    // XO 08:36Z (2), D3: the budget bounds the whole wait,
+                    // applying included. Results that arrive inside it were
+                    // applied one after another past the deadline (380k/10k
+                    // first request after a sync: wait 103 ms against the
+                    // 40 ms budget); past it the rest go to the background
+                    // applier (their shown photos stay under `keep`).
+                    if deadline.is_some_and(|t| std::time::Instant::now() >= t) {
+                        break;
+                    }
                 }
                 None => break,
             }
