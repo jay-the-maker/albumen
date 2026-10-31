@@ -56,7 +56,18 @@ fn start(library: &Path, work: &Path, index: &Path, home: &Path) -> (Gui, String
 }
 
 fn start_pid(library: &Path, work: &Path, index: &Path, home: &Path) -> (Gui, String, u32) {
+    start_env(library, work, index, home, &[])
+}
+
+fn start_env(
+    library: &Path,
+    work: &Path,
+    index: &Path,
+    home: &Path,
+    env: &[(&str, &str)],
+) -> (Gui, String, u32) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .envs(env.iter().copied())
         .args(["gui", "--no-open", "--port", "0", "--library"])
         .arg(library)
         .arg("--work")
@@ -1344,9 +1355,10 @@ fn an_unchanged_request_reads_no_tombstone() {
         "M7 tombstone reads over 3 unchanged listings + 6 /img: {}",
         after - before
     );
-    // Off Unix the change key of a non-hiding tombstone is a content hash,
-    // which the counter counts (one per request); on Unix it is a ctime stat.
-    if cfg!(unix) {
+    // With the portable key the change key of a non-hiding tombstone is a
+    // content hash, which the counter counts (one per request); with ctime
+    // (Unix) or ChangeTime (Windows) it is a stat.
+    if found_page(&addr)["hide_key"] != "portable" {
         assert_eq!(after, before, "an unchanged request read tombstones");
     }
     // The counter is live: a new hide is read and applies on the next request.
@@ -1357,6 +1369,202 @@ fn an_unchanged_request_reads_no_tombstone() {
     .unwrap();
     assert_eq!(listed(&addr), ["IMG_0004.JPG", "sub/IMG_0003.JPG"]);
     assert!(reads(&addr) > after);
+}
+
+/// XO 02:30Z (b): the change key is the platform's own (ctime on Unix,
+/// ChangeTime via GetFileInformationByHandleEx on Windows), it was taken,
+/// and no key failed (no silent fallback). The portable key only when a
+/// test forces it.
+#[test]
+fn the_change_key_is_the_platform_key_with_no_fallback() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(library.path().join("sub")).unwrap();
+    for name in ["sub/IMG_0001.JPG", "sub/IMG_0002.JPG"] {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-key-{name}"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        library.path().join("sub/IMG_0002.JPG.albumen-tombstone"),
+        br#"{"hidden":false,"reason":"hide"}"#,
+    )
+    .unwrap();
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    listed(&addr);
+    let f = found_page(&addr);
+    println!(
+        "M7 change key: key={} changetime_keys={} key_failures={} same_tick_ms={} fs={}",
+        f["hide_key"],
+        f["hide_changetime_keys"],
+        f["hide_key_failures"],
+        f["hide_same_tick_ms"],
+        f["hide_fs"]
+    );
+    let forced = std::env::var("ALBUMEN_TEST_HIDE_KEY").is_ok_and(|v| v == "portable");
+    let want = if forced {
+        "portable"
+    } else if cfg!(windows) {
+        "changetime"
+    } else if cfg!(unix) {
+        "ctime"
+    } else {
+        "portable"
+    };
+    assert_eq!(f["hide_key"], want, "{f}");
+    assert_eq!(f["hide_key_failures"], 0, "a change key failed: {f}");
+    if cfg!(windows) && !forced {
+        assert!(
+            f["hide_changetime_keys"].as_u64().unwrap() > 0,
+            "the ChangeTime path was never used: {f}"
+        );
+    } else {
+        assert_eq!(f["hide_changetime_keys"], 0, "{f}");
+    }
+}
+
+/// XO 02:30Z (a): the 50 ms same-tick window only on a filesystem known to
+/// keep a fine ctime; a forced unknown or network type (statfs f_type hook)
+/// falls back to 2 s, and a tombstone written 0.5 s ago is then read again
+/// on every poll until it is 2 s old.
+#[test]
+fn an_unknown_or_network_filesystem_falls_back_to_the_2s_window() {
+    let library = tempfile::tempdir().unwrap();
+    fs::write(library.path().join("IMG_0001.JPG"), b"synthetic-m7-fs-1").unwrap();
+    fs::write(library.path().join("IMG_0002.JPG"), b"synthetic-m7-fs-2").unwrap();
+    let tomb = library.path().join("IMG_0002.JPG.albumen-tombstone");
+    fs::write(&tomb, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+    // Default: the real filesystem's window.
+    {
+        let (work, index, home) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+        ready_found(&addr);
+        listed(&addr);
+        let f = found_page(&addr);
+        println!(
+            "M7 fs window default: fs={} same_tick_ms={}",
+            f["hide_fs"], f["hide_same_tick_ms"]
+        );
+        let fine = ["ext4", "xfs", "btrfs", "tmpfs", "f2fs", "zfs", "apfs"];
+        let want = if fine.contains(&f["hide_fs"].as_str().unwrap_or_default()) {
+            50
+        } else {
+            2000
+        };
+        assert_eq!(f["hide_same_tick_ms"], want, "{f}");
+    }
+    for (magic, name) in [
+        ("0x6969", "nfs"),
+        ("0x65735546", "fuse"),
+        ("0x4d44", "msdos"),
+        ("0x2011bab0", "exfat"),
+        ("0x482b", "hfsplus"),
+        ("0x1234", "unknown 0x1234"),
+    ] {
+        let (work, index, home) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (_gui, addr, _) = start_env(
+            library.path(),
+            work.path(),
+            index.path(),
+            home.path(),
+            &[("ALBUMEN_TEST_FS_MAGIC", magic)],
+        );
+        ready_found(&addr);
+        set_mtime(&tomb, SystemTime::now() - Duration::from_millis(500));
+        listed(&addr);
+        let f = found_page(&addr);
+        assert_eq!(f["hide_same_tick_ms"], 2000, "{magic}: {f}");
+        assert_eq!(f["hide_fs"], name, "{f}");
+        if magic != "0x6969" {
+            continue;
+        }
+        // Behaviour, not only the number: within 2 s of its mtime the
+        // tombstone is untrusted and read again on each request.
+        let reads = |addr: &str| found_page(addr)["hide_tombstone_reads"].as_u64().unwrap();
+        let a = reads(&addr);
+        listed(&addr);
+        let b = reads(&addr);
+        println!("M7 fs window nfs: reads within 2 s {a} -> {b}");
+        assert!(
+            b > a,
+            "a 0.5 s old tombstone was trusted under the 2 s fallback"
+        );
+    }
+}
+
+/// XO 02:30Z (c): `/api/found` re-reads only changed tombstones, but stamps
+/// every watched one each poll, so a tombstone corrupted in place (same
+/// size, mtime set back) is in the note on the very next poll.
+#[test]
+fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for name in ["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"] {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-note-{name}"),
+        )
+        .unwrap();
+    }
+    let good = br#"{"hidden":true,"reason":"hide"}"#;
+    let tomb = library.path().join("IMG_0002.JPG.albumen-tombstone");
+    let other = library.path().join("IMG_0003.JPG.albumen-tombstone");
+    fs::write(&tomb, good).unwrap();
+    fs::write(&other, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    for p in [tomb.as_path(), other.as_path(), library.path()] {
+        set_mtime(p, old);
+    }
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    assert!(ready_found(&addr)["hide_note"].is_null());
+    // Past the coarsest same-tick window (the stamps were just taken).
+    std::thread::sleep(Duration::from_millis(2100));
+    let warm = found_page(&addr);
+    let quiet = found_page(&addr);
+    let reads = |f: &serde_json::Value| f["hide_tombstone_reads"].as_u64().unwrap();
+    if quiet["hide_key"] != "portable" {
+        assert_eq!(
+            reads(&quiet),
+            reads(&warm),
+            "an unchanged poll read tombstones"
+        );
+    }
+    let mut bad = good.to_vec();
+    bad[0] = b'#';
+    fs::write(&tomb, &bad).unwrap();
+    set_mtime(&tomb, old);
+    let polled = found_page(&addr);
+    let note = polled["hide_note"].as_str().unwrap_or_default().to_string();
+    println!(
+        "M7 corrupted-tombstone note after one poll: {note} (reads {} -> {})",
+        reads(&quiet),
+        reads(&polled)
+    );
+    assert!(note.contains("IMG_0002.JPG.albumen-tombstone"), "{polled}");
+    assert_eq!(
+        reads(&polled) - reads(&quiet),
+        if polled["hide_key"] == "portable" {
+            2 + 1
+        } else {
+            1
+        },
+        "only the changed tombstone is read again: {polled}"
+    );
 }
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
@@ -1436,7 +1644,9 @@ fn m7_recheck_and_img_diagnostics() {
         }
         // 100 re-check samples per level (criterion 2 needs 100+); /img
         // has its own loop below with 200 samples.
+        let synced = Instant::now();
         let mut recheck = Vec::new();
+        let mut sync_window = Vec::new();
         for k in 0..100 {
             if k % 2 == 0 {
                 fs::write(&touch, b"x").unwrap();
@@ -1445,9 +1655,46 @@ fn m7_recheck_and_img_diagnostics() {
             }
             let t = Instant::now();
             let (code, _) = get(&addr, "/api/library?offset=0&limit=1");
-            recheck.push(t.elapsed().as_secs_f64() * 1000.0);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            recheck.push(ms);
+            if synced.elapsed() < Duration::from_secs(2) {
+                sync_window.push(ms);
+            }
             assert_eq!(code, 200);
         }
+        // Steady state (XO 02:30Z (a)): 100 more, all 2 s+ after the last
+        // tombstone write (the "sync"), the touch folder still changing.
+        let wait = Duration::from_millis(2100).saturating_sub(synced.elapsed());
+        std::thread::sleep(wait);
+        let mut steady = Vec::new();
+        for k in 0..100 {
+            if k % 2 == 0 {
+                fs::write(&touch, b"x").unwrap();
+            } else {
+                let _ = fs::remove_file(&touch);
+            }
+            let t = Instant::now();
+            let (code, _) = get(&addr, "/api/library?offset=0&limit=1");
+            steady.push(t.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(code, 200);
+        }
+        let _ = fs::remove_file(&touch);
+        let p95 = |v: &[f64]| {
+            if v.is_empty() {
+                "n/a".to_string()
+            } else {
+                format!("{:.1}", pct(&mut v.to_vec(), 0.95))
+            }
+        };
+        println!(
+            "M7 RECHECK_SPLIT files={files} tombstones={written} \
+             sync2s_p95_ms={} sync2s_samples={} steady_p95_ms={} steady_p50_ms={:.1} steady_samples={}",
+            p95(&sync_window),
+            sync_window.len(),
+            p95(&steady),
+            pct(&mut steady.clone(), 0.5),
+            steady.len()
+        );
         std::thread::sleep(Duration::from_millis(2500));
         get(&addr, "/api/library?offset=0&limit=1");
         let mut img = Vec::new();

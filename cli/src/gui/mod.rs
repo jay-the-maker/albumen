@@ -826,20 +826,54 @@ fn hide_note(errors: &[String]) -> Option<String> {
 /// each poll so the quiet line follows a file that breaks or is fixed.
 static HIDE_WATCH: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
+/// Per-tombstone state `/api/found` keeps between polls (XO 02:30Z (c)).
+static FOUND_TOMBS: Mutex<Option<std::collections::HashMap<String, TombState>>> = Mutex::new(None);
+
 /// The quiet line as of now: re-checked against the files once a listing
-/// exists, else what the first walk found so far.
+/// exists, else what the first walk found so far. Every watched tombstone
+/// is stamped on every poll (the same key as the request path: ctime on
+/// Unix, ChangeTime on Windows, a content hash with the portable key) and
+/// only a changed, new or same-tick one is read again, so a tombstone that
+/// breaks shows in the note on the next poll. The family log is read every
+/// poll, as before.
 fn current_hide_note(library: &Path) -> Option<String> {
     let watch = HIDE_WATCH.lock().unwrap().clone();
     let serve: Vec<String> = SERVE_NOTES.lock().unwrap().values().cloned().collect();
     if let Some(watch) = watch {
-        let mut hidden = albumen_ingest::hides::hidden_paths(library, &watch, None);
-        for e in &serve {
-            let tomb = e.split(':').next().unwrap_or(e);
-            if !hidden.errors.iter().any(|h| h.starts_with(tomb)) {
-                hidden.errors.push(e.clone());
+        let checked_at = SystemTime::now();
+        let mut errors = Vec::new();
+        {
+            let mut guard = FOUND_TOMBS.lock().unwrap();
+            let cache = guard.get_or_insert_with(Default::default);
+            let keep: std::collections::HashSet<&String> = watch.iter().collect();
+            cache.retain(|k, _| keep.contains(k));
+            for rel in &watch {
+                let st = mtime(&library.join(rel));
+                if key_kind() == KeyKind::Portable {
+                    // mtime() hashed the bytes.
+                    TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let reuse = cache
+                    .get(rel)
+                    .is_some_and(|t| t.trusted && st.is_some() && st == t.stamp);
+                if !reuse {
+                    cache.insert(rel.clone(), read_tomb_quiet(library, rel, checked_at));
+                }
+                if let Some(Err(e)) = cache.get(rel).map(|t| &t.verdict) {
+                    errors.push(e.clone());
+                }
             }
         }
-        *HIDE_NOTE.lock().unwrap() = hide_note(&hidden.errors);
+        if library.join("genesis.json").is_file() {
+            errors.extend(albumen_ingest::hides::hidden_paths(library, &[], None).errors);
+        }
+        for e in &serve {
+            let tomb = e.split(':').next().unwrap_or(e);
+            if !errors.iter().any(|h| h.starts_with(tomb)) {
+                errors.push(e.clone());
+            }
+        }
+        *HIDE_NOTE.lock().unwrap() = hide_note(&errors);
         return HIDE_NOTE.lock().unwrap().clone();
     }
     HIDE_NOTE
@@ -896,7 +930,7 @@ struct Fresh {
 #[derive(Default)]
 struct DirState {
     stamp: Option<(SystemTime, u64)>,
-    /// False when the stamp was taken within [`RECENT`] of its mtime (the
+    /// False when the stamp was taken within [`recent`] of its mtime (the
     /// same tick) or could not be taken: the folder is listed again.
     trusted: bool,
     /// The folder could not be listed: its photos are hidden (fail closed).
@@ -925,20 +959,27 @@ static FRESH: Mutex<Option<Fresh>> = Mutex::new(None);
 static TOMB_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn trusted_at(st: &Option<(SystemTime, u64)>, checked_at: SystemTime) -> bool {
-    st.is_some_and(|(t, _)| checked_at.duration_since(t).is_ok_and(|d| d >= RECENT))
+    let recent = recent();
+    st.is_some_and(|(t, _)| checked_at.duration_since(t).is_ok_and(|d| d >= recent))
 }
 
 /// Stamp, then read, one tombstone (stamped BEFORE the read, so a rewrite
-/// during it differs next time).
+/// during it differs next time). Logs an unreadable one.
 fn read_tomb(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
+    let t = read_tomb_quiet(lib, rel, checked_at);
+    if let Err(e) = &t.verdict {
+        eprintln!("albumen gui: hide: {}", e.replace('\n', ": "));
+    }
+    t
+}
+
+/// [`read_tomb`] without the log line (the `/api/found` poll).
+fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
     let path = lib.join(rel);
     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stamp = mtime(&path);
     let verdict = albumen_ingest::hides::read_receiver_tombstone(&path)
         .map_err(|err| format!("{rel}: {err}; hiding it"));
-    if let Err(e) = &verdict {
-        eprintln!("albumen gui: hide: {}", e.replace('\n', ": "));
-    }
     TombState {
         trusted: trusted_at(&stamp, checked_at),
         stamp,
@@ -946,9 +987,131 @@ fn read_tomb(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
     }
 }
 
-/// An entry modified this close to a check may change again in the same
-/// mtime tick (coarse filesystem clocks), so it is re-checked next request.
-const RECENT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Same-tick window where the filesystem keeps a fine-grained ctime
+/// (XO 02:30Z (a)): ext4, xfs, btrfs, tmpfs, f2fs, zfs; APFS on macOS.
+const RECENT_FINE: std::time::Duration = std::time::Duration::from_millis(50);
+/// Everywhere else (unknown, network or FUSE, FAT/exFAT, HFS+, overlayfs,
+/// and Windows, where there is no statfs): an entry modified this close to
+/// a check may change again in the same coarse tick.
+const RECENT_COARSE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The window in force, in ms; set from the library's filesystem when a
+/// listing's hide state is first built. Starts coarse (fail safe).
+static RECENT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(2000);
+
+fn recent() -> std::time::Duration {
+    std::time::Duration::from_millis(RECENT_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Test hook: `ALBUMEN_TEST_FS_MAGIC` (a Linux statfs f_type, hex `0x...`
+/// or decimal) replaces the real filesystem type, on any platform, so a
+/// test can force the 2 s fallback (or the fine window).
+fn fs_magic_override() -> Option<u64> {
+    let v = std::env::var("ALBUMEN_TEST_FS_MAGIC").ok()?;
+    let v = v.trim();
+    match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => v.parse().ok(),
+    }
+}
+
+/// Linux statfs f_type magics with a fine-grained (ns) ctime.
+const FINE_MAGICS: &[(u64, &str)] = &[
+    (0xEF53, "ext4"),
+    (0x5846_5342, "xfs"),
+    (0x9123_683E, "btrfs"),
+    (0x0102_1994, "tmpfs"),
+    (0xF2F5_2010, "f2fs"),
+    (0x2FC1_2FC1, "zfs"),
+];
+
+/// Known coarse or untrusted ones (named in `/api/found` only; anything not
+/// in [`FINE_MAGICS`] gets the 2 s window).
+const COARSE_MAGICS: &[(u64, &str)] = &[
+    (0x6969, "nfs"),
+    (0x517B, "smb"),
+    (0xFF53_4D42, "cifs"),
+    (0xFE53_4D42, "smb2"),
+    (0x6573_5546, "fuse"),
+    (0x4D44, "msdos"),
+    (0x2011_BAB0, "exfat"),
+    (0x4244, "hfs"),
+    (0x482B, "hfsplus"),
+    (0x794C_7630, "overlayfs"),
+    (0x7366_746E, "ntfs3"),
+];
+
+/// The window for a statfs f_type (None: unknown), and a name for it.
+fn window_for_magic(magic: Option<u64>) -> (std::time::Duration, String) {
+    let Some(m) = magic else {
+        return (RECENT_COARSE, "unknown".into());
+    };
+    if let Some((_, n)) = FINE_MAGICS.iter().find(|(k, _)| *k == m) {
+        return (RECENT_FINE, (*n).into());
+    }
+    let name = COARSE_MAGICS
+        .iter()
+        .find(|(k, _)| *k == m)
+        .map_or_else(|| format!("unknown {m:#x}"), |(_, n)| (*n).to_string());
+    (RECENT_COARSE, name)
+}
+
+#[cfg(target_os = "linux")]
+fn fs_window(library: &Path) -> (std::time::Duration, String) {
+    use std::os::unix::ffi::OsStrExt;
+    if let Some(m) = fs_magic_override() {
+        return window_for_magic(Some(m));
+    }
+    let Ok(c) = std::ffi::CString::new(library.as_os_str().as_bytes()) else {
+        return window_for_magic(None);
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and a statfs buffer of the right type.
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return window_for_magic(None);
+    }
+    #[allow(clippy::unnecessary_cast)]
+    window_for_magic(Some(st.f_type as u64))
+}
+
+#[cfg(target_os = "macos")]
+fn fs_window(library: &Path) -> (std::time::Duration, String) {
+    use std::os::unix::ffi::OsStrExt;
+    if let Some(m) = fs_magic_override() {
+        return window_for_magic(Some(m));
+    }
+    let Ok(c) = std::ffi::CString::new(library.as_os_str().as_bytes()) else {
+        return window_for_magic(None);
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and a statfs buffer of the right type.
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return window_for_magic(None);
+    }
+    // SAFETY: f_fstypename is a NUL-terminated C string inside the buffer.
+    let name = unsafe { std::ffi::CStr::from_ptr(st.f_fstypename.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    if name == "apfs" {
+        (RECENT_FINE, name)
+    } else {
+        (RECENT_COARSE, name)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn fs_window(_library: &Path) -> (std::time::Duration, String) {
+    window_for_magic(fs_magic_override())
+}
+
+/// Filesystem the window was chosen for (shown in `/api/found`).
+static FS_NAME: Mutex<String> = Mutex::new(String::new());
+
+fn set_window_for(library: &Path) {
+    let (w, name) = fs_window(library);
+    RECENT_MS.store(w.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    *FS_NAME.lock().unwrap() = name;
+}
 
 /// Hide files `/img` or `/video` could not read (fail closed), by the path
 /// they hide, until a later request reads them; shown in the quiet line.
@@ -957,33 +1120,131 @@ static SERVE_NOTES: Mutex<std::collections::BTreeMap<String, String>> =
 
 /// An entry's mtime plus a change key mtime alone misses: `rsync -t`/`-a`
 /// brings a hide in and puts the folder's old mtime back (A8). On Unix the
-/// key is the ctime alone, which no user call can set back. Elsewhere it
-/// is, for a folder, its entry count plus a hash of its tombstone names and
-/// sizes; for a file, its size plus a hash of its bytes (see
-/// [`content_key`]).
+/// key is the ctime alone, which no user call can set back; on Windows the
+/// ChangeTime (`GetFileInformationByHandleEx(FileBasicInfo)`), likewise.
+/// The portable key (other targets, or forced by `ALBUMEN_TEST_HIDE_KEY=
+/// portable`) is, for a folder, its entry count plus a hash of its
+/// tombstone names and sizes; for a file, its size plus a hash of its bytes
+/// (see [`content_key`]). No key: no stamp, so the entry is never trusted
+/// and is read again (fail closed, and counted, never a silent fallback).
 fn mtime(p: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::symlink_metadata(p).ok()?;
-    Some((m.modified().ok()?, os_key(p, &m)))
+    let key = os_key(p, &m)?;
+    Some((m.modified().ok()?, key))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeyKind {
+    Ctime,
+    ChangeTime,
+    Portable,
+}
+
+impl KeyKind {
+    fn name(self) -> &'static str {
+        match self {
+            KeyKind::Ctime => "ctime",
+            KeyKind::ChangeTime => "changetime",
+            KeyKind::Portable => "portable",
+        }
+    }
+}
+
+/// The change key in use: the platform's own, unless a test forces the
+/// portable one (`ALBUMEN_TEST_HIDE_KEY=portable`).
+fn key_kind() -> KeyKind {
+    static KIND: std::sync::OnceLock<KeyKind> = std::sync::OnceLock::new();
+    *KIND.get_or_init(|| {
+        if std::env::var("ALBUMEN_TEST_HIDE_KEY").is_ok_and(|v| v == "portable") {
+            KeyKind::Portable
+        } else if cfg!(unix) {
+            KeyKind::Ctime
+        } else if cfg!(windows) {
+            KeyKind::ChangeTime
+        } else {
+            KeyKind::Portable
+        }
+    })
+}
+
+/// Windows ChangeTime keys taken, and change keys that could not be taken
+/// (shown in `/api/found` so a test proves the ChangeTime path is used).
+static CHANGETIME_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static KEY_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn os_key(p: &Path, m: &std::fs::Metadata) -> Option<u64> {
+    let key = match key_kind() {
+        KeyKind::Portable => Some(portable_key(p, m)),
+        KeyKind::Ctime => ctime_key(m),
+        KeyKind::ChangeTime => change_time(p),
+    };
+    if key.is_none() {
+        KEY_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    key
 }
 
 #[cfg(unix)]
-fn os_key(_: &Path, m: &std::fs::Metadata) -> u64 {
+fn ctime_key(m: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
-    (m.ctime() as u64)
-        .wrapping_mul(1_000_000_000)
-        .wrapping_add(m.ctime_nsec() as u64)
+    Some(
+        (m.ctime() as u64)
+            .wrapping_mul(1_000_000_000)
+            .wrapping_add(m.ctime_nsec() as u64),
+    )
+}
+
+#[cfg(not(unix))]
+fn ctime_key(_: &std::fs::Metadata) -> Option<u64> {
+    None
+}
+
+/// The NTFS/ReFS ChangeTime (100 ns ticks), from a handle opened for
+/// attributes only (directories too, via FILE_FLAG_BACKUP_SEMANTICS).
+/// None if it can't be read or is zero (the filesystem keeps none).
+#[cfg(windows)]
+fn change_time(p: &Path) -> Option<u64> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_READ_ATTRIBUTES,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(p)
+        .ok()?;
+    let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is open for the call and the buffer is a
+    // FILE_BASIC_INFO of the size passed.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } != 0;
+    if !ok || basic.ChangeTime == 0 {
+        return None;
+    }
+    CHANGETIME_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(basic.ChangeTime as u64)
+}
+
+#[cfg(not(windows))]
+fn change_time(_: &Path) -> Option<u64> {
+    None
 }
 
 /// Largest stamped file (a tombstone) hashed whole; tombstones are tiny.
-#[cfg(not(unix))]
 const CONTENT_KEY_MAX: u64 = 16 * 1024;
 
-/// Off Unix, a hash of a stamped file's bytes, so a same-size rewrite with
-/// its mtime set back (hidden true <-> false) is seen; stable std does not
-/// expose the Windows change time. A file over the cap or that can't be
-/// read gets a fresh key every time: it is always re-read (caching is off
-/// for it).
-#[cfg(not(unix))]
+/// Portable key: a hash of a stamped file's bytes, so a same-size rewrite
+/// with its mtime set back (hidden true <-> false) is seen. A file over the
+/// cap or that can't be read gets a fresh key every time: it is always
+/// re-read (caching is off for it).
 fn content_key(p: &Path, m: &std::fs::Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     static UNSTABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1001,8 +1262,7 @@ fn content_key(p: &Path, m: &std::fs::Metadata) -> u64 {
     }
 }
 
-#[cfg(not(unix))]
-fn os_key(p: &Path, m: &std::fs::Metadata) -> u64 {
+fn portable_key(p: &Path, m: &std::fs::Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     if !m.is_dir() {
         return m.len().wrapping_mul(31).wrapping_add(content_key(p, m));
@@ -1071,6 +1331,7 @@ fn hidden_for(
         }
         let version = fresh.as_ref().map_or(0, |f| f.version + 1);
         let n = by_dir.len();
+        set_window_for(lib);
         let (dirs, photos_in) = by_dir.into_iter().unzip();
         *fresh = Some(Fresh {
             generation: v.generation,
@@ -1099,7 +1360,7 @@ fn hidden_for(
                     continue;
                 }
                 if t.trusted && t.stamp.is_some() && mtime(&lib.join(rel)) == t.stamp {
-                    if !cfg!(unix) {
+                    if key_kind() == KeyKind::Portable {
                         // mtime() hashed the bytes off Unix.
                         TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -1132,7 +1393,7 @@ fn hidden_for(
                     };
                     let keep = old.remove(&rel).filter(|t| {
                         (t.trusted || t.verdict == Ok(true)) && t.stamp.is_some() && {
-                            if !cfg!(unix) {
+                            if key_kind() == KeyKind::Portable {
                                 TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             mtime(&lib.join(&rel)) == t.stamp
@@ -1370,6 +1631,11 @@ fn found_json(server: &Server) -> serde_json::Value {
         "index_note": server.index_note.lock().unwrap().clone(),
         "hide_note": current_hide_note(&server.config.library),
         "hide_tombstone_reads": TOMB_READS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_key": key_kind().name(),
+        "hide_changetime_keys": CHANGETIME_KEYS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_same_tick_ms": RECENT_MS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_fs": FS_NAME.lock().unwrap().clone(),
     })
 }
 
@@ -1973,6 +2239,39 @@ mod tests {
     /// /api/found: a first walk (no saved index) records the photos it
     /// finds, at most one page, never other files; a second open from the
     /// saved index lists the same files.
+    #[test]
+    fn the_same_tick_window_is_fine_only_on_known_fine_ctime_filesystems() {
+        use std::time::Duration;
+        for m in [0xEF53u64, 0x5846_5342, 0x9123_683E, 0x0102_1994] {
+            assert_eq!(
+                window_for_magic(Some(m)).0,
+                Duration::from_millis(50),
+                "{m:#x}"
+            );
+        }
+        for m in [
+            0x6969u64,
+            0x517B,
+            0xFF53_4D42,
+            0xFE53_4D42,
+            0x6573_5546,
+            0x4D44,
+            0x2011_BAB0,
+            0x4244,
+            0x482B,
+            0x794C_7630,
+            0xDEAD,
+        ] {
+            assert_eq!(
+                window_for_magic(Some(m)).0,
+                Duration::from_secs(2),
+                "{m:#x}"
+            );
+        }
+        assert_eq!(window_for_magic(None).0, Duration::from_secs(2));
+        assert_eq!(window_for_magic(Some(0x6969)).1, "nfs");
+    }
+
     #[test]
     fn a_hide_problem_is_one_quiet_line_naming_the_file() {
         assert_eq!(hide_note(&[]), None);

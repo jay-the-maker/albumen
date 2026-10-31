@@ -21,6 +21,12 @@ albumen-receive = { path = "../receive" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 serde_json = "1"
 flate2 = "1"

@@ -116,3 +116,41 @@ Until the next listing:
    `.github/workflows/m6-shared-index.yml`). The non-unix key was checked
    on Linux by forcing that cfg path locally; it has not run on Windows
    here.
+
+## XO 02:30Z follow-up (same-tick window, Windows ChangeTime, /api/found cache)
+
+- **Same-tick window by filesystem.** 50 ms only when `statfs` names a
+  filesystem with a fine ctime (Linux f_type ext4, xfs, btrfs, tmpfs,
+  f2fs, zfs; macOS `apfs`). Everything else gets 2 s: unknown, NFS,
+  SMB/CIFS, FUSE, FAT/exFAT, HFS/HFS+, overlayfs, ntfs3, and Windows
+  (no statfs). Chosen once per listing for the library root; a different
+  filesystem mounted below the root uses the root's window (limit).
+  `/api/found` shows `hide_same_tick_ms` and `hide_fs`. Test hook:
+  `ALBUMEN_TEST_FS_MAGIC` (a Linux f_type) forces a type on any platform.
+- **Windows change key = ChangeTime** (`GetFileInformationByHandleEx
+  (FileBasicInfo)`), for folders and tombstones; no listing or hashing.
+  If it can't be read the entry gets no stamp (re-read every request,
+  fail closed) and `hide_key_failures` counts it: no silent fallback to
+  another key. `/api/found` shows `hide_key` and `hide_changetime_keys`;
+  `the_change_key_is_the_platform_key_with_no_fallback` asserts them.
+  Not compiled on the box (no Windows target); proved by the m7-windows job.
+- **The portable key** (old non-unix key) is now compiled everywhere and
+  forced with `ALBUMEN_TEST_HIDE_KEY=portable` (replaces editing the cfg).
+- **`/api/found`** stamps every watched tombstone each poll and re-reads
+  only changed, new or same-tick ones; the family log is still read every
+  poll. `a_corrupted_tombstone_is_in_the_note_within_one_poll`.
+- **Measured (box, release, 100 samples each; box timing is not evidence),
+  re-check p95 ms, 0 / 1k / 10k tombstones.** "sync 2 s" = samples within
+  2 s of the last tombstone write; "steady" = 100 samples after that.
+
+  | files | key | sync 2 s | steady |
+  |---|---|---|---|
+  | 50k | ctime | 0.9 / 7.7 / 1.1 | 0.9 / 0.9 / 1.0 |
+  | 380k | ctime | 2.8 / 2.8 / 3.2 | 2.8 / 2.8 / 3.2 |
+  | 50k | portable | 13.4 / 15.1 / 23.7 | 13.4 / 17.3 / 24.7 |
+  | 380k | portable | 100.7 / 303.8 / 324.0 | 119.7 / 113.9 / 134.3 |
+
+  The portable key still lists every folder per request, so it misses
+  the 10 ms bar; on Windows it is no longer used (ChangeTime), but
+  Windows keeps the 2 s window, so its first-2 s figures will be higher
+  than Linux's. Windows not yet measured.
