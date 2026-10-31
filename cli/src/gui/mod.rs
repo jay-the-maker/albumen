@@ -1098,13 +1098,21 @@ mod dirst_t {
     static ONE_MAX_DIR: Mutex<String> = Mutex::new(String::new());
     static DIRS: AtomicU64 = AtomicU64::new(0);
     static OVER_10MS: AtomicU64 = AtomicU64::new(0);
+    static NAME_SKIPPED: AtomicU64 = AtomicU64::new(0);
     pub fn one(d: std::time::Duration, dir: &str) {
         let us = d.as_micros() as u64;
         if us > 10_000 {
             OVER_10MS.fetch_add(1, Relaxed);
         }
+        // XO FRAGO 11:05Z (4): the record path never waits on a lock; a
+        // busy name is skipped (counted), the max itself is still atomic.
         if ONE_MAX_US.fetch_max(us, Relaxed) < us {
-            *ONE_MAX_DIR.lock().unwrap() = dir.to_string();
+            match ONE_MAX_DIR.try_lock() {
+                Ok(mut g) => *g = dir.to_string(),
+                Err(_) => {
+                    NAME_SKIPPED.fetch_add(1, Relaxed);
+                }
+            }
         }
     }
     pub fn pass(n: usize) {
@@ -1116,6 +1124,7 @@ mod dirst_t {
             "one_max_dir": ONE_MAX_DIR.lock().unwrap().clone(),
             "stats_over_10ms": OVER_10MS.load(Relaxed),
             "dirs_last_pass": DIRS.load(Relaxed),
+            "name_skipped": NAME_SKIPPED.load(Relaxed),
         })
     }
 }
@@ -3884,8 +3893,18 @@ fn lib_req_record(
         ms(total) - ms(resp),
         ms(total)
     ));
-    *LIB_REQ_LAST.lock().unwrap() = s;
+    // XO FRAGO 11:05Z (4): the request never waits on a reader; a busy
+    // line is skipped and counted (`lib_req_skipped`).
+    match LIB_REQ_LAST.try_lock() {
+        Ok(mut g) => *g = s,
+        Err(_) => {
+            LIB_REQ_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
+
+/// `lib_req_record` lines skipped because a reader held LIB_REQ_LAST.
+static LIB_REQ_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// FRAGO 10:22Z (2): what an inline step (keep_shown, the hidden-set build)
 /// spent its wall time on, kept for the slowest of each: the calling
@@ -4232,6 +4251,9 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_inline": inline_t::json(),
         "lib_req_last": LIB_REQ_LAST.lock().unwrap().clone(),
     });
+    out["lib_req_skipped"] = LIB_REQ_SKIPPED
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
     out["hide_found_note"] = found_note_t::json();
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
@@ -5936,8 +5958,8 @@ mod tests {
                 r.join().unwrap();
             }
             println!(
-                "M7 STEP_TIMER_OVERHEAD contended_reader={contended} n={N} off_ns p50={} p99={} max={} on_ns p50={} p99={} max={}",
-                off.0, off.1, off.2, on.0, on.1, on.2
+                "M7 STEP_TIMER_OVERHEAD contended_reader={contended} n={N} off_ns p50={} p99={} max={} on_ns p50={} p99={} max={} lib_req_skipped={}",
+                off.0, off.1, off.2, on.0, on.1, on.2, LIB_REQ_SKIPPED.load(Ordering::Relaxed)
             );
         }
     }
