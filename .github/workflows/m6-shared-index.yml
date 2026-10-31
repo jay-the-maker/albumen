@@ -108,6 +108,18 @@ jobs:
           grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored' s3.log \
             || { echo "::error::the S3 test did not run against MinIO"; exit 1; }
 
+      - name: two_copy_s3 against MinIO (scripts/with-minio.sh, must really run)
+        run: |
+          # Pinned MinIO binary as a separate local process (no Docker). Fails
+          # if S3 is unavailable, if the test skipped, or unless exactly 1 passed.
+          set -o pipefail
+          scripts/with-minio.sh bash -c 'test -n "${ALBUMEN_S3_ENDPOINT:-}" && test -z "${ALBUMEN_S3_UNAVAILABLE:-}" && cargo test --release --locked -p albumen --test two_copy_s3 -- --nocapture --test-threads=1' 2>&1 | tee two_copy_s3.log
+          if grep -q 'SKIPPED two_copy_s3' two_copy_s3.log; then
+            echo "::error::two_copy_s3 skipped; it must run against MinIO"; exit 1
+          fi
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored' two_copy_s3.log \
+            || { echo "::error::two_copy_s3 did not run exactly 1 test green against MinIO"; exit 1; }
+
       - name: The rest of the index tests
         run: |
           set -o pipefail
