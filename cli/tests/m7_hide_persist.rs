@@ -2147,6 +2147,19 @@ fn a_whole_second_ctime_on_ext_keeps_the_2s_window() {
 /// size, mtime set back) is in the note on the very next poll.
 #[test]
 fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
+    corrupted_tombstone_note_case(0);
+}
+
+/// FRAGO 08:55Z (B): the same with 70 more show tombstones in the folder,
+/// past LIST_MIN (64), so Windows stamps the folder's tombstones from its
+/// one masked directory listing (per-file ChangeTime) rather than a stat
+/// each. The in-place corruption must still be in the note on the next poll.
+#[test]
+fn a_corrupted_tombstone_in_a_listed_folder_is_in_the_note_within_one_poll() {
+    corrupted_tombstone_note_case(70);
+}
+
+fn corrupted_tombstone_note_case(extra: usize) {
     let library = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let index = tempfile::tempdir().unwrap();
@@ -2164,6 +2177,15 @@ fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
     fs::write(&tomb, good).unwrap();
     fs::write(&other, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
     let old = SystemTime::now() - Duration::from_secs(3600);
+    for i in 0..extra {
+        let photo = library.path().join(format!("IMG_X{i:04}.JPG"));
+        fs::write(&photo, format!("synthetic-m7-note-x{i}")).unwrap();
+        let t = library
+            .path()
+            .join(format!("IMG_X{i:04}.JPG.albumen-tombstone"));
+        fs::write(&t, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+        set_mtime(&t, old);
+    }
     for p in [tomb.as_path(), other.as_path(), library.path()] {
         set_mtime(p, old);
     }
@@ -2196,7 +2218,7 @@ fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
     assert_eq!(
         reads(&polled) - reads(&quiet),
         if polled["hide_key"] == "portable" {
-            2 + 1
+            extra as u64 + 2 + 1
         } else {
             1
         },

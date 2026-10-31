@@ -1793,11 +1793,15 @@ fn dir_change_stamps(
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileIdBothDirectoryInformation, NtQueryDirectoryFile,
+    };
+    use windows_sys::Win32::Foundation::UNICODE_STRING;
     use windows_sys::Win32::Storage::FileSystem::{
-        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx,
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
     };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     let mut out = std::collections::HashMap::new();
     let suffix: Vec<u16> = albumen_ingest::hides::TOMBSTONE_SUFFIX
         .encode_utf16()
@@ -1811,22 +1815,45 @@ fn dir_change_stamps(
     };
     // u64 words keep the buffer 8-byte aligned, as the records need.
     let mut buf = vec![0u64; 8 * 1024];
-    let mut class = FileIdBothDirectoryRestartInfo;
+    // FRAGO 08:55Z (B): Windows CI 1fb9028 spent p95 68.6 ms at 50k/10k
+    // copying every photo's record out of the listing only to drop it.
+    // NtQueryDirectoryFile takes a name mask ("*" + the tombstone suffix,
+    // no wildcard in the suffix), so the file system returns only the
+    // tombstones: still one listing per folder with each entry's own
+    // ChangeTime. A tombstone the mask misses gets the plain stat from the
+    // caller (fail closed); an extra match is dropped by the suffix check.
+    let mut mask: Vec<u16> = "*".encode_utf16().chain(suffix.iter().copied()).collect();
+    let name = UNICODE_STRING {
+        Length: (mask.len() * 2) as u16,
+        MaximumLength: (mask.len() * 2) as u16,
+        Buffer: mask.as_mut_ptr(),
+    };
+    let mut restart = 1u8;
     loop {
-        // SAFETY: the handle is open for the call and the buffer is the
-        // size passed.
-        let ok = unsafe {
-            GetFileInformationByHandleEx(
+        let mut iosb: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle is open for the call, the buffer is the size
+        // passed, and the mask outlives the call. Synchronous handle: no
+        // event or APC.
+        let status = unsafe {
+            NtQueryDirectoryFile(
                 file.as_raw_handle() as _,
-                class,
+                std::ptr::null_mut(),
+                None,
+                std::ptr::null(),
+                &mut iosb,
                 buf.as_mut_ptr().cast(),
                 (buf.len() * 8) as u32,
+                FileIdBothDirectoryInformation,
+                0,
+                &name,
+                restart,
             )
-        } != 0;
-        if !ok {
+        };
+        // Any non-success (no more files, no match, an error) ends it.
+        if status != 0 || iosb.Information == 0 {
             break;
         }
-        class = FileIdBothDirectoryInfo;
+        restart = 0;
         let base = buf.as_ptr() as *const u8;
         let mut off = 0usize;
         loop {
@@ -2106,7 +2133,9 @@ fn hidden_for(
     // so a request never waits on thousands of tombstone reads.
     let mut changed = !primed;
     changed |= drain_relists(f);
+    hide_diag::mark("drain");
     let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
+    hide_diag::mark("dirst");
     let mut jobs: Vec<RelistJob> = Vec::new();
     // Pending folders that changed after they were handed over: their
     // carried show is checked again below.
@@ -3055,7 +3084,13 @@ fn apply_relist(f: &mut Fresh, done: RelistDone) {
     if !photos.is_empty() && !f.grew && !test_no_grow() {
         let have: std::collections::HashSet<&str> =
             f.photos_in[i].iter().map(|&j| f.base.path(j)).collect();
+        // Only a photo not already in the view needs its tombstone looked
+        // up; at 380k building that key for every listed photo dominated
+        // the hold of the view lock.
         let why = photos.iter().find_map(|p| {
+            if have.contains(p.as_str()) || f.grew_sent.contains(p) {
+                return None;
+            }
             let t = ds
                 .tombs
                 .get(&format!("{p}{}", albumen_ingest::hides::TOMBSTONE_SUFFIX));
