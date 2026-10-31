@@ -2306,7 +2306,7 @@ fn hidden_for(
         && PRESTAMP.with(|p| {
             p.borrow()
                 .as_ref()
-                .is_some_and(|p| p.generation != f.generation)
+                .is_some_and(|p| p.generation != f.generation || test_always_stale())
         })
     {
         // The stamps are for another generation: apply nothing and run
@@ -3241,10 +3241,17 @@ fn apply_landed() {
     }
     APPLY_ONLY.set(true);
     lock_hold::set_role(lock_hold::APPLY);
+    // XO FRAGO 11:05Z (1): stale passes are bounded. After
+    // APPLY_MAX_STALE in a row the applier stops (fail closed: it applied
+    // nothing, so nothing stale is served; withheld photos stay withheld)
+    // and the next request, which stamps inline, applies the landings.
+    let mut stale_run = 0u32;
+    let mut gave_up = false;
     while APPLY_AGAIN.swap(false, SeqCst) {
         let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) else {
             break;
         };
+        let stale0 = APPLY_STALE.load(SeqCst);
         let cur = s.library.lock().unwrap().clone();
         if let Some(v) = cur {
             // XO FRAGO 10:42Z (1): the applier's tombstone and folder stamps
@@ -3256,10 +3263,22 @@ fn apply_landed() {
             current_view(&s, v);
             PRESTAMP.with(|p| *p.borrow_mut() = None);
         }
+        if APPLY_STALE.load(SeqCst) == stale0 {
+            stale_run = 0;
+        } else {
+            stale_run += 1;
+            if stale_run >= APPLY_MAX_STALE {
+                APPLY_GAVE_UP.fetch_add(1, SeqCst);
+                APPLY_AGAIN.store(false, SeqCst);
+                gave_up = true;
+                break;
+            }
+        }
     }
     APPLYING.store(false, SeqCst);
-    // A landing between the last pass and the release above.
-    if APPLY_AGAIN.load(SeqCst) {
+    // A landing between the last pass and the release above (not after a
+    // give-up: that pass is left to the next request).
+    if !gave_up && APPLY_AGAIN.load(SeqCst) {
         apply_landed();
     }
 }
@@ -3278,6 +3297,14 @@ thread_local! {
 /// Applier passes that found the generation changed between their stamps
 /// and the lock and applied nothing (`hide_apply_stale`).
 static APPLY_STALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Stale applier passes in a row before it stops and leaves the landings
+/// to the next request (XO FRAGO 11:05Z (1)).
+const APPLY_MAX_STALE: u32 = 4;
+
+/// Times the applier stopped after APPLY_MAX_STALE stale passes in a row
+/// (`hide_apply_gave_up`).
+static APPLY_GAVE_UP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What the applier will stamp, listed under FRESH (no I/O), then stamped
 /// with the lock released, on the hide threads. None before the first
@@ -3308,6 +3335,19 @@ fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
         generation,
         stamps: rels.into_iter().zip(stamps).collect(),
     })
+}
+
+/// Test hook: every applier pass counts as stale (drives the retry cap).
+fn test_always_stale() -> bool {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("ALBUMEN_TEST_APPLY_ALWAYS_STALE").is_some())
+    }
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+    {
+        false
+    }
 }
 
 /// A stamp for `rel`: the applier's pre-taken one when it has it, else
@@ -4196,6 +4236,9 @@ fn found_json(server: &Server) -> serde_json::Value {
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
     out["hide_apply_stale"] = APPLY_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_apply_gave_up"] = APPLY_GAVE_UP
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out

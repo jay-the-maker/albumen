@@ -2559,3 +2559,71 @@ fn m7_applier_stamps_outside_the_lock_race() {
         "the race never hit the stale-generation path: {f}"
     );
 }
+
+/// XO FRAGO 11:05Z (1): a tombstone rewritten in place (same generation)
+/// while the applier's stamps are being taken. The applier may use the old
+/// stamp for that pass, but the photo must hide within the bound and never
+/// come back once gone.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_applier_same_generation_rewrite() {
+    let (l, all) = open_small(4, &[], &[("ALBUMEN_TEST_PRESTAMP_DELAY_MS", "300")]);
+    let h = "d02/IMG_0002.JPG";
+    let tomb = l.path().join(format!("{h}.albumen-tombstone"));
+    fs::write(&tomb, br#"{"hidden":false,"reason":"unhide"}"#).unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    l.until(10, "unhidden photo shown", |set| *set == want);
+    let g0 = settled(&l.addr);
+    // A landing starts the applier; the rewrite lands inside its 300 ms
+    // stamp gap, with no walk in between.
+    fs::write(l.path().join("d01/SYNC_SG01.JPG"), b"synthetic-m7-samegen").unwrap();
+    std::thread::sleep(Duration::from_millis(120));
+    fs::write(&tomb, br#"{"hidden":true,"reason":"hide"}"#).unwrap();
+    want.remove(h);
+    want.insert("d01/SYNC_SG01.JPG".into());
+    let ms = l.until(10, "rewritten tombstone stayed shown", |set| {
+        !set.contains(h)
+    });
+    for _ in 0..20 {
+        assert!(
+            !l.set().contains(h),
+            "{h} came back after the same-generation rewrite"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    l.until(10, "final set", |set| *set == want);
+    let f = settled(&l.addr);
+    println!(
+        "M7 APPLY_SAMEGEN hidden_ms={ms:.0} apply_stale={}->{} gave_up={}",
+        g0["hide_apply_stale"], f["hide_apply_stale"], f["hide_apply_gave_up"]
+    );
+}
+
+/// XO FRAGO 11:05Z (1): with every applier pass stale (test hook), the
+/// applier stops after a bounded run (counted), applies nothing stale, and
+/// the next request still shows the synced-in photo.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_applier_retries_are_bounded() {
+    let (l, all) = open_small(4, &[], &[("ALBUMEN_TEST_APPLY_ALWAYS_STALE", "1")]);
+    let s = "d03/SYNC_CAP1.JPG";
+    fs::write(l.path().join(s), b"synthetic-m7-cap").unwrap();
+    std::thread::sleep(Duration::from_millis(3000));
+    let f = found_page(&l.addr);
+    let (stale, gave) = (
+        f["hide_apply_stale"].as_u64().unwrap_or(0),
+        f["hide_apply_gave_up"].as_u64().unwrap_or(0),
+    );
+    println!("M7 APPLY_CAP apply_stale={stale} gave_up={gave}");
+    assert!(gave >= 1, "the applier never gave up: {stale} stale passes");
+    assert!(
+        stale <= 4 * gave,
+        "more than 4 stale passes per run: {stale} / {gave}"
+    );
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    want.insert(s.into());
+    l.until(10, "the next request applies the landing", |set| {
+        *set == want
+    });
+}
