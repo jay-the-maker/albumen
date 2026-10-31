@@ -1587,6 +1587,11 @@ fn key_kind() -> KeyKind {
 /// Windows ChangeTime keys taken, and change keys that could not be taken
 /// (shown in `/api/found` so a test proves the ChangeTime path is used).
 static CHANGETIME_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Tombstone stamps taken from a folder listing only (Windows masked
+/// NtQueryDirectoryFile path), never from a stat: `hide_dir_listed`
+/// (Product Lead 0905Z D2: proves the listing path ran).
+static DIR_LISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static KEY_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn os_key(p: &Path, m: &std::fs::Metadata) -> Option<u64> {
@@ -1877,6 +1882,7 @@ fn dir_change_stamps(
                     SystemTime::UNIX_EPOCH - std::time::Duration::from_nanos((-t) as u64 * 100)
                 };
                 CHANGETIME_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                DIR_LISTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 out.insert(
                     std::ffi::OsString::from_wide(name),
                     (when, rec.ChangeTime as u64),
@@ -3542,6 +3548,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_dirs_listed": DIRS_LISTED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_key": key_kind().name(),
         "hide_changetime_keys": CHANGETIME_KEYS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_dir_listed": DIR_LISTED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
         "hide_same_tick_ms": RECENT_MS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_fs": FS_NAME.lock().unwrap().clone(),

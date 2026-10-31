@@ -2147,7 +2147,7 @@ fn a_whole_second_ctime_on_ext_keeps_the_2s_window() {
 /// size, mtime set back) is in the note on the very next poll.
 #[test]
 fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
-    corrupted_tombstone_note_case(0);
+    corrupted_tombstone_note_case(0, false);
 }
 
 /// FRAGO 08:55Z (B): the same with 70 more show tombstones in the folder,
@@ -2156,10 +2156,19 @@ fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
 /// each. The in-place corruption must still be in the note on the next poll.
 #[test]
 fn a_corrupted_tombstone_in_a_listed_folder_is_in_the_note_within_one_poll() {
-    corrupted_tombstone_note_case(70);
+    corrupted_tombstone_note_case(70, false);
 }
 
-fn corrupted_tombstone_note_case(extra: usize) {
+/// Product Lead 0905Z D2: the same in a listed folder, the in-place
+/// corruption written through a handle that stays OPEN across the poll
+/// (NTFS may update a listing's times lazily while a writer holds the
+/// file). The hide note must still name it on the next poll (A8 first).
+#[test]
+fn a_corrupted_tombstone_held_open_in_a_listed_folder_is_in_the_note_within_one_poll() {
+    corrupted_tombstone_note_case(70, true);
+}
+
+fn corrupted_tombstone_note_case(extra: usize, hold_open: bool) {
     let library = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let index = tempfile::tempdir().unwrap();
@@ -2205,9 +2214,30 @@ fn corrupted_tombstone_note_case(extra: usize) {
     }
     let mut bad = good.to_vec();
     bad[0] = b'#';
-    fs::write(&tomb, &bad).unwrap();
-    set_mtime(&tomb, old);
+    // Held open: rewritten in place (no truncate, same length) and the
+    // handle kept until after the poll.
+    let _held = if hold_open {
+        use std::io::{Seek, Write};
+        let mut h = fs::OpenOptions::new().write(true).open(&tomb).unwrap();
+        h.seek(std::io::SeekFrom::Start(0)).unwrap();
+        h.write_all(&bad).unwrap();
+        h.flush().unwrap();
+        Some(h)
+    } else {
+        fs::write(&tomb, &bad).unwrap();
+        set_mtime(&tomb, old);
+        None
+    };
     let polled = found_page(&addr);
+    if cfg!(windows) && extra >= 70 {
+        // The listing path ran: every tombstone of the folder (72) was
+        // stamped from the one masked listing at least once.
+        let listed = polled["hide_dir_listed"].as_u64().unwrap_or(0);
+        assert!(
+            listed >= 72,
+            "listing path not used: hide_dir_listed={listed}"
+        );
+    }
     let note = polled["hide_note"].as_str().unwrap_or_default().to_string();
     println!(
         "M7 corrupted-tombstone note after one poll: {note} (reads {} -> {})",
@@ -2215,6 +2245,10 @@ fn corrupted_tombstone_note_case(extra: usize) {
         reads(&polled)
     );
     assert!(note.contains("IMG_0002.JPG.albumen-tombstone"), "{polled}");
+    if hold_open {
+        // Reads may include the writer-open retry; the note is the bar.
+        return;
+    }
     assert_eq!(
         reads(&polled) - reads(&quiet),
         if polled["hide_key"] == "portable" {
