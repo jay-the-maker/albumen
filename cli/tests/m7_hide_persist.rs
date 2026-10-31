@@ -2221,6 +2221,85 @@ fn an_unreadable_tombstone_is_not_reread_while_its_stamp_is_unchanged() {
     );
 }
 
+/// Product Lead 0926Z gate (A8: walk-thread pre-filter test) / XO 09:42Z
+/// (1). After a re-walk the walk thread filters the new view itself
+/// (publish_library, D2 08:09Z) and caches it, keyed by the hide version,
+/// for the first request. The walk's listing comes from the index, which
+/// already leaves out photos hidden before it, so the case that matters is
+/// a hide landing after the listing: the walk is parked there
+/// (ALBUMEN_TEST_WALK_GATE), the hide is written, the walk is released,
+/// and only /api/hide-status (which never filters) is polled until the new
+/// generation is published, so the walk thread filters first and the next
+/// request is served its cached view at the same version. The hidden photo
+/// must be absent from that request on. Mutation-checked: caching the
+/// unfiltered view on the walk thread fails this test.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn a_hide_landing_during_a_rewalk_is_absent_from_the_walk_thread_view() {
+    let gates = tempfile::tempdir().unwrap();
+    let gate = gates.path().join("walk.gate");
+    let parked = gate.with_extension("parked");
+    let gate_s = gate.to_str().unwrap().to_string();
+    let (l, all) = open_small(2, &[], &[("ALBUMEN_TEST_WALK_GATE", gate_s.as_str())]);
+    let mut want: BTreeSet<String> = all.iter().cloned().collect();
+    let set = || listed(&l.addr).into_iter().collect::<BTreeSet<String>>();
+    assert_eq!(set(), want);
+    let gen = || {
+        let (_, st) = get(&l.addr, "/api/hide-status");
+        serde_json::from_str::<serde_json::Value>(&st).unwrap()["generation"]
+            .as_u64()
+            .unwrap_or(0)
+    };
+    let g0 = gen();
+    fs::write(&gate, b"").unwrap();
+    let new = "d01/SYNC_0000.JPG";
+    fs::write(l.path().join(new), "synthetic-m7-pre-SYNC_0000").unwrap();
+    want.insert(new.to_string());
+    std::thread::sleep(Duration::from_millis(2100));
+    // One /api/library request notices the folder and starts the re-walk.
+    let _ = listed(&l.addr);
+    let began = Instant::now();
+    while !parked.exists() {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the re-walk never reached the gate: {}",
+            found_page(&l.addr)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The hide lands after the walk's listing, before its pre-filter.
+    let hidden = "d00/IMG_0003.JPG";
+    fs::write(
+        l.path().join(format!("{hidden}.albumen-tombstone")),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    want.remove(hidden);
+    fs::remove_file(&gate).unwrap();
+    while gen() <= g0 {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "no re-walk published"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Let the walk thread finish its pre-filter after publishing.
+    std::thread::sleep(Duration::from_millis(500));
+    let v0 = found_page(&l.addr)["hide_version"].clone();
+    for _ in 0..3 {
+        assert_eq!(
+            set(),
+            want,
+            "a hide that landed during the re-walk showed in the walk thread's view"
+        );
+    }
+    println!(
+        "M7 WALK_PREFILTER generation={} hide_version_before={v0} hide_version_after={}",
+        gen(),
+        found_page(&l.addr)["hide_version"]
+    );
+}
+
 /// Product Lead 0926Z gate D2 / XO FRAGO 09:28Z (b): the production path,
 /// no test hook. A real SHOW tombstone whose stamp can never be trusted
 /// (mtime an hour in the future, as a sync from a skewed clock leaves it)

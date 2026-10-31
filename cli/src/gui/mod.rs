@@ -438,6 +438,28 @@ fn refresh_thumbs_try(server: &Arc<Server>, attempt: u32) {
     });
 }
 
+/// Test hook (XO 09:42Z (1)): `ALBUMEN_TEST_WALK_GATE=<file>`. A re-walk
+/// (not the startup walk) that has finished listing writes `<file>.parked`
+/// and waits while `<file>` exists, so a test can land a hide after the
+/// listing and before the walk thread's pre-filter, for certain.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn walk_gate_hook(gen: u64) {
+    let Ok(gate) = std::env::var("ALBUMEN_TEST_WALK_GATE") else {
+        return;
+    };
+    let gate = std::path::PathBuf::from(gate);
+    if gen <= 1 || !gate.exists() {
+        return;
+    }
+    let _ = std::fs::write(gate.with_extension("parked"), gen.to_string());
+    while gate.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+fn walk_gate_hook(_gen: u64) {}
+
 fn walk_once(s: &Arc<Server>, gen: u64) {
     {
         let lib = &s.config.library;
@@ -449,6 +471,7 @@ fn walk_once(s: &Arc<Server>, gen: u64) {
             retry_pending_save(s);
             files
         };
+        walk_gate_hook(gen);
         let Some(cache) = live::cache_dir(lib) else {
             publish_library(s, gen, files, &Default::default());
             return;
