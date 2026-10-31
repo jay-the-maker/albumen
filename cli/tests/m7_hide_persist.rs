@@ -3210,6 +3210,15 @@ fn no_flicker(variant: &str) {
             "no panic log line: {l}"
         );
         assert!(found_page(&addr)["hide_worker_panics"].as_u64() >= Some(1));
+        // FRAGO 09:53Z (4): the one panic is retried at once inside the
+        // worker; the 1, 2, 4 .. 60 s backoff applies only after three
+        // panics in a row (`hide_exhausted`), so it cannot delay the release.
+        let f = found_page(&addr);
+        assert_eq!(
+            f["hide_exhausted"], 0,
+            "backoff engaged: {}",
+            f["hide_exhausted"]
+        );
     }
     if variant == "worker_error" {
         let note = found_page(&addr)["hide_note"].to_string();
@@ -3257,6 +3266,19 @@ fn no_flicker(variant: &str) {
             );
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+    // FRAGO 09:53Z (4): each sample and the backoff counters, so a slow
+    // Windows run shows whether the time is spread or one outlier.
+    {
+        let f = found_page(&addr);
+        let ws: Vec<String> = withheld.iter().map(|w| format!("{w:.0}")).collect();
+        println!(
+            "M7 NO_FLICKER_WITHHELD variant={variant} samples_ms={} exhausted={} redispatched={} worker_panics={}",
+            ws.join(","),
+            f["hide_exhausted"],
+            f["hide_redispatched"],
+            f["hide_worker_panics"]
+        );
     }
     let w_p95 = pct(&mut withheld.clone(), 0.95);
     let w_max = pct(&mut withheld.clone(), 1.0);
