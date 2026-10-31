@@ -681,3 +681,82 @@ fn a_stuck_lock_leaves_the_save_pending_and_it_is_retried() {
          saved_after_release=true"
     );
 }
+
+/// XO FRAGO 10:44Z (D): two writers save at once and neither may roll the
+/// other's change back. Writer 0 changes only even directories and keeps one
+/// index open (search-tool style); writer 1 changes only odd ones and opens
+/// afresh each time (GUI style). After each writer's own save, the saved file
+/// must hold exactly that writer's directories as it last made them: a stale
+/// listing from the other writer never wins. Generations read never go back.
+#[test]
+fn two_writers_never_roll_back() {
+    let library = tempfile::tempdir().unwrap();
+    let index_dir = tempfile::tempdir().unwrap();
+    let all = make_library(library.path(), 400);
+    LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    let seed = seed();
+    let iters = env_num("ALBUMEN_M6_ITERS", 200);
+    println!("M6 TWO_WRITERS seed={seed} iters={iters}");
+    let rollbacks = Arc::new(AtomicU64::new(0));
+    let merges = Arc::new(AtomicU64::new(0));
+    let writers: Vec<_> = (0..2u64)
+        .map(|w| {
+            let (lib, idx) = (library.path().to_path_buf(), index_dir.path().to_path_buf());
+            let mine = move |p: &String| p[1..3].parse::<u64>().unwrap() % 2 == w;
+            let mut own: BTreeSet<String> = all.iter().filter(|p| mine(p)).cloned().collect();
+            let (rollbacks, merges) = (rollbacks.clone(), merges.clone());
+            std::thread::spawn(move || {
+                let mut rng = Rng(seed.wrapping_add(w * 0x9e37_79b9) | 1);
+                let mut kept = (w == 0).then(|| LibraryIndex::open(&lib, Some(&idx)).unwrap());
+                let mut last_gen = 0;
+                for i in 0..iters {
+                    if rng.below(2) == 0 && !own.is_empty() {
+                        let pick = own.iter().nth(rng.below(own.len() as u64) as usize).unwrap().clone();
+                        std::fs::remove_file(lib.join(&pick)).unwrap();
+                        own.remove(&pick);
+                    } else {
+                        let rel = format!("d{:02}/w{w}-{i:05}.jpg", rng.below(25) * 2 + w);
+                        std::fs::write(lib.join(&rel), b"").unwrap();
+                        own.insert(rel);
+                    }
+                    let file = match kept.as_mut() {
+                        Some(index) => {
+                            index.refresh().unwrap();
+                            merges.store(index.merges, Ordering::Relaxed);
+                            index_file(index)
+                        }
+                        None => index_file(&LibraryIndex::open(&lib, Some(&idx)).unwrap()),
+                    };
+                    let (g, saved) = read_saved_file(&file).unwrap();
+                    assert!(g >= last_gen, "writer {w}: generation went back {last_gen} -> {g}");
+                    last_gen = g;
+                    let got: BTreeSet<String> = saved.into_iter().filter(|p| mine(p)).collect();
+                    if got != own {
+                        let n = rollbacks.fetch_add(1, Ordering::Relaxed);
+                        if n < 5 {
+                            println!(
+                                "M6 TWO_WRITERS ROLLBACK writer={w} iter={i} gen={g} missing={:?} extra={:?}",
+                                own.difference(&got).take(3).collect::<Vec<_>>(),
+                                got.difference(&own).take(3).collect::<Vec<_>>()
+                            );
+                        }
+                    }
+                }
+                own
+            })
+        })
+        .collect();
+    let mut want = BTreeSet::new();
+    for w in writers {
+        want.extend(w.join().unwrap());
+    }
+    let last = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    let (_, saved) = read_saved_file(&index_file(&last)).unwrap();
+    println!(
+        "M6 TWO_WRITERS RESULT rollbacks={} kept_writer_merges={}",
+        rollbacks.load(Ordering::Relaxed),
+        merges.load(Ordering::Relaxed)
+    );
+    assert_eq!(rollbacks.load(Ordering::Relaxed), 0, "a stale listing won");
+    assert_eq!(sorted(saved), want);
+}
