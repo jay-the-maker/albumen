@@ -9,7 +9,10 @@ name: m6 shared index
 
 on:
   push:
-    branches: [m6-shared-index]
+    # m6-x2-chunk-hash: DIAGNOSTIC ONLY, NEVER BINDING. Its runs collect the
+    # X2 READ_OVER_20MS / READ_CPU lines and ticker-gap timestamps for the
+    # intermittent X2 slow read; only m6-shared-index gives the binding result.
+    branches: [m6-shared-index, m6-x2-chunk-hash]
   workflow_dispatch:
     inputs:
       files:
@@ -41,6 +44,12 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+
+      - name: Diagnostic branch notice
+        if: github.ref_name == 'm6-x2-chunk-hash'
+        run: |
+          echo "M6 DIAGNOSTIC branch, not binding"
+          echo "::notice::M6 DIAGNOSTIC branch (m6-x2-chunk-hash), not binding"
 
       - uses: dtolnay/rust-toolchain@1.99.1
 
