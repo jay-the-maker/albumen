@@ -2121,7 +2121,24 @@ fn hidden_for(
             // moved (or is not yet trusted) the show is re-checked against
             // the tombstones present now, none of them trusted (fail
             // closed); the listing itself is redone when it lands.
-            if primed && (st != ds.sent_st || !trusted_at(&ds.sent_st, checked_at)) {
+            // XO FRAGO 08:40Z D2: a show tombstone rewritten in place (no
+            // rename) need not move the folder's stamp, so each carried
+            // show is stamped too; one that changed is dropped from the
+            // carried show (untrusted below: fail closed).
+            let mut shows_moved = false;
+            if primed && !ds.sent_shows.is_empty() {
+                let still: Vec<_> = ds
+                    .sent_shows
+                    .iter()
+                    .filter(|(rel, s)| mtime(&lib.join(rel)) == Some(*s))
+                    .cloned()
+                    .collect();
+                if still.len() != ds.sent_shows.len() {
+                    shows_moved = true;
+                    ds.sent_shows = Arc::new(still);
+                }
+            }
+            if primed && (shows_moved || st != ds.sent_st || !trusted_at(&ds.sent_st, checked_at)) {
                 ds.sent_st = st;
                 let mut probe = DirState::default();
                 for (rel, stamp) in ds.sent_shows.iter() {
