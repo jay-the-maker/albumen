@@ -1126,8 +1126,13 @@ fn listed(addr: &str) -> Vec<String> {
 /// checks (XO 04:41Z (6)).
 fn listed_raw(addr: &str) -> Vec<String> {
     let (code, body) = get(addr, "/api/library");
+    parse_listed(code, &body)
+}
+
+/// The photo paths of an `/api/library` answer, in order.
+fn parse_listed(code: u16, body: &str) -> Vec<String> {
     assert_eq!(code, 200);
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(v["status"], "ready", "{v}");
     v["images"]
         .as_array()
@@ -1390,9 +1395,11 @@ fn an_unchanged_request_reads_no_tombstone() {
 }
 
 /// Whether the ALBUMEN_TEST_RELIST_* hooks are honoured by this build.
-/// XO 04:41Z (5): the cap on each piece of inline hide work in a request
-/// (keep_shown, the hidden/withheld set build), asserted at 50k and 380k.
-const INLINE_CAP_MS: f64 = 50.0;
+/// XO 05:06Z (a), PL push gate D1: the cap on each piece of inline hide work
+/// in a request (keep_shown, the hidden/withheld set build): 40 ms at up to
+/// 50k files, and 100 ms (inside the request max) above that.
+const INLINE_CAP_MS: f64 = 40.0;
+const INLINE_CAP_LARGE_MS: f64 = 100.0;
 
 const HOOKS: bool = cfg!(any(debug_assertions, feature = "test-hooks"));
 
@@ -2216,13 +2223,10 @@ fn m7_recheck_and_img_diagnostics() {
         // XO 04:41Z (5): the inline work a request may do has a stated cap.
         let keep = f["hide_keep_max_ms"].as_f64().unwrap();
         let build = f["hide_build_max_ms"].as_f64().unwrap();
-        // Both still grow with the photos of the folders going pending (one
-        // string each), so above 50k files the cap is the 1 s withheld bar
-        // (box 380k after a 1k-tombstone sync: keep 384 ms, build 260 ms).
         let cap = if files <= 50_000 {
             INLINE_CAP_MS
         } else {
-            1000.0
+            INLINE_CAP_LARGE_MS
         };
         println!("M7 INLINE files={files} keep_max_ms={keep} build_max_ms={build} cap_ms={cap}");
         assert!(
@@ -2489,10 +2493,12 @@ fn no_flicker(variant: &str) {
         }
     };
     let timed = |addr: &str, times: &mut Vec<f64>| {
+        // The request only (XO 05:06Z (d)): the test's own JSON parse of
+        // the answer is not the server's time.
         let t = Instant::now();
-        let r = listed_raw(addr);
+        let (code, body) = get(addr, "/api/library");
         times.push(t.elapsed().as_secs_f64() * 1000.0);
-        r
+        parse_listed(code, &body)
     };
     let r1 = timed(&addr, &mut times);
     check(&r1, &unhidden, &mut disappearances, &mut h_shown, false);
@@ -2602,6 +2608,13 @@ fn no_flicker(variant: &str) {
     }
     let w_p95 = pct(&mut withheld.clone(), 0.95);
     let w_max = pct(&mut withheld.clone(), 1.0);
+    // XO 05:06Z (d): library re-walks during the run (the generation). Each
+    // of the 21 grown listings may start one; a re-list of a folder with a
+    // hidden photo must not (it did on 387f91f, see the docs).
+    let (_, st) = get(&addr, "/api/hide-status");
+    let st: serde_json::Value = serde_json::from_str(&st).unwrap();
+    let rewalks = st["generation"].as_u64().unwrap_or(0);
+    println!("M7 NO_FLICKER_REWALKS variant={variant} generation={rewalks}");
     let r_p95 = pct(&mut times.clone(), 0.95);
     let r_max = pct(&mut times.clone(), 1.0);
     println!(

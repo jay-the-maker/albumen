@@ -917,6 +917,32 @@ fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
 /// M7: hide state as of the last request, for one ready listing, kept per
 /// directory and per tombstone so a request re-reads only what changed
 /// (XO 02:04Z). Reads only; nothing in the library is written.
+/// What a pending folder withholds: everything (`all`: not checked yet, or
+/// its listing failed, so fail closed) or only `set`, the photos that were
+/// already off screen plus those whose tombstone came or changed. Kept as
+/// the (small) withheld part rather than the (large) kept part, so the cost
+/// follows the tombstones, not the photos (XO 05:06Z (c)).
+#[derive(Debug, Clone)]
+struct Withhold {
+    all: bool,
+    set: std::collections::HashSet<String>,
+}
+
+impl Default for Withhold {
+    fn default() -> Self {
+        Self {
+            all: true,
+            set: Default::default(),
+        }
+    }
+}
+
+impl Withhold {
+    fn holds(&self, p: &str) -> bool {
+        self.all || self.set.contains(p)
+    }
+}
+
 struct Fresh {
     generation: u64,
     /// Every directory holding a listed photo, and the listed photos in it.
@@ -943,6 +969,9 @@ struct Fresh {
     hard: Arc<std::collections::HashSet<String>>,
     /// Withheld photos that were in `hard` (or `hard_w`) before.
     hard_w: std::collections::HashSet<String>,
+    /// Each folder's pending flag and keep set as of the last build, so the
+    /// next build revisits only the folders that changed (XO 05:00Z (a)).
+    built: Vec<(bool, Arc<Withhold>)>,
     /// A confirmed listing holds a photo the view lacks: list the library
     /// again (XO 04:41Z (1)).
     grew: bool,
@@ -974,7 +1003,7 @@ struct DirState {
     /// For a pending folder: the photos that were on screen and whose own
     /// tombstone is absent, or unchanged with a trusted show verdict. They
     /// stay shown; the folder's other photos are withheld (XO 03:36Z (1)).
-    keep: std::collections::HashSet<String>,
+    keep: Arc<Withhold>,
     tombs: std::collections::BTreeMap<String, TombState>,
     /// The photo files the last listing saw (taken by [`apply_relist`] to
     /// spot photos synced in that the view does not have yet).
@@ -1609,10 +1638,12 @@ fn hidden_for(
     let lib = &server.config.library;
     let mut fresh = FRESH.lock().unwrap();
     if fresh.as_ref().is_none_or(|f| f.generation != v.generation) {
-        let mut by_dir: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+        // Grouped by borrowed folder name (one String per folder, not per
+        // photo): this runs on the first request of every re-walk.
+        let mut by_dir: std::collections::BTreeMap<&str, Vec<u32>> = Default::default();
         for i in 0..v.len() as u32 {
             let d = v.path(i).rsplit_once('/').map_or("", |(d, _)| d);
-            by_dir.entry(d.to_string()).or_default().push(i);
+            by_dir.entry(d).or_default().push(i);
         }
         let version = fresh.as_ref().map_or(0, |f| f.version + 1);
         set_window_for(lib);
@@ -1647,11 +1678,41 @@ fn hidden_for(
             }
             None => (Default::default(), false, None, Default::default()),
         };
-        let (dirs, photos_in): (Vec<String>, Vec<Vec<u32>>) = by_dir.into_iter().unzip();
-        let state = dirs
+        let (dirs, photos_in): (Vec<String>, Vec<Vec<u32>>) =
+            by_dir.into_iter().map(|(d, p)| (d.to_string(), p)).unzip();
+        let mut state: Vec<DirState> = dirs
             .iter()
             .map(|d| carried.remove(d).unwrap_or_default())
             .collect();
+        // A folder still pending across the re-walk withholds what it did,
+        // plus every photo the old view did not have (nothing new shows
+        // before its listing is confirmed; fail closed).
+        if let Some(prev) = &prev {
+            for ((d, ds), photos) in dirs.iter().zip(state.iter_mut()).zip(&photos_in) {
+                if ds.pending.is_none() || ds.keep.all {
+                    continue;
+                }
+                let old: std::collections::HashSet<&str> = prev
+                    .dir_idx
+                    .get(d)
+                    .map(|&k| {
+                        prev.photos_in[k]
+                            .iter()
+                            .map(|&p| prev.base.path(p))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let add: Vec<String> = photos
+                    .iter()
+                    .map(|&p| v.path(p))
+                    .filter(|p| !old.contains(p))
+                    .map(str::to_string)
+                    .collect();
+                if !add.is_empty() {
+                    Arc::make_mut(&mut ds.keep).set.extend(add);
+                }
+            }
+        }
         *fresh = Some(Fresh {
             generation: v.generation,
             dirs,
@@ -1666,6 +1727,7 @@ fn hidden_for(
             withheld: Default::default(),
             hard,
             hard_w,
+            built: Vec::new(),
             grew: false,
             prev,
         });
@@ -1764,7 +1826,7 @@ fn hidden_for(
         let (keeps, b) = keep_shown(lib, f, &jobs);
         blink = b;
         for (j, keep) in jobs.iter().zip(keeps) {
-            f.state[j.i].keep = keep;
+            f.state[j.i].keep = Arc::new(keep);
         }
         let us = t.elapsed().as_micros() as u64;
         KEEP_STAT_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
@@ -1841,20 +1903,7 @@ fn hidden_for(
     let mut hidden = std::collections::HashSet::new();
     let mut errors = Vec::new();
     let mut tombs = Vec::new();
-    let mut withheld = std::collections::HashSet::new();
-    for (ds, photos) in f.state.iter().zip(&f.photos_in) {
-        if ds.unlisted {
-            hidden.extend(photos.iter().map(|&i| v.path(i).to_string()));
-        }
-        if ds.pending.is_some() {
-            withheld.extend(
-                photos
-                    .iter()
-                    .map(|&i| v.path(i))
-                    .filter(|p| !ds.keep.contains(*p))
-                    .map(str::to_string),
-            );
-        }
+    for ds in f.state.iter() {
         for (rel, t) in &ds.tombs {
             tombs.push(rel.clone());
             let hides = match &t.verdict {
@@ -1871,6 +1920,11 @@ fn hidden_for(
             }
         }
     }
+    for (ds, photos) in f.state.iter().zip(&f.photos_in) {
+        if ds.unlisted {
+            hidden.extend(photos.iter().map(|&i| v.path(i).to_string()));
+        }
+    }
     if let Some(fam) = &f.family {
         hidden.extend(fam.paths.iter().cloned());
         errors.extend(fam.errors.iter().cloned());
@@ -1880,37 +1934,106 @@ fn hidden_for(
     // An unhide needs the photo back, which the view no longer holds: list
     // again in the background (hides only ever narrow the view here). A
     // photo only withheld (pending folder) is in the base view, so putting
-    // that back is enough.
+    // that back is enough. The old hidden set is the old hard set plus the
+    // old withheld set, so only the (small) hard sets are walked here.
+    // (Checked after the withheld update below: a hard-hidden photo whose
+    // folder just went pending moves from the hard set to the withheld set,
+    // which is not an unhide; testing it against the old withheld set made
+    // every re-list of a folder with tombstones look like one, and each
+    // re-walked the library: XO 05:06Z (c).)
+    let mut unhid = false;
+    // The withheld set is updated in place, folder by folder: only folders
+    // whose pending flag or keep set changed since the last build are
+    // revisited, so the cost follows the changed folders, not the library
+    // (XO 05:00Z (a)). A new generation starts from empty.
+    let new_gen = f.built.len() != f.state.len();
+    if new_gen {
+        f.built = vec![(false, Default::default()); f.state.len()];
+        let old: Vec<String> = f.withheld.drain().collect();
+        // Photos withheld under the old generation all count as changed.
+        let hidden_all = Arc::make_mut(&mut f.hidden);
+        for p in old {
+            if !f.hard.contains(&p) {
+                hidden_all.remove(&p);
+            }
+        }
+    }
+    let mut touched: Vec<String> = Vec::new();
+    let mut released = false;
+    for (i, (ds, photos)) in f.state.iter().zip(&f.photos_in).enumerate() {
+        let now = (ds.pending.is_some(), &ds.keep);
+        let i_photos = photos;
+        let was = f.built[i].clone();
+        if was.0 == now.0 && (!now.0 || Arc::ptr_eq(&was.1, now.1)) {
+            continue;
+        }
+        let mut visit = |p: &str, f_withheld: &mut std::collections::HashSet<String>| {
+            let w0 = was.0 && was.1.holds(p);
+            let w1 = now.0 && now.1.holds(p);
+            if w0 == w1 {
+                return;
+            }
+            if w1 {
+                f_withheld.insert(p.to_string());
+            } else {
+                f_withheld.remove(p);
+                released |= !hidden.contains(p);
+            }
+            touched.push(p.to_string());
+        };
+        if (was.0 && was.1.all) || (now.0 && now.1.all) {
+            for &k in i_photos {
+                visit(v.path(k), &mut f.withheld);
+            }
+        } else {
+            let mut seen = std::collections::HashSet::new();
+            for p in was.1.set.iter().chain(&now.1.set) {
+                if seen.insert(p.as_str()) {
+                    visit(p, &mut f.withheld);
+                }
+            }
+        }
+        f.built[i] = (now.0, Arc::clone(now.1));
+    }
+    let withheld = &f.withheld;
     // A photo hidden, then withheld while its folder was pending, then
     // shown is an unhide too: test against the hard-hidden set, not only
     // the photos withheld at the last check (the base view lacks it).
-    let unhid = f
-        .hidden
+    unhid |= f
+        .hard
         .iter()
-        .any(|p| !hidden.contains(p) && !f.withheld.contains(p))
-        || f.hard
-            .iter()
-            .chain(&f.hard_w)
-            .any(|p| !hidden.contains(p) && !withheld.contains(p));
-    let released = f
-        .withheld
+        .chain(&f.hard_w)
+        .any(|p| !hidden.contains(p) && !withheld.contains(p));
+    // Hard-hidden before and now only withheld; walks the (small) hard sets.
+    let hard_w: std::collections::HashSet<String> = f
+        .hard
         .iter()
-        .any(|p| !withheld.contains(p) && !hidden.contains(p));
-    let mut all = hidden.clone();
-    all.extend(withheld.iter().cloned());
-    if unhid || released || all != *f.hidden {
-        f.version += 1;
-    }
-    // Hard-hidden before and now only withheld (iterates the withheld
-    // photos only); the hard-hidden set itself is moved, not copied.
-    f.hard_w = withheld
-        .iter()
-        .filter(|p| !hidden.contains(*p) && (f.hard.contains(*p) || f.hard_w.contains(*p)))
+        .chain(&f.hard_w)
+        .filter(|p| withheld.contains(*p) && !hidden.contains(*p))
         .cloned()
         .collect();
+    // The served set (hard plus withheld) changes only at the touched
+    // photos and where the hard set changed.
+    touched.extend(f.hard.iter().filter(|p| !hidden.contains(*p)).cloned());
+    touched.extend(
+        hidden
+            .iter()
+            .filter(|p| new_gen || !f.hard.contains(*p))
+            .cloned(),
+    );
+    let mut delta = false;
+    {
+        let all = Arc::make_mut(&mut f.hidden);
+        for p in touched {
+            let want = hidden.contains(&p) || f.withheld.contains(&p);
+            delta |= if want { all.insert(p) } else { all.remove(&p) };
+        }
+    }
+    if unhid || released || delta {
+        f.version += 1;
+    }
+    f.hard_w = hard_w;
     f.hard = Arc::new(hidden);
-    f.withheld = withheld;
-    f.hidden = Arc::new(all);
     HIDE_VERSION.store(f.version, std::sync::atomic::Ordering::Relaxed);
     let us = built.elapsed().as_micros() as u64;
     BUILD_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
@@ -1998,47 +2121,33 @@ const APPLY_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 /// said show. One listing per folder (and a stat per tombstone present), on up to 8 threads. A stat that
 /// fails other than "not found" withholds the photo (fail closed).
 /// Also says whether any shown photo is withheld (it would blink out).
-fn keep_shown(
-    lib: &Path,
-    f: &Fresh,
-    jobs: &[RelistJob],
-) -> (Vec<std::collections::HashSet<String>>, bool) {
+fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, bool) {
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
-    let v = &f.base;
-    // Photos of each folder that were on screen.
-    let shown: Vec<Vec<String>> = jobs
+    // Photos of each folder that were off screen (the reference hidden set,
+    // grouped by folder): they stay withheld. Walks the hidden set, which
+    // follows the tombstones, never the photos of the folder.
+    let off: &std::collections::HashSet<String> = match &f.prev {
+        None => &f.hidden,
+        Some(prev) => &prev.hidden,
+    };
+    let want: std::collections::HashMap<&str, usize> = jobs
         .iter()
-        .map(|j| {
-            if j.ds.unlisted {
-                return Vec::new();
-            }
-            match &f.prev {
-                None => f.photos_in[j.i]
-                    .iter()
-                    .map(|&p| v.path(p))
-                    .filter(|p| !f.hidden.contains(*p))
-                    .map(str::to_string)
-                    .collect(),
-                Some(prev) => {
-                    let Some(&k) = prev.dir_idx.get(&j.dir) else {
-                        return Vec::new();
-                    };
-                    prev.photos_in[k]
-                        .iter()
-                        .map(|&p| prev.base.path(p))
-                        .filter(|p| !prev.hidden.contains(*p))
-                        .map(str::to_string)
-                        .collect()
-                }
-            }
-        })
+        .enumerate()
+        .map(|(n, j)| (j.dir.as_str(), n))
         .collect();
+    let mut sets: Vec<std::collections::HashSet<String>> = vec![Default::default(); jobs.len()];
+    for p in off {
+        let d = p.rsplit_once('/').map_or("", |(d, _)| d);
+        if let Some(&n) = want.get(d) {
+            sets[n].insert(p.clone());
+        }
+    }
     let threads = hide_threads();
     // One listing of the folder instead of one stat per shown photo (the
     // stats cost up to 150 ms a request on NTFS, Windows CI 0e54af1): a
-    // photo whose tombstone name is not in the listing is kept; one whose
-    // tombstone is there gets the stat and trusted-read check. A folder
-    // that cannot be listed keeps nothing (fail closed).
+    // photo whose tombstone is in the listing gets the stat and trusted-read
+    // check and is withheld unless that clears it. A folder that cannot be
+    // listed withholds everything (fail closed).
     let fold = |n: &str| -> String {
         if cfg!(windows) {
             n.to_lowercase()
@@ -2046,65 +2155,103 @@ fn keep_shown(
             n.to_string()
         }
     };
-    let check = |j: &RelistJob, photos: &Vec<String>| -> std::collections::HashSet<String> {
-        if photos.is_empty() {
-            return Default::default();
+    let check = |j: &RelistJob, off: &std::collections::HashSet<String>| -> (Withhold, bool) {
+        let all = (
+            Withhold {
+                all: true,
+                set: Default::default(),
+            },
+            false,
+        );
+        if j.ds.unlisted {
+            return (Withhold::default(), false);
         }
         KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let names: std::collections::HashSet<String> = match std::fs::read_dir(lib.join(&j.dir)) {
+        // Folded photo name -> tombstone file name, for tombstones present.
+        let mut tombs: std::collections::HashMap<String, String> = Default::default();
+        match std::fs::read_dir(lib.join(&j.dir)) {
             Ok(rd) => {
-                let mut names = std::collections::HashSet::new();
                 for e in rd {
-                    match e {
-                        Ok(e) => {
-                            let n = e.file_name().to_string_lossy().into_owned();
-                            if fold(&n).ends_with(&fold(TOMBSTONE_SUFFIX)) {
-                                names.insert(fold(&n));
-                            }
-                        }
-                        Err(_) => return Default::default(),
+                    let Ok(e) = e else { return all };
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    let fl = fold(&n);
+                    if let Some(stem) = fl.strip_suffix(&fold(TOMBSTONE_SUFFIX)) {
+                        tombs.insert(stem.to_string(), n);
                     }
                 }
-                names
             }
-            Err(_) => return Default::default(),
+            Err(_) => return all,
+        }
+        let mut set = off.clone();
+        let mut blink = false;
+        if tombs.is_empty() {
+            return (Withhold { all: false, set }, false);
+        }
+        let photos: Vec<String> = if cfg!(windows) {
+            // Case-folded names: match against the folder's photos.
+            match &f.prev {
+                None => f.photos_in[j.i]
+                    .iter()
+                    .map(|&p| f.base.path(p).to_string())
+                    .collect(),
+                Some(prev) => prev.dir_idx.get(&j.dir).map_or(Vec::new(), |&k| {
+                    prev.photos_in[k]
+                        .iter()
+                        .map(|&p| prev.base.path(p).to_string())
+                        .collect()
+                }),
+            }
+        } else {
+            tombs
+                .keys()
+                .map(|stem| {
+                    if j.dir.is_empty() {
+                        stem.clone()
+                    } else {
+                        format!("{}/{stem}", j.dir)
+                    }
+                })
+                .collect()
         };
-        photos
-            .iter()
-            .filter(|p| {
-                let rel = format!("{p}{TOMBSTONE_SUFFIX}");
-                let name = rel.rsplit_once('/').map_or(rel.as_str(), |(_, n)| n);
-                if !names.contains(&fold(name)) {
-                    return true;
-                }
-                let path = lib.join(&rel);
-                KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                match std::fs::symlink_metadata(&path) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                    Err(_) => false,
-                    Ok(_) => j.ds.tombs.get(&rel).is_some_and(|t| {
-                        t.trusted
-                            && t.verdict == Ok(false)
-                            && t.stamp.is_some()
-                            && mtime(&path) == t.stamp
-                    }),
-                }
-            })
-            .cloned()
-            .collect()
+        for p in photos {
+            if set.contains(&p) {
+                continue;
+            }
+            let name = p.rsplit_once('/').map_or(p.as_str(), |(_, n)| n);
+            if !tombs.contains_key(&fold(name)) {
+                continue;
+            }
+            let rel = format!("{p}{TOMBSTONE_SUFFIX}");
+            let path = lib.join(&rel);
+            KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let kept = match std::fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(_) => false,
+                Ok(_) => j.ds.tombs.get(&rel).is_some_and(|t| {
+                    t.trusted
+                        && t.verdict == Ok(false)
+                        && t.stamp.is_some()
+                        && mtime(&path) == t.stamp
+                }),
+            };
+            if !kept {
+                // Only a photo on screen blinks out (Linux: the tombstone's
+                // photo file exists; Windows: taken from the view).
+                blink |= cfg!(windows) || lib.join(&p).is_file();
+                set.insert(p);
+            }
+        }
+        (Withhold { all: false, set }, blink)
     };
-    let blinks = |out: &[std::collections::HashSet<String>]| {
-        out.iter().zip(&shown).any(|(k, s)| k.len() < s.len())
-    };
+    let run = |n: usize| check(&jobs[n], &sets[n]);
     if threads == 1 || jobs.len() < 4 {
-        let out: Vec<_> = jobs.iter().zip(&shown).map(|(j, s)| check(j, s)).collect();
-        let b = blinks(&out);
-        return (out, b);
+        let out: Vec<(Withhold, bool)> = (0..jobs.len()).map(run).collect();
+        let b = out.iter().any(|o| o.1);
+        return (out.into_iter().map(|o| o.0).collect(), b);
     }
-    let mut out: Vec<std::collections::HashSet<String>> = vec![Default::default(); jobs.len()];
+    let out: Vec<Mutex<Option<(Withhold, bool)>>> =
+        (0..jobs.len()).map(|_| Mutex::new(None)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let slots: Vec<Mutex<&mut std::collections::HashSet<String>>> =
-        out.iter_mut().map(Mutex::new).collect();
     std::thread::scope(|sc| {
         for _ in 0..threads {
             sc.spawn(|| loop {
@@ -2112,14 +2259,16 @@ fn keep_shown(
                 if n >= jobs.len() {
                     return;
                 }
-                let k = check(&jobs[n], &shown[n]);
-                **slots[n].lock().unwrap() = k;
+                *out[n].lock().unwrap() = Some(run(n));
             });
         }
     });
-    drop(slots);
-    let b = blinks(&out);
-    (out, b)
+    let out: Vec<(Withhold, bool)> = out
+        .into_iter()
+        .map(|m| m.into_inner().unwrap().unwrap_or_default())
+        .collect();
+    let b = out.iter().any(|o| o.1);
+    (out.into_iter().map(|o| o.0).collect(), b)
 }
 
 /// Test hook: `ALBUMEN_TEST_RELIST_DELAY_MS` delays each background

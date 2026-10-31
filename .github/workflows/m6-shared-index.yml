@@ -123,10 +123,10 @@ jobs:
           grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-nf.log \
             || { echo "::error::the no-flicker tests did not run exactly 4 green with 0 ignored"; exit 1; }
           for v in platform coarse worker_error worker_panic; do
-            grep -E "^M7 NO_FLICKER variant=$v key=ctime .* disappearances=0 h_shown=0 " m7-nf.log \
+            grep -E "^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER variant=$v key=ctime .* disappearances=0 h_shown=0 " m7-nf.log \
               || { echo "::error::no passing M7 NO_FLICKER line for $v"; exit 1; }
           done
-          grep -Ec 'M7 NO_FLICKER_INLINE variant=' m7-nf.log | grep -qx 4 \
+          grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_INLINE variant=' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_INLINE lines (keep_shown and set build under the cap)"; exit 1; }
 
       - name: M7 synced-in photos, unhide while pending, PENDING_LIMIT and exhausted panics (XO 04:41Z; merge-blocking)
@@ -142,7 +142,7 @@ jobs:
           grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out' m7-r2.log \
             || { echo "::error::the XO 04:41Z tests did not run exactly 4 green with 0 ignored"; exit 1; }
           for l in SYNCED_IN UNHIDE_WHILE_PENDING PENDING_LIMIT EXHAUSTED; do
-            grep -E "M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
+            grep -E "^(test m7_[a-z_]* \.\.\. )?M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
           done
 
       - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (bar re-check p95 <= 10 ms, max <= 100 ms; withheld p95 and max <= 1 s)
@@ -262,10 +262,10 @@ jobs:
           grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-nf.log \
             || { echo "::error::the no-flicker tests did not run exactly 4 green with 0 ignored"; exit 1; }
           for v in platform coarse worker_error worker_panic; do
-            grep -E "^M7 NO_FLICKER variant=$v key=changetime .* disappearances=0 h_shown=0 " m7-nf.log \
+            grep -E "^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER variant=$v key=changetime .* disappearances=0 h_shown=0 " m7-nf.log \
               || { echo "::error::no passing M7 NO_FLICKER line for $v"; exit 1; }
           done
-          grep -Ec 'M7 NO_FLICKER_INLINE variant=' m7-nf.log | grep -qx 4 \
+          grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_INLINE variant=' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_INLINE lines (keep_shown and set build under the cap)"; exit 1; }
 
       - name: M7 synced-in photos, unhide while pending, PENDING_LIMIT and exhausted panics (XO 04:41Z; merge-blocking)
@@ -281,7 +281,7 @@ jobs:
           grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out' m7-r2.log \
             || { echo "::error::the XO 04:41Z tests did not run exactly 4 green with 0 ignored"; exit 1; }
           for l in SYNCED_IN UNHIDE_WHILE_PENDING PENDING_LIMIT EXHAUSTED; do
-            grep -E "M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
+            grep -E "^(test m7_[a-z_]* \.\.\. )?M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
           done
 
       - name: M7 change key is ChangeTime (printed and asserted)
