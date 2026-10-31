@@ -84,12 +84,13 @@ jobs:
 
       - name: M7 hidden photos stay hidden at ${{ github.event.inputs.files || '380000' }} files (M6 bars)
         run: |
-          # Diagnostic, no bar: the step log carries "M7 HIDE_POLL_DIAG ... hide_poll_ms="
-          # (one /api/found hide-line refresh after the listing; also in the RESULT line).
+          # hide_poll_ms (one /api/found hide-line refresh after the listing) has a
+          # PROVISIONAL bar <= 150 ms ("M7 HIDE_POLL_BAR provisional ..."), asserted by the
+          # test; binding after 3+ further CI samples under it.
           # First tile <= 2 s, full listing (ready_ms) <= 60 s, and gui child peak RSS <= 332 MiB, with no hidden photo shown.
           ALBUMEN_M7_FILES=$FILES ALBUMEN_M7_BARS=1 M6_TREE_RSS=diag \
             M6_PKG=albumen M6_TEST=m7_hide_persist \
-            M6_RESULT_MAX="first_tile_ms=2000 ready_ms=60000 gui_child_peak_rss_kb=339968 hidden_shown=0" \
+            M6_RESULT_MAX="first_tile_ms=2000 ready_ms=60000 hide_poll_ms=150 gui_child_peak_rss_kb=339968 hidden_shown=0" \
             bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7
 
       - name: The rest of the M7 hide tests
