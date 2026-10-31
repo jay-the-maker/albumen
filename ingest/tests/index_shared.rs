@@ -690,19 +690,39 @@ fn a_stuck_lock_leaves_the_save_pending_and_it_is_retried() {
 /// listing from the other writer never wins. Generations read never go back.
 #[test]
 fn two_writers_never_roll_back() {
+    two_writers(false);
+}
+
+/// XO FRAGO 11:05Z (2): the same, both writers changing the SAME folder
+/// (`d00`, each only its own `w<n>-` files). The newest listing of the folder
+/// already holds every change made before it, so after a writer's own save
+/// its own files there must be exactly as it made them.
+#[test]
+fn two_writers_same_folder_never_roll_back() {
+    two_writers(true);
+}
+
+fn two_writers(same: bool) {
     let library = tempfile::tempdir().unwrap();
     let index_dir = tempfile::tempdir().unwrap();
     let all = make_library(library.path(), 400);
     LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
     let seed = seed();
     let iters = env_num("ALBUMEN_M6_ITERS", 200);
-    println!("M6 TWO_WRITERS seed={seed} iters={iters}");
+    println!("M6 TWO_WRITERS seed={seed} iters={iters} same_folder={same}");
     let rollbacks = Arc::new(AtomicU64::new(0));
     let merges = Arc::new(AtomicU64::new(0));
     let writers: Vec<_> = (0..2u64)
         .map(|w| {
             let (lib, idx) = (library.path().to_path_buf(), index_dir.path().to_path_buf());
-            let mine = move |p: &String| p[1..3].parse::<u64>().unwrap() % 2 == w;
+            let prefix = format!("d00/w{w}-");
+            let mine = move |p: &String| {
+                if same {
+                    p.starts_with(&prefix)
+                } else {
+                    p[1..3].parse::<u64>().unwrap() % 2 == w
+                }
+            };
             let mut own: BTreeSet<String> = all.iter().filter(|p| mine(p)).cloned().collect();
             let (rollbacks, merges) = (rollbacks.clone(), merges.clone());
             std::thread::spawn(move || {
@@ -715,7 +735,11 @@ fn two_writers_never_roll_back() {
                         std::fs::remove_file(lib.join(&pick)).unwrap();
                         own.remove(&pick);
                     } else {
-                        let rel = format!("d{:02}/w{w}-{i:05}.jpg", rng.below(25) * 2 + w);
+                        let rel = if same {
+                            format!("d00/w{w}-{i:05}.jpg")
+                        } else {
+                            format!("d{:02}/w{w}-{i:05}.jpg", rng.below(25) * 2 + w)
+                        };
                         std::fs::write(lib.join(&rel), b"").unwrap();
                         own.insert(rel);
                     }
@@ -746,14 +770,18 @@ fn two_writers_never_roll_back() {
             })
         })
         .collect();
-    let mut want = BTreeSet::new();
+    let mut want: BTreeSet<String> = if same {
+        all.iter().cloned().collect()
+    } else {
+        BTreeSet::new()
+    };
     for w in writers {
         want.extend(w.join().unwrap());
     }
     let last = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
     let (_, saved) = read_saved_file(&index_file(&last)).unwrap();
     println!(
-        "M6 TWO_WRITERS RESULT rollbacks={} kept_writer_merges={}",
+        "M6 TWO_WRITERS RESULT same_folder={same} rollbacks={} kept_writer_merges={}",
         rollbacks.load(Ordering::Relaxed),
         merges.load(Ordering::Relaxed)
     );
