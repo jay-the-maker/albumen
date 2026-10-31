@@ -1360,9 +1360,16 @@ fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     tomb_io();
     if let Some(err) = tomb_error_hook(rel) {
+        // As a real failed read (both read paths below): stamped before the
+        // read and trusted by the same rule, so the failure is kept until
+        // the stamp moves, not re-opened on every request and listing
+        // (the hook used to return an untrusted, unstamped state, which no
+        // real read does: the worker_error keep cost). Fail closed: an Err
+        // verdict hides its photo; a rewrite moves the stamp.
+        let stamp = mtime(&path);
         return TombState {
-            stamp: None,
-            trusted: false,
+            trusted: trusted_at(&stamp, checked_at),
+            stamp,
             verdict: Err(format!("{rel}: {err}; hiding it")),
         };
     }

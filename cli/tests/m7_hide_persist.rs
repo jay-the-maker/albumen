@@ -2159,6 +2159,68 @@ fn a_corrupted_tombstone_in_a_listed_folder_is_in_the_note_within_one_poll() {
     corrupted_tombstone_note_case(70, false);
 }
 
+/// An unreadable tombstone (the worker_error hook) is read once, then kept
+/// by its own stamp: no request re-opens it while it is unchanged (the
+/// Windows worker_error keep cost), its photo stays hidden (fail closed),
+/// and a rewrite moves the stamp, so the next request reads it again.
+#[test]
+fn an_unreadable_tombstone_is_not_reread_while_its_stamp_is_unchanged() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for name in ["IMG_0001.JPG", "IMG_0002.JPG"] {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-err-{name}"),
+        )
+        .unwrap();
+    }
+    let tomb = library.path().join("IMG_0002.JPG.albumen-tombstone");
+    fs::write(&tomb, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    set_mtime(&tomb, old);
+    set_mtime(library.path(), old);
+    let (_gui, addr, _) = start_env(
+        library.path(),
+        work.path(),
+        index.path(),
+        home.path(),
+        &[("ALBUMEN_TEST_TOMB_ERROR", "IMG_0002.JPG.albumen-tombstone")],
+    );
+    ready_found(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    let reads = || found_page(&addr)["hide_recheck_reads"].as_u64().unwrap();
+    assert_eq!(
+        listed(&addr),
+        ["IMG_0001.JPG"],
+        "an unreadable tombstone's photo showed"
+    );
+    let r0 = reads();
+    for _ in 0..10 {
+        assert_eq!(
+            listed(&addr),
+            ["IMG_0001.JPG"],
+            "an unreadable tombstone's photo showed"
+        );
+    }
+    let r1 = reads();
+    println!("M7 UNREADABLE_REREADS requests=10 reads={}", r1 - r0);
+    assert_eq!(
+        r1,
+        r0,
+        "an unchanged unreadable tombstone was read again {} times in 10 requests",
+        r1 - r0
+    );
+    // A rewrite (new stamp) is read on the next request, still hidden.
+    fs::write(&tomb, br#"{"hidden":false,"reason":"hide2"}"#).unwrap();
+    assert_eq!(listed(&addr), ["IMG_0001.JPG"]);
+    assert!(
+        reads() > r1,
+        "a rewritten unreadable tombstone was not read again"
+    );
+}
+
 /// Product Lead 0912Z D2 (A8 for an open writer): in a listed folder (70
 /// more tombstones, so 72: the masked listing on Windows), a valid SHOW
 /// tombstone is rewritten in place to a valid HIDDEN one through a handle
