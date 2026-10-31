@@ -1181,3 +1181,39 @@ fn hidden_and_unreadable_hides_404_video_and_img_with_a_note() {
         "{note}"
     );
 }
+
+/// A8 (XO 00:25Z): `rsync -t`/`-a` brings a hide in and puts the folder's
+/// old mtime back. With folders last changed long ago (so the 2 s re-check
+/// does not apply), a synced-in tombstone plus the folder mtime set back to
+/// exactly what the GUI stamped must still hide the photo on the next request.
+#[test]
+fn an_rsync_style_hide_with_the_old_folder_mtime_restored_still_applies() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let sub = library.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    for name in ["sub/IMG_0001.JPG", "sub/IMG_0003.JPG"] {
+        fs::write(library.path().join(name), format!("synthetic-m7-a8-{name}")).unwrap();
+    }
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    set_mtime(&sub, old);
+    set_mtime(library.path(), old);
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    assert_eq!(listed(&addr), ["sub/IMG_0001.JPG", "sub/IMG_0003.JPG"]);
+    let stamped = fs::metadata(&sub).unwrap().modified().unwrap();
+    assert_eq!(stamped, old);
+    fs::write(
+        sub.join("IMG_0003.JPG.albumen-tombstone"),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    set_mtime(&sub, stamped);
+    assert_eq!(fs::metadata(&sub).unwrap().modified().unwrap(), stamped);
+    let shown = listed(&addr);
+    println!("M7 A8 rsync-style next request: {shown:?}");
+    assert_eq!(shown, ["sub/IMG_0001.JPG"], "rsync-style hide missed");
+    assert_eq!(get(&addr, "/img?p=sub/IMG_0003.JPG").0, 404);
+}
