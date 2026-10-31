@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use albumen_ingest::index::{
     check_saved_file, newest_slot, read_saved_file, slot_files, LibraryIndex, CRASH_ENV,
+    SAVE_PAUSE_ENV,
 };
 
 const CHILD_ENV: &str = "ALBUMEN_M6_CHILD";
@@ -331,6 +332,83 @@ fn stale_writer_merges_instead_of_regressing() {
     assert!(stale.merges >= 1, "the stale writer did not merge");
     let (_, saved) = read_saved_file(&index_file(&stale)).unwrap();
     assert_eq!(sorted(saved), all);
+}
+
+/// XO FRAGO 11:30Z (a): writer A lists d00, then (paused before its save)
+/// writer B deletes a photo in d00, adds one, and saves the newer listing.
+/// A's save must take B's listing: in the saved file, in A's own view (the
+/// search tool keeps its index open) and in a fresh reader (the GUI grid),
+/// no deleted photo comes back and no new photo is missing.
+#[test]
+fn paused_writer_takes_the_newer_listing() {
+    let library = tempfile::tempdir().unwrap();
+    let index_dir = tempfile::tempdir().unwrap();
+    let hand = tempfile::tempdir().unwrap();
+    let mut all = make_library(library.path(), 200);
+    let mut a = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    std::fs::write(library.path().join("d00/a-new.jpg"), b"").unwrap();
+    all.insert("d00/a-new.jpg".into());
+    let deleted = all
+        .iter()
+        .find(|p| p.starts_with("d00/img"))
+        .unwrap()
+        .clone();
+    std::env::set_var(
+        SAVE_PAUSE_ENV,
+        format!("{}|{}", library.path().display(), hand.path().display()),
+    );
+    let lib_a = library.path().to_path_buf();
+    let writer_a = std::thread::spawn(move || {
+        a.refresh().unwrap();
+        a
+    });
+    while !hand.path().join("synced").exists() {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // A has listed d00 (with `deleted`, without `b-new`) and waits.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::remove_file(library.path().join(&deleted)).unwrap();
+    std::fs::write(library.path().join("d00/b-new.jpg"), b"").unwrap();
+    all.remove(&deleted);
+    all.insert("d00/b-new.jpg".into());
+    let mut b = LibraryIndex::open(&lib_a, Some(index_dir.path())).unwrap();
+    b.refresh().unwrap();
+    std::fs::write(hand.path().join("go"), b"").unwrap();
+    let a = writer_a.join().unwrap();
+    let (_, saved) = read_saved_file(&index_file(&a)).unwrap();
+    let saved = sorted(saved);
+    let a_view = sorted(a.paths().to_vec());
+    let grid = sorted(
+        LibraryIndex::open(&lib_a, Some(index_dir.path()))
+            .unwrap()
+            .paths()
+            .to_vec(),
+    );
+    for (what, got) in [("saved", &saved), ("writer_a", &a_view), ("grid", &grid)] {
+        println!(
+            "M6 ROLLBACK {what} merges={} deleted_back={} new_missing={} paths={} want={}",
+            a.merges,
+            got.contains(&deleted),
+            !got.contains("d00/b-new.jpg") || !got.contains("d00/a-new.jpg"),
+            got.len(),
+            all.len()
+        );
+    }
+    for (what, got) in [("saved", &saved), ("writer_a", &a_view), ("grid", &grid)] {
+        assert!(
+            !got.contains(&deleted),
+            "{what}: deleted photo {deleted} came back"
+        );
+        assert!(
+            got.contains("d00/b-new.jpg"),
+            "{what}: B's new photo is missing"
+        );
+        assert!(
+            got.contains("d00/a-new.jpg"),
+            "{what}: A's new photo is missing"
+        );
+        assert_eq!(got, &all, "{what}");
+    }
 }
 
 /// D3: a short or damaged file is refused and rebuilt, never read as a
@@ -766,7 +844,7 @@ fn two_writers(same: bool) {
                         }
                     }
                 }
-                own
+                (own, kept)
             })
         })
         .collect();
@@ -775,9 +853,33 @@ fn two_writers(same: bool) {
     } else {
         BTreeSet::new()
     };
+    let mut kept = None;
     for w in writers {
-        want.extend(w.join().unwrap());
+        let (own, k) = w.join().unwrap();
+        want.extend(own);
+        kept = kept.or(k);
     }
+    // XO 11:27Z (a): the long-lived writer, refreshed once both are done,
+    // must show the other writer's newer listing too (newest wins both ways).
+    let mut kept = kept.expect("writer 0 keeps its index");
+    kept.refresh().unwrap();
+    let (_, kept_saved) = read_saved_file(&index_file(&kept)).unwrap();
+    let kept_saved = sorted(kept_saved);
+    let missing: Vec<_> = want
+        .iter()
+        .filter(|p| !kept_saved.contains(*p))
+        .take(3)
+        .collect();
+    let extra: Vec<_> = kept_saved
+        .iter()
+        .filter(|p| !want.contains(*p))
+        .take(3)
+        .collect();
+    println!("M6 TWO_WRITERS KEPT same_folder={same} missing={missing:?} extra={extra:?}");
+    assert_eq!(
+        kept_saved, want,
+        "the kept writer did not take the newer listing"
+    );
     let last = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
     let (_, saved) = read_saved_file(&index_file(&last)).unwrap();
     println!(

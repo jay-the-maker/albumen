@@ -61,6 +61,36 @@ const FORMAT_V1: &str = "albumen-index/1";
 /// rename, before the directory sync. Either is what a kill there leaves.
 pub const CRASH_ENV: &str = "ALBUMEN_INDEX_CRASH";
 
+/// Test hook (XO FRAGO 11:30Z (a)): `<library root>|<handshake dir>`. A
+/// refresh of exactly that root, after listing and before saving, creates
+/// `<handshake dir>/synced` and waits (at most 30 s) for
+/// `<handshake dir>/go`. It fires once per handshake dir (skipped once
+/// `synced` exists) and never for any other root.
+pub const SAVE_PAUSE_ENV: &str = "ALBUMEN_TEST_SAVE_PAUSE";
+
+fn save_pause(root: &Path) {
+    let Ok(value) = std::env::var(SAVE_PAUSE_ENV) else {
+        return;
+    };
+    let Some((want, dir)) = value.split_once('|') else {
+        return;
+    };
+    let same = Path::new(want)
+        .canonicalize()
+        .map(|p| p == root)
+        .unwrap_or(false);
+    let synced = Path::new(dir).join("synced");
+    if !same || synced.exists() {
+        return;
+    }
+    let _ = std::fs::write(&synced, b"");
+    let go = Path::new(dir).join("go");
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !go.exists() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// Times a refused rename is tried again, waiting 5 ms, then twice as long
 /// each time (about 2.5 s in all).
 const RENAME_RETRIES: u32 = 9;
@@ -221,6 +251,7 @@ impl LibraryIndex {
             self.flatten();
         }
         if stats.dirs_listed > 0 || pruned || self.dirty {
+            save_pause(self.root.canonical());
             match self.save() {
                 Ok(()) => {
                     self.save_error = None;
@@ -244,7 +275,17 @@ impl LibraryIndex {
     ) -> Result<bool, IngestError> {
         let path = self.absolute(&relative);
         stats.dirs_checked += 1;
-        let meta = self.root.metadata_nofollow(&path)?;
+        let meta = match self.root.metadata_nofollow(&path) {
+            Ok(meta) => meta,
+            // A sub-folder removed after its parent was listed: drop it
+            // (fail safe: its photos are gone, never kept stale).
+            Err(IngestError::Io { source, .. })
+                if !relative.is_empty() && source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(self.dirs.remove(&relative).is_some());
+            }
+            Err(err) => return Err(err),
+        };
         let mtime_ns = meta.modified().map(to_ns).unwrap_or(0);
         let mut changed = false;
         let fresh = self.dirs.get(&relative).is_some_and(|record| {
@@ -254,7 +295,15 @@ impl LibraryIndex {
         });
         if !fresh {
             stats.dirs_listed += 1;
-            let entries = list_dir(&self.root, &path)?;
+            let entries = match list_dir(&self.root, &path) {
+                Ok(entries) => entries,
+                Err(IngestError::Io { source, .. })
+                    if !relative.is_empty() && source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(self.dirs.remove(&relative).is_some());
+                }
+                Err(err) => return Err(err),
+            };
             for (name, is_dir) in &entries {
                 if !is_dir {
                     on_file(&join(&relative, name));
@@ -761,7 +810,20 @@ fn list_dir(root: &SourceRoot, dir: &Path) -> Result<Vec<(String, bool)>, Ingest
     for entry in read {
         let entry = entry.map_err(|err| IngestError::io(dir, err))?;
         let path = entry.path();
-        let meta = root.metadata_nofollow(&path)?;
+        #[cfg(test)]
+        list_hook::between(&path);
+        // XO FRAGO 11:30Z (b): an entry removed between the listing and its
+        // stat is gone, not an error: leave it out (the folder's mtime
+        // changed, so the next refresh lists it again).
+        let meta = match root.metadata_nofollow(&path) {
+            Ok(meta) => meta,
+            Err(IngestError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             return Err(IngestError::NonUtf8Filename { path });
@@ -908,4 +970,161 @@ fn parse_saved(text: &str, root: &str) -> Option<Saved> {
         dirs.insert(relative, record);
     }
     Some(Saved { generation, dirs })
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn rec(listed_ns: u64, names: &[&str]) -> DirRecord {
+        DirRecord {
+            mtime_ns: 1,
+            listed_ns,
+            entries: names.iter().map(|n| (n.to_string(), false)).collect(),
+        }
+    }
+
+    /// XO 11:27Z (a): newest wins in both directions. Our older listing of
+    /// a folder gives way to the other writer's newer one (its new photo is
+    /// visible, its removed one gone), and our newer listing is kept over
+    /// their older one. Catches both "ours always wins" and "theirs always
+    /// wins".
+    #[test]
+    fn merge_takes_the_newer_listing_both_ways() {
+        let lib = tempfile::tempdir().unwrap();
+        std::fs::create_dir(lib.path().join("d00")).unwrap();
+        std::fs::create_dir(lib.path().join("d01")).unwrap();
+        let mut ix = LibraryIndex::open(lib.path(), None).unwrap();
+        ix.dirs.insert(
+            String::new(),
+            DirRecord {
+                mtime_ns: 1,
+                listed_ns: 100,
+                entries: vec![("d00".into(), true), ("d01".into(), true)],
+            },
+        );
+        ix.dirs.insert("d00".into(), rec(100, &["old.jpg"]));
+        ix.dirs.insert("d01".into(), rec(300, &["ours-new.jpg"]));
+        let mut theirs = BTreeMap::new();
+        theirs.insert("d00".to_string(), rec(200, &["theirs-new.jpg"]));
+        theirs.insert("d01".to_string(), rec(250, &["theirs-old.jpg"]));
+        ix.merge(theirs);
+        let paths: Vec<&str> = ix.paths.iter().map(|p| p.as_str()).collect();
+        println!("M6 MERGE_BOTH_WAYS paths={paths:?}");
+        assert!(
+            paths.contains(&"d00/theirs-new.jpg"),
+            "their newer listing of d00 lost: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"d00/old.jpg"),
+            "our older listing of d00 kept: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"d01/ours-new.jpg"),
+            "our newer listing of d01 lost: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"d01/theirs-old.jpg"),
+            "their older listing of d01 won: {paths:?}"
+        );
+    }
+}
+
+/// Test hook: runs between a folder's listing and each entry's stat.
+#[cfg(test)]
+mod list_hook {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    thread_local! {
+        pub static REMOVE: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+    pub fn between(entry: &Path) {
+        REMOVE.with(|r| {
+            let mut r = r.borrow_mut();
+            if let Some(i) = r.iter().position(|p| p == entry) {
+                let p = r.remove(i);
+                if p.is_dir() {
+                    std::fs::remove_dir_all(&p).unwrap();
+                } else {
+                    std::fs::remove_file(&p).unwrap();
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod vanish_tests {
+    use super::*;
+
+    /// XO FRAGO 11:30Z (b): entries (files and a folder) removed between a
+    /// folder's listing and their stat do not fail the refresh; they are
+    /// treated as removed. Seeded: ALBUMEN_M6_SEED picks which ones.
+    #[test]
+    fn entries_removed_between_listing_and_stat_are_skipped() {
+        let seed: u64 = std::env::var("ALBUMEN_M6_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let lib = tempfile::tempdir().unwrap();
+        let mut all = std::collections::BTreeSet::new();
+        for d in 0..6 {
+            std::fs::create_dir(lib.path().join(format!("d{d}"))).unwrap();
+            for f in 0..8 {
+                let rel = format!("d{d}/img{f}.jpg");
+                std::fs::write(lib.path().join(&rel), b"").unwrap();
+                all.insert(rel);
+            }
+        }
+        let mut ix = LibraryIndex::open(lib.path(), None).unwrap();
+        // Change every folder so the refresh lists them all again.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let dir_gone = format!("d{}", next(6));
+        let mut gone = Vec::new();
+        for d in 0..6 {
+            let rel = format!("d{d}/new.jpg");
+            std::fs::write(lib.path().join(&rel), b"").unwrap();
+            all.insert(rel);
+            let victim = format!("d{d}/img{}.jpg", next(8));
+            if format!("d{d}") != dir_gone {
+                gone.push(victim);
+            }
+        }
+        let canon = lib.path().canonicalize().unwrap();
+        list_hook::REMOVE.with(|r| {
+            let mut r = r.borrow_mut();
+            for g in &gone {
+                r.push(canon.join(g));
+            }
+            r.push(canon.join(&dir_gone));
+        });
+        let stats = ix
+            .refresh()
+            .expect("a vanished entry must not fail the refresh");
+        let left = list_hook::REMOVE.with(|r| r.borrow().len());
+        all.retain(|p| !gone.contains(p) && !p.starts_with(&format!("{dir_gone}/")));
+        let got: std::collections::BTreeSet<String> = ix.paths().iter().cloned().collect();
+        println!(
+            "M6 VANISH seed={seed} removed_files={} removed_dir={dir_gone} hooks_unfired={left} listed={} paths={}",
+            gone.len(),
+            stats.dirs_listed,
+            got.len()
+        );
+        assert_eq!(left, 0, "every removal ran between a listing and its stat");
+        for g in &gone {
+            assert!(!got.contains(g), "{g} was removed but is listed");
+        }
+        assert!(
+            got.iter().all(|p| !p.starts_with(&format!("{dir_gone}/"))),
+            "{dir_gone} was removed but is listed"
+        );
+        assert_eq!(got, all);
+    }
 }
