@@ -1005,3 +1005,67 @@ fn a_filled_hole_clears_the_note_and_only_real_hides_stay_hidden() {
     }
     println!("M7 recover listing ok for ada, bea, none");
 }
+
+/// M7 follow-up: a hide made after the first listing applies on the very
+/// next GUI request, not only at the next listing. A new receiver tombstone
+/// (beside a photo in a subfolder and at the root) is written after the
+/// grid is ready; the next `/api/library` must not list the photo and
+/// `/img` must not serve it. Synthetic files only; originals bit-exact.
+#[test]
+fn a_new_hide_applies_on_the_next_gui_request() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(library.path().join("sub")).unwrap();
+    let names = ["IMG_0001.JPG", "IMG_0002.JPG", "sub/IMG_0003.JPG"];
+    for name in names {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-next-{name}"),
+        )
+        .unwrap();
+    }
+    let originals: Vec<PathBuf> = names.iter().map(|n| library.path().join(n)).collect();
+    let before = kept(&originals);
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    let images = |addr: &str| -> Vec<String> {
+        let (code, body) = get(addr, "/api/library");
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "ready", "{v}");
+        let mut p: Vec<String> = v["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["path"].as_str().unwrap().to_string())
+            .collect();
+        p.sort();
+        assert_eq!(v["total_images"].as_u64(), Some(p.len() as u64), "{v}");
+        p
+    };
+    ready_found(&addr);
+    assert_eq!(images(&addr), names);
+    assert_eq!(get(&addr, "/img?p=IMG_0002.JPG").0, 200);
+
+    for (k, hide) in ["IMG_0002.JPG", "sub/IMG_0003.JPG"].iter().enumerate() {
+        fs::write(
+            library.path().join(format!("{hide}.albumen-tombstone")),
+            br#"{"hidden":true,"reason":"hide"}"#,
+        )
+        .unwrap();
+        // The very next request, no listing in between.
+        let shown = images(&addr);
+        println!("M7 next-request after hide {k}: {shown:?}");
+        assert!(
+            !shown.contains(&hide.to_string()),
+            "next request still lists {hide}: {shown:?}"
+        );
+        let (code, _) = get(&addr, &format!("/img?p={hide}"));
+        println!("M7 next-request /img {hide}: {code}");
+        assert_eq!(code, 404, "next request still serves {hide}");
+    }
+    assert_eq!(images(&addr), ["IMG_0001.JPG"]);
+    assert_eq!(get(&addr, "/img?p=IMG_0001.JPG").0, 200);
+    assert_eq!(kept(&originals), before, "an original changed");
+}
