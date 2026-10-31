@@ -23,7 +23,8 @@ use std::time::{Duration, Instant, SystemTime};
 use albumen_ingest::hides::hidden_paths;
 use albumen_ingest::index::LibraryIndex;
 
-/// Provisional (XO 00:08Z): one /api/found hide refresh after the listing.
+/// PROVISIONAL, non-blocking (XO 00:18Z): one /api/found hide refresh after
+/// the listing. Printed only until 3+ CI samples exist; never asserted.
 const HIDE_POLL_BAR_MS: f64 = 150.0;
 
 struct Gui(Child);
@@ -535,8 +536,8 @@ fn hidden_photos_stay_hidden_at_scale() {
     let hide_poll_ms = poll_began.elapsed().as_secs_f64() * 1000.0;
     println!("M7 HIDE_POLL_DIAG files={files} family_marks={marks} hide_poll_ms={hide_poll_ms:.1}");
     println!(
-        "M7 HIDE_POLL_BAR provisional hide_poll_ms={hide_poll_ms:.1} bar_ms={HIDE_POLL_BAR_MS} \
-         under={} (binding after 3+ further CI samples under it)",
+        "M7 HIDE_POLL_BAR PROVISIONAL non-blocking hide_poll_ms={hide_poll_ms:.1} \
+         bar_ms={HIDE_POLL_BAR_MS} under={} (print only until 3+ CI samples)",
         hide_poll_ms <= HIDE_POLL_BAR_MS
     );
     let (_, body) = get(&addr, "/api/library");
@@ -567,10 +568,6 @@ fn hidden_photos_stay_hidden_at_scale() {
         assert!(
             first_tile_ms <= 2000.0,
             "first tile {first_tile_ms:.1} ms over 2 s"
-        );
-        assert!(
-            hide_poll_ms <= HIDE_POLL_BAR_MS,
-            "PROVISIONAL bar: hide poll {hide_poll_ms:.1} ms over {HIDE_POLL_BAR_MS} ms"
         );
         let rss = rss.expect("peak RSS unmeasured on this OS");
         assert!(rss <= 339_968, "gui child peak RSS {rss} kB over 332 MiB");
