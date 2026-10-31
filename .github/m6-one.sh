@@ -57,8 +57,10 @@ rc=0
   --exact "$name" --nocapture --test-threads=1 2>&1 | tee "$log" || rc=$?
 kill "$ticker" 2>/dev/null || true
 wait "$ticker" 2>/dev/null || true
-read -r gap skew < <(awk 'NR==1{w0=$1;u0=$2} NR>1{g=($1-pw)*1000; if(g>mg)mg=g} {pw=$1; s=(($1-w0)-($2-u0))*1000; if(s<0)s=-s; if(s>ms)ms=s} END{printf "%.1f %.1f\n", mg+0, ms+0}' "$ticks")
-echo "M6 $tag FREEZE_TICKER max_gap_ms=$gap wall_vs_uptime_skew_ms=$skew"
+# Max gap with its wall-clock bounds (UTC epoch ms of the tick before and after).
+read -r gap skew gs ge < <(awk 'NR==1{w0=$1;u0=$2} NR>1{g=($1-pw)*1000; if(g>mg){mg=g;gs=pw;ge=$1}} {pw=$1; s=(($1-w0)-($2-u0))*1000; if(s<0)s=-s; if(s>ms)ms=s} END{printf "%.1f %.1f %.0f %.0f\n", mg+0, ms+0, gs*1000, ge*1000}' "$ticks")
+iso_ms() { [ "$1" -gt 0 ] 2>/dev/null && date -u -d "@$(( $1 / 1000 )).$(printf %03d $(( $1 % 1000 )))" +%Y-%m-%dT%H:%M:%S.%3NZ || echo NA; }
+echo "M6 $tag FREEZE_TICKER max_gap_ms=$gap wall_vs_uptime_skew_ms=$skew max_gap_start_epoch_ms=$gs max_gap_end_epoch_ms=$ge max_gap_start_utc=$(iso_ms "$gs") max_gap_end_utc=$(iso_ms "$ge")"
 # A freeze voids timing only: if the test failed and did not get past its
 # correctness asserts (no "M6 <tag> CORRECTNESS_OK"), that is a real FAIL.
 froze=0

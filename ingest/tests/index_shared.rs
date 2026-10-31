@@ -156,14 +156,35 @@ fn gui_and_search_tool_share_one_index() {
             let mut times_us = Vec::new();
             // (start offset ms from the reader's start, UTC epoch ms, duration us)
             let mut slow_at = Vec::new();
+            // On-CPU ns of the reader thread per check, from its schedstat.
+            let mut cpu_ns_per_read: Vec<u64> = Vec::new();
             let start = Instant::now();
+            let mut probe = ReadProbe::open();
             while !stop.load(Ordering::Relaxed) {
+                let before = probe.sample();
                 let t = Instant::now();
                 let wall = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis());
                 let checked = check_saved_file(&file);
                 let us = t.elapsed().as_micros() as u64;
+                let after = probe.sample();
+                if let (Some(b), Some(a)) = (before, after) {
+                    let cpu_ns = a.on_cpu_ns.saturating_sub(b.on_cpu_ns);
+                    cpu_ns_per_read.push(cpu_ns);
+                    if us > 20_000 {
+                        println!(
+                            "M6 X2 READ_OVER_20MS seed={seed} utc={} utc_epoch_ms={wall} read_ms={:.2} \
+                             on_cpu_ms={:.2} runq_wait_ms={:.2} steal_ticks={} steal_ms_approx={}",
+                            iso_utc_ms(wall),
+                            us as f64 / 1000.0,
+                            cpu_ns as f64 / 1e6,
+                            a.runq_ns.saturating_sub(b.runq_ns) as f64 / 1e6,
+                            a.steal_ticks.saturating_sub(b.steal_ticks),
+                            a.steal_ticks.saturating_sub(b.steal_ticks) * 10,
+                        );
+                    }
+                }
                 times_us.push(us);
                 max_read_us.fetch_max(us, Ordering::Relaxed);
                 if us > 100_000 {
@@ -175,6 +196,17 @@ fn gui_and_search_tool_share_one_index() {
                     failures.fetch_add(1, Ordering::Relaxed);
                     first_failure.lock().unwrap().get_or_insert(err);
                 }
+            }
+            cpu_ns_per_read.sort_unstable();
+            if !cpu_ns_per_read.is_empty() {
+                let n = cpu_ns_per_read.len();
+                let mean = cpu_ns_per_read.iter().sum::<u64>() as f64 / n as f64 / 1e6;
+                let p95 = cpu_ns_per_read[(n * 95 / 100).min(n - 1)] as f64 / 1e6;
+                let max = cpu_ns_per_read[n - 1] as f64 / 1e6;
+                println!(
+                    "M6 X2 READ_CPU seed={seed} reads={n} on_cpu_mean_ms={mean:.3} on_cpu_p95_ms={p95:.3} on_cpu_max_ms={max:.2} probe_cost_us_per_read={:.1}",
+                    probe.cost_us()
+                );
             }
             (times_us, slow_at)
         })
@@ -652,4 +684,128 @@ fn a_stuck_lock_leaves_the_save_pending_and_it_is_retried() {
         "M6 D1b held_refresh_ms={held_ms} generation {before_generation} -> {after_generation} \
          saved_after_release=true"
     );
+}
+
+/// One sample around a read: the reader thread's on-CPU and run-queue ns
+/// (thread CPU clock; run-queue wait from `/proc/thread-self/schedstat`, tick-granular) and system-wide steal ticks (`/proc/stat`,
+/// USER_HZ, usually 10 ms each). Both files are held open and re-read with
+/// `pread`, so a sample is two small reads. Linux only; elsewhere `None`.
+struct ReadProbe {
+    #[cfg(target_os = "linux")]
+    files: Option<(std::fs::File, std::fs::File)>,
+    spent: Duration,
+    samples: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ProbeSample {
+    on_cpu_ns: u64,
+    runq_ns: u64,
+    steal_ticks: u64,
+}
+
+impl ReadProbe {
+    fn open() -> Self {
+        ReadProbe {
+            #[cfg(target_os = "linux")]
+            files: std::fs::File::open("/proc/thread-self/schedstat")
+                .and_then(|s| Ok((s, std::fs::File::open("/proc/stat")?)))
+                .ok(),
+            spent: Duration::ZERO,
+            samples: 0,
+        }
+    }
+
+    fn sample(&mut self) -> Option<ProbeSample> {
+        let t = Instant::now();
+        let out = self.read();
+        self.spent += t.elapsed();
+        self.samples += 1;
+        out
+    }
+
+    /// Mean cost of a sample, in microseconds. Two samples are taken per read.
+    fn cost_us(&self) -> f64 {
+        if self.samples == 0 {
+            return 0.0;
+        }
+        self.spent.as_secs_f64() * 1e6 / self.samples as f64 * 2.0
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read(&mut self) -> Option<ProbeSample> {
+        use std::os::unix::fs::FileExt;
+        let (sched, stat) = self.files.as_ref()?;
+        let mut buf = [0u8; 256];
+        let n = sched.read_at(&mut buf, 0).ok()?;
+        let mut it = std::str::from_utf8(&buf[..n]).ok()?.split_whitespace();
+        // schedstat's run time lags up to a tick for a running thread; the
+        // thread CPU clock is exact.
+        let _ = it.next()?;
+        let on_cpu_ns = thread_cpu_ns()?;
+        let runq_ns = it.next()?.parse().ok()?;
+        // The first line of /proc/stat: "cpu  user nice system idle iowait irq softirq steal ...".
+        let mut line = [0u8; 256];
+        let n = stat.read_at(&mut line, 0).ok()?;
+        let text = std::str::from_utf8(&line[..n]).ok()?;
+        let steal_ticks = text.lines().next()?.split_whitespace().nth(8)?.parse().ok()?;
+        Some(ProbeSample {
+            on_cpu_ns,
+            runq_ns,
+            steal_ticks,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read(&mut self) -> Option<ProbeSample> {
+        None
+    }
+}
+
+/// This thread's CPU time, `clock_gettime(CLOCK_THREAD_CPUTIME_ID)`.
+#[cfg(target_os = "linux")]
+fn thread_cpu_ns() -> Option<u64> {
+    #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
+    extern "C" {
+        fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+    }
+    const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    // SAFETY: a valid out pointer to a timespec-shaped struct (64-bit Linux).
+    let rc = unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    (rc == 0).then(|| ts.sec as u64 * 1_000_000_000 + ts.nsec as u64)
+}
+
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ` for UTC epoch milliseconds.
+fn iso_utc_ms(epoch_ms: u128) -> String {
+    let ms = (epoch_ms % 1000) as u64;
+    let secs = (epoch_ms / 1000) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
+}
+
+#[test]
+fn iso_utc_ms_formats_known_instants() {
+    assert_eq!(iso_utc_ms(0), "1970-01-01T00:00:00.000Z");
+    assert_eq!(iso_utc_ms(1_793_408_415_853), "2026-10-31T01:00:15.853Z");
+    assert_eq!(iso_utc_ms(951_782_400_001), "2000-02-29T00:00:00.001Z");
 }
