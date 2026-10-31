@@ -182,3 +182,67 @@ CI: the Linux diagnostic step now fails if any `M7 RECHECK_DIAG` line has p95 > 
 - **Change-key line.** On Windows the line was missing because the "M7 hide tests" step runs without `--nocapture`. The test ran and passed, but its println output was captured. A new Windows step runs only that test with `--nocapture` and requires `M7 change key: key=changetime changetime_keys>0 key_failures=0`.
 - **Bars.** `.github/m7-recheck-bar.sh` checks every `M7 RECHECK_DIAG files=` line. Each line must have numeric `recheck_p95_ms` and `recheck_max_ms`; a missing field fails. It requires p95 <= 10 ms and max <= 100 ms. The Linux 380k step and the Windows 50k step both use it.
 - **Known gap.** At k=0 the 9000 new tombstones in the 10k level have to be read; they are new, so this can't be avoided. That cost was 378.3 ms on Windows a26fd4f, and only CI can show whether one open per tombstone brings it under 100 ms. If it doesn't, the Windows 10k bar fails, and that is the intended blocking result.
+
+## XO 03:22Z: background confirmation, folder-list counts, NTFS writer-open
+
+Ruling (Product Lead, not Jay): max <= 100 ms at k=0 after a Windows sync
+with 10,000 hides, not relaxed. a26fd4f's Windows 50k run measured k=0
+378.3 ms (9000 reads, 26 folders listed) and 250-320 ms for listing 26
+folders alone, so the request path no longer lists or reads changed folders
+itself after the first answer:
+
+- Each check stamps every folder (one stat each). An unchanged trusted folder
+  is handled inline as before. Any other folder is handed to background
+  workers (up to 8 threads) that list it and read its tombstones.
+- The request waits at most 40 ms (INLINE_BUDGET) for that work. A folder not
+  confirmed by then is *pending*: every photo in it is hidden (A8, fail
+  closed) until a later check applies the worker's result. A new hide is
+  therefore hidden on the first request either way.
+- A result is applied by folder name across a new listing generation; its
+  stamp was taken before the listing, so a folder that changed again is
+  simply listed again. A photo only withheld comes back by restoring the
+  unfiltered view (no re-list); a real unhide still re-lists as before.
+- The first check of a server (not primed) still runs in full inline.
+- `/api/found` adds `hide_pending_dirs`, `hide_withheld_dirs` (folders that
+  went through the queue), `hide_withheld_max_ms`, `hide_withheld_last_ms`
+  (hand-over to applied), and `hide_writer_untrusted`.
+- Photos come back on the next check after the worker finishes: the UI's
+  polling is what applies them (no push).
+- Within a folder's same-tick window an untrusted folder is re-queued on each
+  check, so its photos can be withheld again briefly (fail closed, by design).
+
+Box numbers (50k files, 50 folders, release, direction only, not evidence;
+withheld = from the end of the tombstone writes until no folder was pending):
+
+| key | hides | withheld_ms | k=0 request ms | max over 100 | p95 |
+|---|---|---|---|---|---|
+| ctime | 1,000 | 16.7 | 10.9 | 10.9 | 3.0 |
+| ctime | 10,000 | 69.3 | 22.4 | 22.4 | 5.8 |
+| portable (forced) | 1,000 | 29.6 | 22.1 | 22.3 | 18.5 |
+| portable (forced) | 10,000 | 120.8 | 51.0 | 51.0 | 43.0 |
+
+Forced portable misses the p95 <= 10 ms bar on the box at every level
+(steady 15-16 ms, re-listing 26-50 folders per check): it is a test mode and
+CI does not run the diag with it.
+
+NTFS times with a writer open: MS Learn "File Times" says the only guarantee
+is that a time is right once the handle that changed the file is closed, and
+the last write time is not fully updated until every writing handle closes;
+MS Open Specs note NTFS set the write time at close up to Server 2016 and at
+each write from Server 2019. So a stamp may lag while a writer is open. The
+design fails closed: (1) the Windows tombstone read keeps its stamp only if
+ChangeTime, LastWriteTime and size (FileStandardInfo) are identical before
+and after the read on the same handle and the bytes read are the whole file,
+else the tombstone is untrusted and read again next check; (2) the bytes are
+read on every untrusted or changed stamp, and the writer's close moves the
+times, so a stamp taken while it was open never matches again. Residual: a
+writer that rewrites a tombstone in place at the same size and never closes
+it, on a filesystem that lags ChangeTime, is not seen until it closes. The
+Windows-only unit test `gui::tests::ntfs_changetime_while_a_writer_is_open`
+(CI Windows step) prints the before/open/after times and asserts the bytes
+are seen at once and the stamp moves at close.
+
+Folder listing across a sync (`only_changed_folders_are_listed_across_a_sync`,
+box ctime): first request after a hide in one of three folders lists 1
+folder; after its window 1 more; then 0 over 3 checks; a recreated folder
+lists 1 and its new hide applies on the first request.

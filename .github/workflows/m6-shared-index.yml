@@ -102,28 +102,29 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 22 + 2 = 24 (the coarse-ctime test is Unix-only).
+          # so they are filtered out here and run in their own steps: 23 + 2 = 25 (the coarse-ctime test is Unix-only).
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 22 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 22 tests green (2 filtered out)"; exit 1; }
+          grep -Eq '^test result: ok\. 23 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 23 tests green (2 filtered out)"; exit 1; }
 
       - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (print-only)
-        # Non-blocking: prints "M7 RECHECK_DIAG tombstones=N ... recheck_p95_ms ... img_p95_ms"
-        # for 0, 1k and 10k tombstones (100 re-check samples each). Timing is
-        # print-only (criterion 2 bars pending 100 samples), but the step fails
-        # unless the test ran (exactly 1 passed) and printed 3+ RECHECK_DIAG lines.
+        # Blocking: prints "M7 RECHECK_DIAG tombstones=N ... recheck_p95_ms ... img_p95_ms"
+        # and "M7 WITHHELD ..." for 0, 1k and 10k tombstones (100 re-check
+        # samples each); fails unless exactly 1 passed, 3+ RECHECK_DIAG lines
+        # printed, and every line meets p95 <= 10 ms and max <= 100 ms.
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           set -o pipefail
           ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
           grep -E '^M7 RECHECK_DIAG' m7-recheck.log
+          grep -E '^M7 WITHHELD' m7-recheck.log || true
           # XO 02:53Z/03:09Z bar (blocking): both fields required on every line,
           # p95 <= 10 ms and max <= 100 ms over ALL samples.
           bash .github/m7-recheck-bar.sh m7-recheck.log
@@ -198,11 +199,11 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 21 + 2 = 23.
+          # so they are filtered out here and run in their own steps: 22 + 2 = 24.
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 21 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 21 tests green (2 filtered out) on Windows"; exit 1; }
+          grep -Eq '^test result: ok\. 22 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 22 tests green (2 filtered out) on Windows"; exit 1; }
 
       - name: M7 change key is ChangeTime (printed and asserted)
         # XO 03:12Z: the step above runs without --nocapture, so the test's
@@ -218,11 +219,26 @@ jobs:
           grep -E '^M7 change key: key=changetime changetime_keys=[1-9][0-9]* key_failures=0 ' m7-key.log \
             || { echo "::error::no 'M7 change key: key=changetime changetime_keys>0 key_failures=0' line"; exit 1; }
 
+      - name: NTFS ChangeTime while a writer holds a tombstone open (printed and asserted)
+        # XO 03:22Z (2): MS docs only promise file times at handle close.
+        # Prints ChangeTime/LastWriteTime before, while open and after close;
+        # asserts the new bytes are seen at once and the stamp moves at close.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --features test-hooks --bin albumen \
+            gui::tests::ntfs_changetime_while_a_writer_is_open -- --exact --nocapture 2>&1 | tee m7-ntfs.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-ntfs.log \
+            || { echo "::error::the NTFS ChangeTime test did not run exactly 1 test green"; exit 1; }
+          grep -E '^M7 NTFS_CHANGETIME ' m7-ntfs.log \
+            || { echo "::error::no 'M7 NTFS_CHANGETIME' line"; exit 1; }
+
       - name: M7 re-check and /img diagnostics at 50,000 files (bar p95 <= 10 ms, max <= 100 ms)
-        # Non-blocking. 50k, not 380k: writing and listing 380k files on a
-        # Windows runner would take a large share of the job; 50k keeps it
-        # short. Raise it once a run shows the time. Timing is print-only, but
-        # the step fails unless exactly 1 passed and 3+ RECHECK_DIAG lines printed.
+        # Blocking (XO 03:22Z; Product Lead: max <= 100 ms at k=0 after a
+        # 10k-hide sync, not relaxed). 50k, not 380k: writing and listing
+        # 380k files on a Windows runner would take a large share of the job.
+        # Fails unless exactly 1 passed, 3+ RECHECK_DIAG lines printed, and
+        # every line meets p95 <= 10 ms and max <= 100 ms.
         # No separate build step on Windows: the M7 hide tests step builds.
         if: ${{ !cancelled() }}
         run: |
@@ -230,10 +246,11 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
           grep -E '^M7 RECHECK_DIAG' m7-recheck.log
+          grep -E '^M7 WITHHELD' m7-recheck.log || true
           # XO 03:12Z: the same bar on Windows 50k (blocking).
           bash .github/m7-recheck-bar.sh m7-recheck.log

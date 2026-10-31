@@ -1374,6 +1374,119 @@ fn an_unchanged_request_reads_no_tombstone() {
     assert!(reads(&addr) > after);
 }
 
+/// XO 03:22Z (1): across a sync only the changed folder is listed again,
+/// a new hide is hidden on the first request, a recreated folder is listed
+/// again, and unchanged folders are listed 0 times.
+#[test]
+fn only_changed_folders_are_listed_across_a_sync() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let write_dir = |d: &str| {
+        let dir = library.path().join(d);
+        fs::create_dir_all(&dir).unwrap();
+        for n in 1..=2 {
+            let p = dir.join(format!("IMG_000{n}.JPG"));
+            fs::write(&p, format!("synthetic-m7-folders-{d}-{n}")).unwrap();
+            set_mtime(&p, old);
+        }
+        set_mtime(&dir, old);
+    };
+    for d in ["a", "b", "c"] {
+        write_dir(d);
+    }
+    set_mtime(library.path(), old);
+    // Let every ctime (changed by the writes above) leave the window.
+    std::thread::sleep(Duration::from_millis(2100));
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    let all = [
+        "a/IMG_0001.JPG",
+        "a/IMG_0002.JPG",
+        "b/IMG_0001.JPG",
+        "b/IMG_0002.JPG",
+        "c/IMG_0001.JPG",
+        "c/IMG_0002.JPG",
+    ];
+    assert_eq!(listed(&addr), all);
+    let dirs = |addr: &str| found_page(addr)["hide_dirs_listed"].as_u64().unwrap();
+    // Settle: a folder first listed inside its window is listed once more.
+    std::thread::sleep(Duration::from_millis(2100));
+    listed(&addr);
+    let before = dirs(&addr);
+    for _ in 0..3 {
+        assert_eq!(listed(&addr), all);
+    }
+    assert_eq!(dirs(&addr) - before, 0, "an unchanged folder was listed");
+    // Sync: a hide lands in b only.
+    fs::write(
+        library.path().join("b/IMG_0002.JPG.albumen-tombstone"),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    let before = dirs(&addr);
+    let hid_b = [
+        "a/IMG_0001.JPG",
+        "a/IMG_0002.JPG",
+        "b/IMG_0001.JPG",
+        "c/IMG_0001.JPG",
+        "c/IMG_0002.JPG",
+    ];
+    assert_eq!(
+        listed(&addr),
+        hid_b,
+        "the new hide was not hidden on the first request"
+    );
+    let first = dirs(&addr) - before;
+    // Wait out b's window: b may be listed once more, a and c never.
+    std::thread::sleep(Duration::from_millis(2100));
+    let before = dirs(&addr);
+    assert_eq!(listed(&addr), hid_b);
+    let settle = dirs(&addr) - before;
+    let before = dirs(&addr);
+    for _ in 0..3 {
+        assert_eq!(listed(&addr), hid_b);
+    }
+    let steady = dirs(&addr) - before;
+    println!("M7 FOLDERS_LISTED sync_first={first} after_window={settle} unchanged={steady}");
+    assert_eq!(
+        first, 1,
+        "only the changed folder is listed on the first request"
+    );
+    assert!(settle <= 1, "unchanged folders were listed: {settle}");
+    assert_eq!(steady, 0, "unchanged folders were listed");
+    // Recreate c (same names; old mtimes put back where the change key is
+    // the ctime, so only the key can tell) with a hide in it.
+    let key = found_page(&addr)["hide_key"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    fs::remove_dir_all(library.path().join("c")).unwrap();
+    write_dir("c");
+    let tomb = library.path().join("c/IMG_0001.JPG.albumen-tombstone");
+    fs::write(&tomb, br#"{"hidden":true,"reason":"hide"}"#).unwrap();
+    if key != "portable" {
+        set_mtime(&tomb, old);
+        set_mtime(&library.path().join("c"), old);
+    }
+    let before = dirs(&addr);
+    assert_eq!(
+        listed(&addr),
+        [
+            "a/IMG_0001.JPG",
+            "a/IMG_0002.JPG",
+            "b/IMG_0001.JPG",
+            "c/IMG_0002.JPG"
+        ],
+        "the recreated folder was not listed again"
+    );
+    let recreated = dirs(&addr) - before;
+    println!("M7 FOLDERS_LISTED recreated={recreated} key={key}");
+    assert_eq!(recreated, 1, "only the recreated folder is listed");
+}
+
 /// XO 02:30Z (b): the change key is the platform's own (ctime on Unix,
 /// ChangeTime via GetFileInformationByHandleEx on Windows), it was taken,
 /// and no key failed (no silent fallback). The portable key only when a
@@ -1739,9 +1852,13 @@ fn m7_recheck_and_img_diagnostics() {
             (
                 f["hide_recheck_reads"].as_u64().unwrap(),
                 f["hide_dirs_listed"].as_u64().unwrap(),
+                f["hide_pending_dirs"].as_u64().unwrap(),
             )
         };
         let mut before = counters(&addr);
+        // XO 03:22Z: from the sync until no folder is pending any more
+        // (every changed folder confirmed and its photos back).
+        let mut withheld: Option<(f64, usize)> = None;
         for k in 0..100 {
             if k % 2 == 0 {
                 fs::write(&touch, b"x").unwrap();
@@ -1757,6 +1874,9 @@ fn m7_recheck_and_img_diagnostics() {
                 sync_window.push(ms);
             }
             let after = counters(&addr);
+            if withheld.is_none() && after.2 == 0 {
+                withheld = Some((synced.elapsed().as_secs_f64() * 1000.0, k));
+            }
             slow.push((ms, k, at, after.0 - before.0, after.1 - before.1));
             before = after;
             assert_eq!(code, 200);
@@ -1778,6 +1898,16 @@ fn m7_recheck_and_img_diagnostics() {
             assert_eq!(code, 200);
         }
         let _ = fs::remove_file(&touch);
+        let f = found_page(&addr);
+        println!(
+            "M7 WITHHELD files={files} tombstones={written} key={} withheld_ms={} confirmed_at_k={} \
+             withheld_max_ms={} withheld_dirs={}",
+            f["hide_key"].as_str().unwrap_or("?"),
+            withheld.map_or("n/a".into(), |w| format!("{:.1}", w.0)),
+            withheld.map_or("n/a".into(), |w| w.1.to_string()),
+            f["hide_withheld_max_ms"],
+            f["hide_withheld_dirs"],
+        );
         let p95 = |v: &[f64]| {
             if v.is_empty() {
                 "n/a".to_string()

@@ -928,6 +928,8 @@ struct Fresh {
     /// is served as is.
     version: u64,
     hidden: Arc<std::collections::HashSet<String>>,
+    /// The part of `hidden` that is only withheld (pending folders).
+    withheld: std::collections::HashSet<String>,
 }
 
 #[derive(Default)]
@@ -938,6 +940,10 @@ struct DirState {
     trusted: bool,
     /// The folder could not be listed: its photos are hidden (fail closed).
     unlisted: bool,
+    /// Being listed and read in the background (A8, XO 03:22Z): until that
+    /// is done, every photo in the folder is hidden (fail closed). The
+    /// state itself is with the worker; `since` is when it was handed over.
+    pending: Option<std::time::Instant>,
     tombs: std::collections::BTreeMap<String, TombState>,
 }
 
@@ -1405,13 +1411,65 @@ fn stamp_and_read_windows(p: &Path) -> Option<(Option<(SystemTime, u64)>, Result
         KEY_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         None
     };
+    // XO 03:22Z (2): NTFS only promises a file's times are right once the
+    // handle that changed it is closed, so a writer still holding the file
+    // open may have changed bytes the stamp does not show yet. Fail closed:
+    // the stamp is kept only if the size and times are the same before and
+    // after the read on this handle and the bytes read are the whole file;
+    // otherwise the tombstone is untrusted and read again next time (the
+    // writer's close then changes the times, which forces a read anyway).
+    let size_before = end_of_file(&file);
     let mut bytes = Vec::new();
     let verdict = match file.read_to_end(&mut bytes) {
         Ok(_) => albumen_ingest::hides::parse_receiver_tombstone(&bytes),
         Err(err) => Err(format!("could not read ({err})")),
     };
-    Some((stamp, verdict))
+    let mut again: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    let ok2 = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileBasicInfo,
+            (&mut again as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } != 0;
+    let steady = ok2
+        && again.ChangeTime == basic.ChangeTime
+        && again.LastWriteTime == basic.LastWriteTime
+        && size_before.is_some()
+        && size_before == end_of_file(&file)
+        && size_before == Some(bytes.len() as u64);
+    if stamp.is_some() && !steady {
+        WRITER_UNTRUSTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    Some((stamp.filter(|_| steady), verdict))
 }
+
+/// A file's size from its handle (FileStandardInfo), as NTFS keeps it now.
+#[cfg(windows)]
+fn end_of_file(file: &std::fs::File) -> Option<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
+    };
+    let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is open for the call and the buffer is a
+    // FILE_STANDARD_INFO of the size passed.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileStandardInfo,
+            (&mut info as *mut FILE_STANDARD_INFO).cast(),
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    } != 0;
+    ok.then_some(info.EndOfFile as u64)
+}
+
+/// Tombstones left untrusted because their size or times moved during
+/// the read (a writer still open, Windows): `hide_writer_untrusted`.
+static WRITER_UNTRUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(not(windows))]
 fn change_time(_: &Path) -> Option<u64> {
@@ -1542,17 +1600,18 @@ fn hidden_for(
             rebuild: true,
             version,
             hidden: Default::default(),
+            withheld: Default::default(),
         });
     }
     let f = fresh.as_mut().unwrap();
     let v = Arc::clone(&f.base);
     let checked_at = SystemTime::now();
     let primed = f.primed;
-    // One folder: unchanged (stamp only its non-hiding tombstones) or
-    // listed again. Returns whether the hidden set may have changed.
-    let one = |d: &String, ds: &mut DirState, st: Option<(SystemTime, u64)>| -> bool {
+    // An unchanged folder: stamp only its non-hiding tombstones (inline,
+    // cheap). Returns whether the hidden set may have changed.
+    let cheap = |ds: &mut DirState| -> bool {
         let mut changed = false;
-        if primed && ds.trusted && st.is_some() && st == ds.stamp {
+        {
             for (rel, t) in ds.tombs.iter_mut() {
                 // A tombstone that hides is not re-read in an unchanged
                 // folder (even in its first tick): only an unhide or a note
@@ -1571,97 +1630,56 @@ fn hidden_for(
                 changed |= new.verdict != t.verdict;
                 *t = new;
             }
-            return changed;
         }
-        // Listed again (stamp taken before the listing). The hidden set
-        // is rebuilt only if a tombstone came, went or reads differently.
-        ds.trusted = trusted_at(&st, checked_at);
-        ds.stamp = st;
-        let mut old = std::mem::take(&mut ds.tombs);
-        DIRS_LISTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match std::fs::read_dir(lib.join(d)) {
-            Ok(rd) => {
-                changed |= ds.unlisted;
-                ds.unlisted = false;
-                for e in rd.flatten() {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    if !name.ends_with(TOMBSTONE_SUFFIX) || name == TOMBSTONE_SUFFIX {
-                        continue;
-                    }
-                    let rel = if d.is_empty() {
-                        name
-                    } else {
-                        format!("{d}/{name}")
-                    };
-                    let keep = old.remove(&rel).filter(|t| {
-                        (t.trusted || t.verdict == Ok(true)) && t.stamp.is_some() && {
-                            if key_kind() == KeyKind::Portable {
-                                TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            mtime(&lib.join(&rel)) == t.stamp
-                        }
-                    });
-                    let t = match keep {
-                        Some(t) => t,
-                        None => {
-                            let t = read_tomb(lib, &rel, checked_at);
-                            changed = true;
-                            t
-                        }
-                    };
-                    ds.tombs.insert(rel, t);
-                }
-            }
-            Err(err) => {
-                eprintln!("albumen gui: hide: can't list {d} ({err}); hiding its photos");
-                if !ds.unlisted {
-                    changed = true;
-                }
-                ds.unlisted = true;
-                ds.trusted = false;
-            }
-        }
-        changed |= !old.is_empty();
         changed
     };
-    // Stamp every folder first; folders that must be listed again (a
-    // post-sync rebuild touches every folder) are done on up to 8 threads.
-    let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
-    let relist = f
-        .state
-        .iter()
-        .zip(&sts)
-        .filter(|(ds, st)| !(primed && ds.trusted && st.is_some() && **st == ds.stamp))
-        .count();
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .clamp(1, 8)
-        .min(relist);
+    // Stamp every folder first (one stat each). Unchanged trusted folders
+    // take the cheap path; the rest are listed again and their tombstones
+    // read on up to 8 threads. Before the first answer that is done in
+    // full; after it, the request waits at most INLINE_BUDGET for that work
+    // and every folder not done by then stays pending (all its photos
+    // hidden, fail closed) until the background finishes it (XO 03:22Z),
+    // so a request never waits on thousands of tombstone reads.
     let mut changed = !primed;
-    if threads <= 1 {
-        for ((d, ds), st) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts) {
-            changed |= one(d, ds, st);
+    changed |= drain_relists(f);
+    let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
+    let mut jobs: Vec<RelistJob> = Vec::new();
+    for (i, ((d, ds), st)) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts).enumerate() {
+        if ds.pending.is_some() {
+            continue;
         }
-    } else {
-        // Interleaved so each thread gets a share of the listed folders.
-        type Job<'a> = (&'a String, &'a mut DirState, Option<(SystemTime, u64)>);
-        let mut work: Vec<Vec<Job>> = (0..threads).map(|_| Vec::new()).collect();
-        for (i, ((d, ds), st)) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts).enumerate() {
-            work[i % threads].push((d, ds, st));
+        if primed && ds.trusted && st.is_some() && st == ds.stamp {
+            changed |= cheap(ds);
+        } else {
+            let taken = std::mem::take(ds);
+            ds.pending = Some(std::time::Instant::now());
+            jobs.push(RelistJob {
+                i,
+                dir: d.clone(),
+                ds: taken,
+                st,
+            });
         }
-        let one = &one;
-        changed |= std::thread::scope(|sc| {
-            let hs: Vec<_> = work
-                .into_iter()
-                .map(|w| {
-                    sc.spawn(move || {
-                        w.into_iter()
-                            .fold(false, |c, (d, ds, st)| one(d, ds, st) | c)
-                    })
-                })
-                .collect();
-            hs.into_iter().fold(false, |c, h| h.join().unwrap() | c)
-        });
+    }
+    if !jobs.is_empty() {
+        changed = true;
+        PENDING_DIRS.fetch_add(jobs.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        let rx = spawn_relists(lib.to_path_buf(), jobs, checked_at, f.generation);
+        let deadline = (primed).then(|| std::time::Instant::now() + INLINE_BUDGET);
+        loop {
+            let got = match deadline {
+                None => rx.recv().ok(),
+                Some(t) => rx
+                    .recv_timeout(t.saturating_duration_since(std::time::Instant::now()))
+                    .ok(),
+            };
+            match got {
+                Some(done) => apply_relist(f, done),
+                None => break,
+            }
+        }
+        // Whatever is still running reports through the shared queue.
+        RELISTS.lock().unwrap().push(rx);
     }
     if lib.join("genesis.json").is_file() {
         let st: Vec<_> = family_logs(lib).iter().map(|p| mtime(p)).collect();
@@ -1695,9 +1713,13 @@ fn hidden_for(
     let mut hidden = std::collections::HashSet::new();
     let mut errors = Vec::new();
     let mut tombs = Vec::new();
+    let mut withheld = std::collections::HashSet::new();
     for (ds, photos) in f.state.iter().zip(&f.photos_in) {
         if ds.unlisted {
             hidden.extend(photos.iter().map(|&i| v.path(i).to_string()));
+        }
+        if ds.pending.is_some() {
+            withheld.extend(photos.iter().map(|&i| v.path(i).to_string()));
         }
         for (rel, t) in &ds.tombs {
             tombs.push(rel.clone());
@@ -1722,13 +1744,31 @@ fn hidden_for(
     *HIDE_NOTE.lock().unwrap() = hide_note(&errors);
     *HIDE_WATCH.lock().unwrap() = Some(tombs);
     // An unhide needs the photo back, which the view no longer holds: list
-    // again in the background (hides only ever narrow the view here).
-    let unhid = f.hidden.iter().any(|p| !hidden.contains(p));
-    if unhid || hidden != *f.hidden {
+    // again in the background (hides only ever narrow the view here). A
+    // photo only withheld (pending folder) is in the base view, so putting
+    // that back is enough.
+    let unhid = f
+        .hidden
+        .iter()
+        .any(|p| !hidden.contains(p) && !f.withheld.contains(p));
+    let released = f
+        .withheld
+        .iter()
+        .any(|p| !withheld.contains(p) && !hidden.contains(p));
+    let mut all = hidden.clone();
+    all.extend(withheld.iter().cloned());
+    if unhid || released || all != *f.hidden {
         f.version += 1;
     }
-    f.hidden = Arc::new(hidden);
+    f.withheld = withheld;
+    f.hidden = Arc::new(all);
     let out = (Arc::clone(&f.hidden), f.version);
+    if released {
+        let mut lv = server.library.lock().unwrap();
+        if lv.as_ref().is_some_and(|c| c.generation == f.generation) {
+            *lv = Some(Arc::clone(&f.base));
+        }
+    }
     drop(fresh);
     if unhid {
         if let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
@@ -1736,6 +1776,176 @@ fn hidden_for(
         }
     }
     out
+}
+
+/// One folder handed to [`spawn_relists`]: its index in `Fresh` (valid
+/// for `generation`), name, state and the stamp taken before the listing.
+struct RelistJob {
+    i: usize,
+    dir: String,
+    ds: DirState,
+    st: Option<(SystemTime, u64)>,
+}
+
+struct RelistDone {
+    generation: u64,
+    i: usize,
+    dir: String,
+    ds: DirState,
+}
+
+/// The longest a request waits for re-lists before leaving the rest
+/// pending (hidden) in the background (XO 03:22Z, max <= 100 ms at k=0).
+const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// Re-list workers still running, drained by each check.
+static RELISTS: Mutex<Vec<std::sync::mpsc::Receiver<RelistDone>>> = Mutex::new(Vec::new());
+/// Folders pending now, folders confirmed after being withheld, and the
+/// longest and the latest time (from hand-over to applied) one was withheld.
+static PENDING_DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WITHHELD_DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WITHHELD_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WITHHELD_LAST_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// List and read `jobs` on up to 8 threads, off the request; each folder
+/// is sent as soon as it is done.
+fn spawn_relists(
+    lib: PathBuf,
+    jobs: Vec<RelistJob>,
+    checked_at: SystemTime,
+    generation: u64,
+) -> std::sync::mpsc::Receiver<RelistDone> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8)
+        .min(jobs.len());
+    let mut work: Vec<Vec<RelistJob>> = (0..threads).map(|_| Vec::new()).collect();
+    for (n, j) in jobs.into_iter().enumerate() {
+        work[n % threads].push(j);
+    }
+    for w in work {
+        let tx = tx.clone();
+        let lib = lib.clone();
+        std::thread::spawn(move || {
+            for mut j in w {
+                relist_dir(&lib, &j.dir, &mut j.ds, j.st, checked_at);
+                let done = RelistDone {
+                    generation,
+                    i: j.i,
+                    dir: j.dir,
+                    ds: j.ds,
+                };
+                if tx.send(done).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    rx
+}
+
+/// Put a finished folder back (by index if the generation is the same,
+/// else by name; a folder no longer listed is dropped).
+fn apply_relist(f: &mut Fresh, done: RelistDone) {
+    PENDING_DIRS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let i = if done.generation == f.generation {
+        Some(done.i)
+    } else {
+        f.dirs.iter().position(|d| *d == done.dir)
+    };
+    let Some(slot) = i.and_then(|i| f.state.get_mut(i)) else {
+        return;
+    };
+    if let Some(since) = slot.pending {
+        let us = since.elapsed().as_micros() as u64;
+        WITHHELD_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        WITHHELD_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
+        WITHHELD_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
+    }
+    *slot = done.ds;
+    slot.pending = None;
+}
+
+/// Apply every finished background re-list; whether any was applied.
+fn drain_relists(f: &mut Fresh) -> bool {
+    let mut any = false;
+    let mut rs = RELISTS.lock().unwrap();
+    rs.retain(|rx| loop {
+        match rx.try_recv() {
+            Ok(done) => {
+                apply_relist(f, done);
+                any = true;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
+        }
+    });
+    any
+}
+
+/// List one folder again (stamp `st` taken before the listing) and read
+/// each tombstone that is new or whose stamp changed. Returns whether the
+/// hidden set may have changed.
+fn relist_dir(
+    lib: &Path,
+    d: &str,
+    ds: &mut DirState,
+    st: Option<(SystemTime, u64)>,
+    checked_at: SystemTime,
+) -> bool {
+    use albumen_ingest::hides::TOMBSTONE_SUFFIX;
+    let mut changed = false;
+    // Listed again (stamp taken before the listing). The hidden set
+    // is rebuilt only if a tombstone came, went or reads differently.
+    ds.trusted = trusted_at(&st, checked_at);
+    ds.stamp = st;
+    let mut old = std::mem::take(&mut ds.tombs);
+    DIRS_LISTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match std::fs::read_dir(lib.join(d)) {
+        Ok(rd) => {
+            changed |= ds.unlisted;
+            ds.unlisted = false;
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(TOMBSTONE_SUFFIX) || name == TOMBSTONE_SUFFIX {
+                    continue;
+                }
+                let rel = if d.is_empty() {
+                    name
+                } else {
+                    format!("{d}/{name}")
+                };
+                let keep = old.remove(&rel).filter(|t| {
+                    (t.trusted || t.verdict == Ok(true)) && t.stamp.is_some() && {
+                        if key_kind() == KeyKind::Portable {
+                            TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        mtime(&lib.join(&rel)) == t.stamp
+                    }
+                });
+                let t = match keep {
+                    Some(t) => t,
+                    None => {
+                        let t = read_tomb(lib, &rel, checked_at);
+                        changed = true;
+                        t
+                    }
+                };
+                ds.tombs.insert(rel, t);
+            }
+        }
+        Err(err) => {
+            eprintln!("albumen gui: hide: can't list {d} ({err}); hiding its photos");
+            if !ds.unlisted {
+                changed = true;
+            }
+            ds.unlisted = true;
+            ds.trusted = false;
+        }
+    }
+    changed |= !old.is_empty();
+    changed
 }
 
 /// The server, for the background re-list an unhide needs.
@@ -1881,6 +2091,11 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
         "hide_same_tick_ms": RECENT_MS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_fs": FS_NAME.lock().unwrap().clone(),
+        "hide_writer_untrusted": WRITER_UNTRUSTED.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_pending_dirs": PENDING_DIRS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_withheld_dirs": WITHHELD_DIRS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_withheld_max_ms": WITHHELD_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
+        "hide_withheld_last_ms": WITHHELD_LAST_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
     })
 }
 
@@ -2478,6 +2693,69 @@ pub(crate) fn io_err(path: &Path, source: std::io::Error) -> IngestError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// XO 03:22Z (2): what NTFS shows while a writer still holds a
+    /// tombstone open. MS docs only promise a file's times are right once
+    /// the writing handle is closed (and NTFS up to Server 2016 set them at
+    /// close). Prints ChangeTime / LastWriteTime before, while open (read
+    /// through another handle) and after close, and asserts the parts the
+    /// design rests on: the bytes are visible at once, and the times after
+    /// close differ from the ones before the write, so a stamp taken while
+    /// the writer was open never matches again and the file is read again.
+    #[cfg(windows)]
+    #[test]
+    fn ntfs_changetime_while_a_writer_is_open() {
+        use std::io::Write;
+        use std::os::windows::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("IMG_0001.JPG.albumen-tombstone");
+        let showing = br#"{"hidden":false,"reason":"hide"}"#;
+        let hiding = br#"{"hidden":true ,"reason":"hide"}"#;
+        assert_eq!(showing.len(), hiding.len());
+        std::fs::write(&p, showing).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let times = |p: &Path| {
+            (
+                change_time(p).unwrap(),
+                std::fs::metadata(p).unwrap().last_write_time(),
+            )
+        };
+        let before = times(&p);
+        let (st_before, v_before) = stamp_and_read_windows(&p).unwrap();
+        assert_eq!(v_before, Ok(false));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut w = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        w.write_all(hiding).unwrap();
+        w.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let open = times(&p);
+        let (st_open, v_open) = stamp_and_read_windows(&p).unwrap();
+        drop(w);
+        let after = times(&p);
+        let (st_after, v_after) = stamp_and_read_windows(&p).unwrap();
+        println!(
+            "M7 NTFS_CHANGETIME before={before:?} open={open:?} after={after:?} \
+             changetime_lag_while_open={} lastwrite_lag_while_open={} \
+             stamp_before={st_before:?} stamp_open={st_open:?} stamp_after={st_after:?}",
+            open.0 == before.0,
+            open.1 == before.1,
+        );
+        // The new bytes are read at once, writer open or not.
+        assert_eq!(v_open, Ok(true), "the open writer's bytes were not seen");
+        assert_eq!(v_after, Ok(true));
+        // After close the times moved, so no earlier stamp matches again.
+        assert_ne!(after.0, before.0, "ChangeTime never changed after close");
+        assert_ne!(
+            st_after, st_before,
+            "the stamp after close equals the one before the write"
+        );
+        if open.0 == before.0 {
+            // ChangeTime lagged while open: the stamp taken then equals the
+            // old one, but the verdict read with it was the new one, and the
+            // close moved the stamp on, so the next check reads again.
+            assert_ne!(st_after, st_open);
+        }
+    }
 
     /// F1: the compact listing streams the same images and events as the
     /// per-request listing did, and a page is a slice of it.
