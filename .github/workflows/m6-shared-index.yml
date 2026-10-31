@@ -141,3 +141,34 @@ jobs:
           name: m6-invalid-counter-${{ github.sha }}
           path: m6-invalid-counter.log
           if-no-files-found: warn
+
+  m7-windows:
+    # M7 hide tests on Windows: the non-unix stamp key (folder entry count,
+    # tombstone names and sizes, tombstone content hash) and the
+    # FILE_FLAG_BACKUP_SEMANTICS set_mtime helper. The 380k scale bars stay
+    # on Linux (the scale test skips without ALBUMEN_M7_FILES).
+    name: m7 hide tests (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF checkout on Windows
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: M7 hide tests
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
+          # 18 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
+          grep -Eq '^test result: ok\. 18 passed; 0 failed; 0 ignored' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 18 tests green on Windows"; exit 1; }
