@@ -880,7 +880,7 @@ fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
 struct Fresh {
     generation: u64,
     dirs: Vec<String>,
-    stamp: Vec<Option<SystemTime>>,
+    stamp: Vec<Option<(SystemTime, u64)>>,
     hidden: Arc<std::collections::HashSet<String>>,
 }
 
@@ -895,8 +895,46 @@ const RECENT: std::time::Duration = std::time::Duration::from_secs(2);
 static SERVE_NOTES: Mutex<std::collections::BTreeMap<String, String>> =
     Mutex::new(std::collections::BTreeMap::new());
 
-fn mtime(p: &Path) -> Option<SystemTime> {
-    std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok()
+/// An entry's mtime plus a change key mtime alone misses: `rsync -t`/`-a`
+/// brings a hide in and puts the folder's old mtime back (A8). On Unix the
+/// key is the ctime, which no user call can set back. Elsewhere it is, for
+/// a folder, its entry count plus a hash of its tombstone names and sizes;
+/// for a file, its size.
+fn mtime(p: &Path) -> Option<(SystemTime, u64)> {
+    let m = std::fs::symlink_metadata(p).ok()?;
+    Some((m.modified().ok()?, change_key(p, &m)))
+}
+
+#[cfg(unix)]
+fn change_key(_: &Path, m: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    (m.ctime() as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(m.ctime_nsec() as u64)
+}
+
+#[cfg(not(unix))]
+fn change_key(p: &Path, m: &std::fs::Metadata) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if !m.is_dir() {
+        return m.len();
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut count = 0u64;
+    let mut tombs: Vec<(String, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            count += 1;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(albumen_ingest::hides::TOMBSTONE_SUFFIX) {
+                tombs.push((name, e.metadata().map_or(0, |m| m.len())));
+            }
+        }
+    }
+    tombs.sort();
+    count.hash(&mut h);
+    tombs.hash(&mut h);
+    h.finish()
 }
 
 /// Family log directories (`members/<m>/log`), or none outside a family
@@ -915,8 +953,9 @@ fn family_logs(library: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn stamp(library: &Path, dirs: &[String]) -> Vec<Option<SystemTime>> {
-    let mut st: Vec<Option<SystemTime>> = dirs.iter().map(|d| mtime(&library.join(d))).collect();
+fn stamp(library: &Path, dirs: &[String]) -> Vec<Option<(SystemTime, u64)>> {
+    let mut st: Vec<Option<(SystemTime, u64)>> =
+        dirs.iter().map(|d| mtime(&library.join(d))).collect();
     for f in family_logs(library) {
         st.push(mtime(&f));
     }
@@ -965,7 +1004,7 @@ fn hidden_for(server: &Server, v: &LibraryView) -> Arc<std::collections::HashSet
     }
     let recent = now
         .iter()
-        .any(|t| t.is_none_or(|t| checked_at.duration_since(t).map_or(true, |d| d < RECENT)));
+        .any(|t| t.is_none_or(|(t, _)| checked_at.duration_since(t).map_or(true, |d| d < RECENT)));
     let mut all: Vec<String> = (0..v.len() as u32).map(|i| v.path(i).to_string()).collect();
     let mut unlisted = std::collections::HashSet::new();
     let mut tombs = Vec::new();
