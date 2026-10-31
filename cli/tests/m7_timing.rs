@@ -182,3 +182,70 @@ fn m7_no_flicker_worker_error() {
 fn m7_no_flicker_worker_panic() {
     no_flicker("worker_panic");
 }
+
+// PL ruling (post-sync, 2): the 40 ms wait is skipped only for folders
+// where no shown photo would blink. A showing tombstone rewritten by a sync
+// (same verdict, new stamp) is no longer a trusted show, so its photo is
+// withheld until the folder's re-list; the wait is what lets that re-list
+// land before the answer. The `gui-skip-blink-wait` mutant (no folder
+// counts as blinking) must fail here.
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs test hooks"
+)]
+fn m7_rewritten_show_waits() {
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(HOOKS, "needs a debug build or --features test-hooks");
+    }
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let lib = library.path();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    for d in 0..5 {
+        fs::create_dir_all(lib.join(format!("d{d:02}"))).unwrap();
+        for n in 0..100 {
+            let p = lib.join(format!("d{d:02}/IMG_{n:04}.JPG"));
+            fs::write(&p, format!("synthetic-m7-rw-{d}-{n}")).unwrap();
+            set_mtime(&p, old);
+        }
+    }
+    let shows: Vec<String> = (0..25).map(|n| format!("d01/IMG_{n:04}.JPG")).collect();
+    let write_shows = || {
+        // As a sync writes it: a new file renamed over the old one (the
+        // folder changes, so it is re-listed).
+        for p in &shows {
+            let t = lib.join(format!("{p}.albumen-tombstone"));
+            let tmp = lib.join(format!("{p}.sync-tmp"));
+            fs::write(&tmp, br#"{"hidden":false,"reason":"unhide"}"#).unwrap();
+            fs::rename(&tmp, &t).unwrap();
+        }
+    };
+    write_shows();
+    std::thread::sleep(Duration::from_millis(2100));
+    let (_gui, addr, _log) = start_logged(lib, work.path(), index.path(), home.path(), &[]);
+    ready_found(&addr);
+    listed_raw(&addr);
+    settled(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    let v0 = listed_raw(&addr);
+    settled(&addr);
+    assert_eq!(v0.len(), 500, "|V0|");
+    let mut missing = Vec::new();
+    for _round in 0..5 {
+        write_shows();
+        // Out of the same-tick window, so the rewrite is seen as a change.
+        std::thread::sleep(Duration::from_millis(2100));
+        let r: std::collections::HashSet<String> = listed_raw(&addr).into_iter().collect();
+        missing.push(shows.iter().filter(|p| !r.contains(*p)).count());
+        settled(&addr);
+    }
+    println!("\nM7 REWRITTEN_SHOW missing_per_round={missing:?}");
+    assert!(
+        missing.iter().all(|&m| m == 0),
+        "a shown photo with a rewritten showing tombstone blinked out: {missing:?}"
+    );
+}

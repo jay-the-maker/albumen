@@ -2648,7 +2648,7 @@ fn hidden_for(
         let keep_done = t.elapsed();
         for ((j, keep), b) in jobs.iter().zip(keeps).zip(b) {
             f.state[j.i].keep = Arc::new(keep);
-            if b {
+            if b && !blink_wait_mutant() {
                 blinking.insert(j.i);
             }
         }
@@ -2741,14 +2741,28 @@ fn hidden_for(
                 return (Arc::new(all), ver);
             }
             f = fresh.as_mut().unwrap();
+            // PL ruling (post-sync, 2): the re-lock and the apply count
+            // against the budget. Results for the blinking folders are
+            // applied (they are what the wait was for); others past the
+            // deadline go to the background applier with the rest.
+            let (later_tx, later_rx) = std::sync::mpsc::channel();
             for done in got {
+                let for_blink = done.generation == f.generation && blinking.contains(&done.i);
+                if !for_blink && std::time::Instant::now() >= deadline {
+                    let _ = later_tx.send(done);
+                    continue;
+                }
                 if done.generation == f.generation {
                     blinking.remove(&done.i);
                 }
                 apply_relist(f, done);
             }
+            drop(later_tx);
             // Folders not in by the deadline finish in the background.
-            RELISTS.lock().unwrap().push(rx);
+            let mut q = RELISTS.lock().unwrap();
+            q.push(later_rx);
+            q.push(rx);
+            drop(q);
         } else {
             // Once primed the request does not wait at all (XO 04:08Z): the
             // per-photo carried show keeps what is on screen, and a coalescing
@@ -3355,20 +3369,31 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
         if tombs.is_empty() {
             return (Withhold { all: false, set }, false);
         }
-        let photos: Vec<String> = if cfg!(windows) {
-            // Case-folded names: match against the folder's photos.
+        // The folder's photos in the view on screen; None: not known.
+        let view_photos = || -> Option<Vec<String>> {
             match &f.prev {
-                None => f.photos_in[j.i]
-                    .iter()
-                    .map(|&p| f.base.path(p).to_string())
-                    .collect(),
-                Some(prev) => prev.dir_idx.get(&j.dir).map_or(Vec::new(), |&k| {
+                None => f
+                    .photos_in
+                    .get(j.i)
+                    .map(|ps| ps.iter().map(|&p| f.base.path(p).to_string()).collect()),
+                Some(prev) => prev.dir_idx.get(&j.dir).map(|&k| {
                     prev.photos_in[k]
                         .iter()
                         .map(|&p| prev.base.path(p).to_string())
                         .collect()
                 }),
             }
+        };
+        // PL ruling (post-sync, 2): only a photo on screen blinks. Linux
+        // used to count any tombstone whose photo file exists (a photo
+        // not in the view, e.g. one hidden before, too) and so waited the
+        // 40 ms for folders where nothing could blink. Built once per
+        // folder, only when a photo is withheld; unknown counts as on
+        // screen (if unsure, wait).
+        let mut on_screen: Option<Option<std::collections::HashSet<String>>> = None;
+        let photos: Vec<String> = if cfg!(windows) {
+            // Case-folded names: match against the folder's photos.
+            view_photos().unwrap_or_default()
         } else {
             tombs
                 .keys()
@@ -3409,7 +3434,12 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
             if !kept {
                 // Only a photo on screen blinks out (Linux: the tombstone's
                 // photo file exists; Windows: taken from the view).
-                blink = blink || cfg!(windows) || lib.join(&p).is_file();
+                blink = blink
+                    || cfg!(windows)
+                    || on_screen
+                        .get_or_insert_with(|| view_photos().map(|v| v.into_iter().collect()))
+                        .as_ref()
+                        .is_none_or(|v| v.contains(&p));
                 set.insert(p);
             }
         }
@@ -3860,6 +3890,20 @@ fn body_cache_mutant() -> bool {
     #[cfg(any(debug_assertions, feature = "test-hooks"))]
     {
         std::env::var("ALBUMEN_TEST_MUTATE").is_ok_and(|v| v == "gui-no-body-cache")
+    }
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+    {
+        false
+    }
+}
+
+/// `ALBUMEN_TEST_MUTATE=gui-skip-blink-wait` (test-hooks/debug only): no
+/// folder counts as blinking, so the request never waits for a re-list,
+/// even where a shown photo would blink out. The no-flicker tests must fail.
+fn blink_wait_mutant() -> bool {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    {
+        std::env::var("ALBUMEN_TEST_MUTATE").is_ok_and(|v| v == "gui-skip-blink-wait")
     }
     #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
     {

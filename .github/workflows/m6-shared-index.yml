@@ -108,7 +108,7 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 45 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation, 12:47Z prekeep gap + unlocked-wait race; the A9 (c) test and the 4 PL 14:36Z silent-miss tests count in the 45) = 52 here, plus 5 timing tests (4 no-flicker + 1 untrusted-reread) in the m7_timing binary run with --test-threads=1 = 57 (r14 option b; the coarse-ctime test is Unix-only).
+          # so they are filtered out here and run in their own steps: 45 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation, 12:47Z prekeep gap + unlocked-wait race; the A9 (c) test and the 4 PL 14:36Z silent-miss tests count in the 45) = 52 here, plus 6 timing tests (4 no-flicker + 1 untrusted-reread + 1 rewritten-show) in the m7_timing binary run with --test-threads=1 = 58 (r14 option b; the coarse-ctime test is Unix-only).
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted 2>&1 | tee m7.log
@@ -164,7 +164,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
             an_untrusted_real_tombstone_reread_cost_is_measured -- --exact --nocapture --test-threads=1 2>&1 | tee m7-untrusted.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out' m7-untrusted.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out' m7-untrusted.log \
             || { echo "::error::the untrusted re-read test did not run exactly 1 test green"; exit 1; }
           grep -E 'M7 UNTRUSTED_REREADS key=ctime measured=yes tombstones=256 requests=10 reads=2560 ' m7-untrusted.log \
             || { echo "::error::no M7 UNTRUSTED_REREADS line"; exit 1; }
@@ -180,7 +180,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
             m7_no_flicker -- --nocapture --test-threads=1 2>&1 | tee m7-nf.log
-          grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out' m7-nf.log \
+          grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7-nf.log \
             || { echo "::error::the no-flicker tests did not run exactly 4 green with 0 ignored"; exit 1; }
           for v in platform coarse worker_error worker_panic; do
             grep -E "^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER variant=$v key=ctime .* disappearances=0 h_shown=0 " m7-nf.log \
@@ -194,6 +194,31 @@ jobs:
           grep -E 'M7 NO_FLICKER_RETAKE variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_RETAKE lines"; exit 1; }
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
+
+      - name: M7 rewritten-show wait and the skip-blink-wait mutant (PL post-sync ruling (2); merge-blocking)
+        # The 40 ms wait is skipped only where no shown photo would blink. A
+        # showing tombstone renamed over by a sync is withheld until its
+        # folder is re-listed; the wait lets that land (missing 0 every
+        # round). ALBUMEN_TEST_MUTATE=gui-skip-blink-wait (no folder counts
+        # as blinking) must fail exactly this test.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
+            m7_rewritten_show_waits -- --exact --nocapture --test-threads=1 2>&1 | tee m7-rewritten.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out' m7-rewritten.log \
+            || { echo "::error::the rewritten-show test did not run exactly 1 test green"; exit 1; }
+          grep -E '^M7 REWRITTEN_SHOW missing_per_round=\[0, 0, 0, 0, 0\]$' m7-rewritten.log \
+            || { echo "::error::no M7 REWRITTEN_SHOW line with 0 missing every round"; exit 1; }
+          if ALBUMEN_TEST_MUTATE=gui-skip-blink-wait cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
+            m7_rewritten_show_waits -- --exact --nocapture --test-threads=1 > m7-blink-mutant.log 2>&1; then
+            echo "::error::mutant gui-skip-blink-wait survived"; exit 1
+          fi
+          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out' m7-blink-mutant.log \
+            || { echo "::error::mutant gui-skip-blink-wait did not fail exactly m7_rewritten_show_waits"; tail -50 m7-blink-mutant.log; exit 1; }
+          grep -E 'a shown photo with a rewritten showing tombstone blinked out' m7-blink-mutant.log \
+            || { echo "::error::mutant gui-skip-blink-wait failed, but not on a blink"; tail -50 m7-blink-mutant.log; exit 1; }
+          echo "M7 MUTATION gui-skip-blink-wait test=m7_rewritten_show_waits outcome=FAILED_AS_REQUIRED"
 
       - name: M7 body-cache mutant (5ee2cec 1073 fix; merge-blocking)
         # The full /api/library answer of an unchanged view is sent from its
@@ -209,7 +234,7 @@ jobs:
             m7_no_flicker_worker_error -- --exact --nocapture --test-threads=1 > m7-body-mutant.log 2>&1; then
             echo "::error::mutant gui-no-body-cache survived"; exit 1
           fi
-          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out' m7-body-mutant.log \
+          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out' m7-body-mutant.log \
             || { echo "::error::mutant gui-no-body-cache did not fail exactly m7_no_flicker_worker_error"; tail -50 m7-body-mutant.log; exit 1; }
           grep -Eq 'full answers re-serialized per request: lib_body_hits 0 of [0-9]+ requests' m7-body-mutant.log \
             || { echo "::error::mutant gui-no-body-cache failed, but not on lib_body_hits"; tail -50 m7-body-mutant.log; exit 1; }
@@ -433,7 +458,7 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 43 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation, 12:47Z prekeep gap + unlocked-wait race; the A9 (c) test and the 3 PL 14:36Z silent-miss tests (the coarse-stamp one is Unix-only) count in the 43) = 50 here, plus 5 timing tests (4 no-flicker + 1 untrusted-reread) in the m7_timing binary run with --test-threads=1 = 55 (r14 option b).
+          # so they are filtered out here and run in their own steps: 43 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation, 12:47Z prekeep gap + unlocked-wait race; the A9 (c) test and the 3 PL 14:36Z silent-miss tests (the coarse-stamp one is Unix-only) count in the 43) = 50 here, plus 6 timing tests (4 no-flicker + 1 untrusted-reread + 1 rewritten-show) in the m7_timing binary run with --test-threads=1 = 56 (r14 option b).
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted 2>&1 | tee m7.log
@@ -538,7 +563,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
             an_untrusted_real_tombstone_reread_cost_is_measured -- --exact --nocapture --test-threads=1 2>&1 | tee m7-untrusted.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out' m7-untrusted.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out' m7-untrusted.log \
             || { echo "::error::the untrusted re-read test did not run exactly 1 test green"; exit 1; }
           grep -E 'M7 UNTRUSTED_REREADS key=[a-z_]+ measured=(yes|no) tombstones=256 ' m7-untrusted.log \
             || { echo "::error::no M7 UNTRUSTED_REREADS line"; exit 1; }
@@ -554,7 +579,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
             m7_no_flicker -- --nocapture --test-threads=1 2>&1 | tee m7-nf.log
-          grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out' m7-nf.log \
+          grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7-nf.log \
             || { echo "::error::the no-flicker tests did not run exactly 4 green with 0 ignored"; exit 1; }
           for v in platform coarse worker_error worker_panic; do
             grep -E "^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER variant=$v key=changetime .* disappearances=0 h_shown=0 " m7-nf.log \
@@ -568,6 +593,31 @@ jobs:
           grep -E 'M7 NO_FLICKER_RETAKE variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_RETAKE lines"; exit 1; }
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
+
+      - name: M7 rewritten-show wait and the skip-blink-wait mutant (Windows) (PL post-sync ruling (2); merge-blocking)
+        # The 40 ms wait is skipped only where no shown photo would blink. A
+        # showing tombstone renamed over by a sync is withheld until its
+        # folder is re-listed; the wait lets that land (missing 0 every
+        # round). ALBUMEN_TEST_MUTATE=gui-skip-blink-wait (no folder counts
+        # as blinking) must fail exactly this test.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
+            m7_rewritten_show_waits -- --exact --nocapture --test-threads=1 2>&1 | tee m7-rewritten.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out' m7-rewritten.log \
+            || { echo "::error::the rewritten-show test did not run exactly 1 test green"; exit 1; }
+          grep -E '^M7 REWRITTEN_SHOW missing_per_round=\[0, 0, 0, 0, 0\]$' m7-rewritten.log \
+            || { echo "::error::no M7 REWRITTEN_SHOW line with 0 missing every round"; exit 1; }
+          if ALBUMEN_TEST_MUTATE=gui-skip-blink-wait cargo test --release --locked -p albumen --features test-hooks --test m7_timing \
+            m7_rewritten_show_waits -- --exact --nocapture --test-threads=1 > m7-blink-mutant.log 2>&1; then
+            echo "::error::mutant gui-skip-blink-wait survived"; exit 1
+          fi
+          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out' m7-blink-mutant.log \
+            || { echo "::error::mutant gui-skip-blink-wait did not fail exactly m7_rewritten_show_waits"; tail -50 m7-blink-mutant.log; exit 1; }
+          grep -E 'a shown photo with a rewritten showing tombstone blinked out' m7-blink-mutant.log \
+            || { echo "::error::mutant gui-skip-blink-wait failed, but not on a blink"; tail -50 m7-blink-mutant.log; exit 1; }
+          echo "M7 MUTATION gui-skip-blink-wait test=m7_rewritten_show_waits outcome=FAILED_AS_REQUIRED"
 
       - name: M7 body-cache mutant (Windows) (5ee2cec 1073 fix; merge-blocking)
         # The full /api/library answer of an unchanged view is sent from its
@@ -583,7 +633,7 @@ jobs:
             m7_no_flicker_worker_error -- --exact --nocapture --test-threads=1 > m7-body-mutant.log 2>&1; then
             echo "::error::mutant gui-no-body-cache survived"; exit 1
           fi
-          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out' m7-body-mutant.log \
+          grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out' m7-body-mutant.log \
             || { echo "::error::mutant gui-no-body-cache did not fail exactly m7_no_flicker_worker_error"; tail -50 m7-body-mutant.log; exit 1; }
           grep -Eq 'full answers re-serialized per request: lib_body_hits 0 of [0-9]+ requests' m7-body-mutant.log \
             || { echo "::error::mutant gui-no-body-cache failed, but not on lib_body_hits"; tail -50 m7-body-mutant.log; exit 1; }
