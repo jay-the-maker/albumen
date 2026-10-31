@@ -921,6 +921,9 @@ struct Fresh {
     /// Family log stamps and what the family log hid as of them.
     family: Option<FamilyState>,
     primed: bool,
+    /// A new generation took over the folders' state: the hidden set is
+    /// rebuilt for its view on the next check even if no folder changed.
+    rebuild: bool,
     /// Bumped whenever `hidden` changes, so a view already filtered for it
     /// is served as is.
     version: u64,
@@ -980,23 +983,48 @@ static EXT_STAMPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// in the same kernel clock tick, which the fine window covers. A ctime of
 /// exactly .000000000 keeps the 2 s window (fail safe; a fine stamp is
 /// that by chance 1 time in 10^9).
+///
+/// Windows ChangeTime (XO 03:12Z): there is no statfs, so the filesystem
+/// window is 2 s, but NTFS and ReFS keep ChangeTime in 100 ns ticks. A
+/// ChangeTime with a non-zero sub-second part proves this entry is stamped
+/// finely, so it gets the fine window (covering the clock tick); a whole-
+/// second one (a coarse SMB server, FAT has none at all) keeps 2 s. A
+/// ChangeTime before 1970 keeps the mtime and 2 s (fail safe).
 fn stamp_window(
     mtime: SystemTime,
     key: u64,
-    ctime_key: bool,
+    kind: KeyKind,
     ext: bool,
     fs_window: std::time::Duration,
 ) -> (SystemTime, std::time::Duration) {
-    if !ctime_key {
-        return (mtime, fs_window);
+    let fine = RECENT_FINE.min(fs_window);
+    match kind {
+        KeyKind::Portable => (mtime, fs_window),
+        KeyKind::Ctime => {
+            let ctime = SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(key);
+            let w = if ext && !key.is_multiple_of(1_000_000_000) {
+                fine
+            } else {
+                fs_window
+            };
+            (mtime.max(ctime), w)
+        }
+        KeyKind::ChangeTime => {
+            // 100 ns ticks since 1601-01-01.
+            const TO_UNIX: u64 = 116_444_736_000_000_000;
+            let Some(ticks) = key.checked_sub(TO_UNIX) else {
+                return (mtime, fs_window);
+            };
+            let changed =
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(ticks.saturating_mul(100));
+            let w = if !key.is_multiple_of(10_000_000) {
+                fine
+            } else {
+                fs_window
+            };
+            (mtime.max(changed), w)
+        }
     }
-    let ctime = SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(key);
-    let w = if ext && !key.is_multiple_of(1_000_000_000) {
-        RECENT_FINE.min(fs_window)
-    } else {
-        fs_window
-    };
-    (mtime.max(ctime), w)
 }
 
 fn trusted_at(st: &Option<(SystemTime, u64)>, checked_at: SystemTime) -> bool {
@@ -1004,7 +1032,7 @@ fn trusted_at(st: &Option<(SystemTime, u64)>, checked_at: SystemTime) -> bool {
         let (since, w) = stamp_window(
             t,
             key,
-            key_kind() == KeyKind::Ctime,
+            key_kind(),
             EXT_STAMPS.load(std::sync::atomic::Ordering::Relaxed),
             recent(),
         );
@@ -1027,6 +1055,17 @@ fn read_tomb(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
 fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
     let path = lib.join(rel);
     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(windows)]
+    if key_kind() == KeyKind::ChangeTime {
+        // One open (XO 03:12Z): stamp from the handle, then read it.
+        if let Some((stamp, verdict)) = stamp_and_read_windows(&path) {
+            return TombState {
+                trusted: trusted_at(&stamp, checked_at),
+                stamp,
+                verdict: verdict.map_err(|err| format!("{rel}: {err}; hiding it")),
+            };
+        }
+    }
     let stamp = mtime(&path);
     let verdict = albumen_ingest::hides::read_receiver_tombstone(&path)
         .map_err(|err| format!("{rel}: {err}; hiding it"));
@@ -1249,11 +1288,32 @@ fn os_key(p: &Path, m: &std::fs::Metadata) -> Option<u64> {
 #[cfg(unix)]
 fn ctime_key(m: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
+    let nsec = if coarse_ctime_override() {
+        0
+    } else {
+        m.ctime_nsec() as u64
+    };
     Some(
         (m.ctime() as u64)
             .wrapping_mul(1_000_000_000)
-            .wrapping_add(m.ctime_nsec() as u64),
+            .wrapping_add(nsec),
     )
+}
+
+/// Test hook: `ALBUMEN_TEST_COARSE_CTIME=1` drops the ctime's nanoseconds,
+/// as a filesystem storing whole seconds would (ext2/3, 128-byte-inode
+/// ext4), so a test proves the 2 s window is then used on ext. Honoured
+/// only in debug builds or with the `test-hooks` feature, like
+/// `ALBUMEN_TEST_FS_MAGIC`.
+#[cfg(all(unix, not(any(debug_assertions, feature = "test-hooks"))))]
+fn coarse_ctime_override() -> bool {
+    false
+}
+
+#[cfg(all(unix, any(debug_assertions, feature = "test-hooks")))]
+fn coarse_ctime_override() -> bool {
+    static COARSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COARSE.get_or_init(|| std::env::var("ALBUMEN_TEST_COARSE_CTIME").is_ok_and(|v| v == "1"))
 }
 
 #[cfg(not(unix))]
@@ -1293,6 +1353,64 @@ fn change_time(p: &Path) -> Option<u64> {
     }
     CHANGETIME_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Some(basic.ChangeTime as u64)
+}
+
+/// A tombstone's stamp and verdict from ONE open handle (Windows): the
+/// stamp (LastWriteTime as std's `modified()` gives it, and ChangeTime) is
+/// taken before the read, as [`read_tomb_quiet`] does elsewhere. A file not
+/// a plain file, or a stamp that can't be read, gets no stamp (untrusted,
+/// read again next time); an unreadable one is an Err (hidden). None for
+/// a directory or reparse point (or an open failure): the caller takes the
+/// usual path (stat, ChangeTime, read), which follows links as before.
+#[cfg(windows)]
+#[allow(clippy::type_complexity)]
+fn stamp_and_read_windows(p: &Path) -> Option<(Option<(SystemTime, u64)>, Result<bool, String>)> {
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(p)
+    {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is open for the call and the buffer is a
+    // FILE_BASIC_INFO of the size passed.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } != 0;
+    if ok && basic.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        return None;
+    }
+    // 100 ns ticks since 1601, as std converts LastWriteTime for modified().
+    const TO_UNIX: i64 = 116_444_736_000_000_000;
+    let stamp = if ok && basic.ChangeTime != 0 && basic.LastWriteTime >= TO_UNIX {
+        CHANGETIME_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t = SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_nanos(((basic.LastWriteTime - TO_UNIX) as u64) * 100);
+        Some((t, basic.ChangeTime as u64))
+    } else {
+        KEY_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        None
+    };
+    let mut bytes = Vec::new();
+    let verdict = match file.read_to_end(&mut bytes) {
+        Ok(_) => albumen_ingest::hides::parse_receiver_tombstone(&bytes),
+        Err(err) => Err(format!("could not read ({err})")),
+    };
+    Some((stamp, verdict))
 }
 
 #[cfg(not(windows))]
@@ -1392,17 +1510,36 @@ fn hidden_for(
             by_dir.entry(d.to_string()).or_default().push(i);
         }
         let version = fresh.as_ref().map_or(0, |f| f.version + 1);
-        let n = by_dir.len();
         set_window_for(lib);
-        let (dirs, photos_in) = by_dir.into_iter().unzip();
+        // A post-sync rebuild keeps each folder's state (stamp, trust and
+        // tombstones, XO 03:12Z): a folder whose stamp is unchanged and
+        // trusted is not listed again, as within one generation, so the
+        // first check after a sync lists and reads only what changed. Its
+        // trust rests on the same stamp test, so this stays fail-closed.
+        let (mut carried, primed) = match fresh.take() {
+            Some(old) => (
+                old.dirs
+                    .into_iter()
+                    .zip(old.state)
+                    .collect::<std::collections::HashMap<_, _>>(),
+                old.primed,
+            ),
+            None => (Default::default(), false),
+        };
+        let (dirs, photos_in): (Vec<String>, Vec<Vec<u32>>) = by_dir.into_iter().unzip();
+        let state = dirs
+            .iter()
+            .map(|d| carried.remove(d).unwrap_or_default())
+            .collect();
         *fresh = Some(Fresh {
             generation: v.generation,
             dirs,
             photos_in,
             base: Arc::clone(v),
-            state: (0..n).map(|_| DirState::default()).collect(),
+            state,
             family: None,
-            primed: false,
+            primed,
+            rebuild: true,
             version,
             hidden: Default::default(),
         });
@@ -1551,6 +1688,7 @@ fn hidden_for(
         changed = true;
     }
     f.primed = true;
+    changed |= std::mem::take(&mut f.rebuild);
     if !changed {
         return (Arc::clone(&f.hidden), f.version);
     }
@@ -2352,19 +2490,51 @@ mod tests {
         let two = Duration::from_secs(2);
         let m = UNIX_EPOCH + Duration::from_secs(1_000);
         // ext, ctime with ns: the fine window, from the later ctime.
-        let (t, w) = stamp_window(m, 1_005_000_000_123, true, true, two);
+        let (t, w) = stamp_window(m, 1_005_000_000_123, KeyKind::Ctime, true, two);
         assert_eq!(w, Duration::from_millis(50));
         assert_eq!(t, UNIX_EPOCH + Duration::from_nanos(1_005_000_000_123));
         // ext, whole-second ctime (maybe a 1 s inode): 2 s.
-        assert_eq!(stamp_window(m, 1_005_000_000_000, true, true, two).1, two);
+        assert_eq!(
+            stamp_window(m, 1_005_000_000_000, KeyKind::Ctime, true, two).1,
+            two
+        );
         // not ext (nfs, unknown...): the filesystem's window even with ns.
-        assert_eq!(stamp_window(m, 1_005_000_000_123, true, false, two).1, two);
+        assert_eq!(
+            stamp_window(m, 1_005_000_000_123, KeyKind::Ctime, false, two).1,
+            two
+        );
         // no ctime key (portable, ChangeTime): mtime and the fs window.
-        assert_eq!(stamp_window(m, 7, false, true, two), (m, two));
+        assert_eq!(stamp_window(m, 7, KeyKind::Portable, true, two), (m, two));
+        // Windows ChangeTime (100 ns ticks from 1601): a sub-second part
+        // gets the fine window from the later of mtime and ChangeTime; a
+        // whole second, or one before 1970, keeps 2 s.
+        let to_unix = 116_444_736_000_000_000u64;
+        let ct = to_unix + 1_005 * 10_000_000 + 7;
+        let (t, w) = stamp_window(m, ct, KeyKind::ChangeTime, false, two);
+        assert_eq!(w, RECENT_FINE);
+        assert_eq!(
+            t,
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(1_005_000_000_700)
+        );
+        assert_eq!(
+            stamp_window(
+                m,
+                to_unix + 1_005 * 10_000_000,
+                KeyKind::ChangeTime,
+                false,
+                two
+            )
+            .1,
+            two
+        );
+        assert_eq!(
+            stamp_window(m, 5, KeyKind::ChangeTime, false, two),
+            (m, two)
+        );
         // rsync -t set the mtime back: measured from the ctime.
         let old = UNIX_EPOCH + Duration::from_secs(10);
         assert_eq!(
-            stamp_window(old, 1_005_000_000_000, true, true, two).0,
+            stamp_window(old, 1_005_000_000_000, KeyKind::Ctime, true, two).0,
             UNIX_EPOCH + Duration::from_secs(1_005)
         );
     }

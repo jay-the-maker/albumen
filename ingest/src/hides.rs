@@ -77,8 +77,13 @@ pub fn read_receiver_tombstone(path: &Path) -> Result<bool, String> {
 /// it cannot be read or parsed; callers fail closed and hide the photo.
 fn read_tombstone(path: &Path) -> Result<bool, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("could not read ({err})"))?;
+    parse_receiver_tombstone(&bytes)
+}
+
+/// [`read_receiver_tombstone`] on bytes already read (one open on Windows).
+pub fn parse_receiver_tombstone(bytes: &[u8]) -> Result<bool, String> {
     let v: Value =
-        serde_json::from_slice(&bytes).map_err(|err| format!("not valid JSON ({err})"))?;
+        serde_json::from_slice(bytes).map_err(|err| format!("not valid JSON ({err})"))?;
     v.get("hidden")
         .and_then(Value::as_bool)
         .ok_or_else(|| "no \"hidden\" true/false".to_string())

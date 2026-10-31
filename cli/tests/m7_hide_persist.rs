@@ -1403,11 +1403,11 @@ fn the_change_key_is_the_platform_key_with_no_fallback() {
     let f = found_page(&addr);
     println!(
         "M7 change key: key={} changetime_keys={} key_failures={} same_tick_ms={} fs={}",
-        f["hide_key"],
+        f["hide_key"].as_str().unwrap_or("?"),
         f["hide_changetime_keys"],
         f["hide_key_failures"],
         f["hide_same_tick_ms"],
-        f["hide_fs"]
+        f["hide_fs"].as_str().unwrap_or("?")
     );
     let forced = std::env::var("ALBUMEN_TEST_HIDE_KEY").is_ok_and(|v| v == "portable");
     let want = if forced {
@@ -1514,6 +1514,78 @@ fn an_unknown_or_network_filesystem_falls_back_to_the_2s_window() {
             b > a,
             "a 0.5 s old tombstone was trusted under the 2 s fallback"
         );
+    }
+}
+
+/// XO 03:09Z (1): on ext a whole-second ctime keeps the 2 s window. The
+/// ALBUMEN_TEST_COARSE_CTIME hook drops the ctime's ns (as ext2/3 or a
+/// 128-byte-inode ext4 would) and ALBUMEN_TEST_FS_MAGIC forces ext, so this
+/// runs on any Unix filesystem. A non-hiding tombstone changed just now is
+/// read again on every request until 2 s have passed, then no more; with
+/// its ns ctime kept (the control) it is trusted after the 50 ms window.
+#[cfg(unix)]
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs a debug build or --features test-hooks"
+)]
+fn a_whole_second_ctime_on_ext_keeps_the_2s_window() {
+    if std::env::var("ALBUMEN_TEST_HIDE_KEY").is_ok_and(|v| v == "portable") {
+        println!("M7 coarse ctime: skipped, the portable key has no ctime");
+        return;
+    }
+    for coarse in [true, false] {
+        let library = tempfile::tempdir().unwrap();
+        let (work, index, home) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        fs::write(library.path().join("IMG_0001.JPG"), b"synthetic-m7-cc-1").unwrap();
+        fs::write(library.path().join("IMG_0002.JPG"), b"synthetic-m7-cc-2").unwrap();
+        let tomb = library.path().join("IMG_0002.JPG.albumen-tombstone");
+        fs::write(&tomb, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+        let mut env = vec![("ALBUMEN_TEST_FS_MAGIC", "0xef53")];
+        if coarse {
+            env.push(("ALBUMEN_TEST_COARSE_CTIME", "1"));
+        }
+        let (_gui, addr, _) =
+            start_env(library.path(), work.path(), index.path(), home.path(), &env);
+        ready_found(&addr);
+        assert_eq!(found_page(&addr)["hide_fs"], "ext2/3/4");
+        // ctime = now (a whole second under the hook), mtime 0.5 s ago.
+        set_mtime(&tomb, SystemTime::now() - Duration::from_millis(500));
+        let t0 = std::time::Instant::now();
+        listed(&addr);
+        std::thread::sleep(Duration::from_millis(100));
+        // Re-stamped now, past the 50 ms window from its ctime.
+        listed(&addr);
+        let reads = |addr: &str| found_page(addr)["hide_recheck_reads"].as_u64().unwrap();
+        let a = reads(&addr);
+        listed(&addr);
+        listed(&addr);
+        let b = reads(&addr);
+        assert!(
+            t0.elapsed() < Duration::from_millis(900),
+            "too slow to test"
+        );
+        println!("M7 coarse ctime={coarse}: reads after +0.1 s over 2 requests {a} -> {b}");
+        if !coarse {
+            assert_eq!(b, a, "an ns ctime 0.1 s old was not trusted (50 ms window)");
+            continue;
+        }
+        assert!(
+            b >= a + 2,
+            "a whole-second ctime was trusted within 2 s: {a} -> {b}"
+        );
+        std::thread::sleep(Duration::from_millis(2100).saturating_sub(t0.elapsed()));
+        listed(&addr);
+        let c = reads(&addr);
+        listed(&addr);
+        listed(&addr);
+        let d = reads(&addr);
+        println!("M7 coarse ctime: reads after 2.1 s over 2 requests {c} -> {d}");
+        assert_eq!(d, c, "still untrusted after the 2 s window");
     }
 }
 
