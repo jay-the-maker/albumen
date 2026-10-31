@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 # Honour test-only env hooks (ALBUMEN_TEST_FS_MAGIC) in release test builds.
-test-hooks = []
+test-hooks = ["albumen-ingest/test-hooks"]
 
 [[bin]]
 name = "albumen"

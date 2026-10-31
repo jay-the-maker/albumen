@@ -8,6 +8,10 @@ publish.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+# Test-only env hooks (ALBUMEN_TEST_SAVE_LOG), off in release builds.
+test-hooks = []
+
 [dependencies]
 albumen-win = { path = "../win" }
 aws-credential-types = "1"

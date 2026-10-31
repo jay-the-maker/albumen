@@ -45,6 +45,9 @@ fn start(library: &Path, work: &Path, index: &Path, home: &Path) -> (Gui, String
         .arg(work)
         .env("ALBUMEN_INDEX_DIR", index)
         .env("ALBUMEN_HOME", home)
+        // X1 ruling (a): the child logs each of its saves (pid, generation,
+        // paths) so reads of its generations are checked against its count.
+        .env("ALBUMEN_TEST_SAVE_LOG", work.join("child-saves.log"))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -242,6 +245,9 @@ fn readers_keep_answering_while_one_writer_saves() {
     // Diagnostic only (no bar): reads of a generation the writer had not
     // recorded yet, by generation.
     let unknown: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Reads of a generation the writer never recorded, by (generation, paths
+    // read): checked after the run against the GUI child's own save log.
+    let unknown_len: Arc<Mutex<HashMap<(u64, usize), u64>>> = Arc::new(Mutex::new(HashMap::new()));
     // Diagnostics only (no bar): when each slow read started, and when each
     // writer refresh (walk + save) ran, on one clock.
     let t0 = Instant::now();
@@ -252,6 +258,7 @@ fn readers_keep_answering_while_one_writer_saves() {
             let (file, stop, counts) = (file.clone(), stop.clone(), counts.clone());
             let checked = checked.clone();
             let unknown = unknown.clone();
+            let unknown_len = unknown_len.clone();
             let slow_reads = slow_reads.clone();
             let (reads, parse_failures, fallbacks, partials, read_ms) = (
                 reads.clone(),
@@ -276,6 +283,7 @@ fn readers_keep_answering_while_one_writer_saves() {
                             let want = counts.lock().unwrap().get(&generation).copied();
                             if want.is_none() {
                                 *unknown.lock().unwrap().entry(generation).or_insert(0) += 1;
+                                *unknown_len.lock().unwrap().entry((generation, paths.len())).or_insert(0) += 1;
                             }
                             if let Some(want) = want {
                                 checked.fetch_add(1, Ordering::Relaxed);
@@ -446,6 +454,42 @@ fn readers_keep_answering_while_one_writer_saves() {
             c.len()
         );
     }
+    // X1 ruling (a) (XO FRAGO 10:44Z (C)): reads of the GUI child's own
+    // saves count as checked against the child's count for that generation.
+    let child_log =
+        std::fs::read_to_string(work.path().join("child-saves.log")).unwrap_or_default();
+    let mut child: HashMap<u64, (u32, usize)> = HashMap::new();
+    for line in child_log.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if let [pid, g, n] = f[..] {
+            child.insert(
+                g.parse().unwrap(),
+                (pid.parse().unwrap(), n.parse().unwrap()),
+            );
+        }
+    }
+    let gui_pid = gui.0.id();
+    let (mut child_checked, mut child_partial, mut still_unknown) = (0u64, 0u64, 0u64);
+    for ((g, len), n) in unknown_len.lock().unwrap().iter() {
+        match child.get(g) {
+            Some((pid, want)) if *pid == gui_pid => {
+                child_checked += n;
+                if want != len {
+                    child_partial += n;
+                    println!("M6 X1 PARTIAL generation={g} child_count={want} read_count={len}");
+                }
+            }
+            _ => still_unknown += n,
+        }
+    }
+    let other_pids = child.values().filter(|(p, _)| *p != gui_pid).count();
+    println!(
+        "M6 X1 CHILD_SAVES gui_pid={gui_pid} child_gens={} other_pid_gens={other_pids} \
+         child_checked_reads={child_checked} child_partial_reads={child_partial} still_unchecked_reads={still_unknown}",
+        child.len()
+    );
+    checked.fetch_add(child_checked, Ordering::Relaxed);
+    let partials = partials + child_partial;
     // Correctness first (XO 22:03Z): a freeze voids only the timing bars,
     // so a real correctness bug still FAILs even on a frozen box.
     assert_eq!(parse_failures, 0);

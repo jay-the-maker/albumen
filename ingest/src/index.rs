@@ -398,6 +398,8 @@ impl LibraryIndex {
             dest::sync_dir(parent)?;
         }
         self.generation = Some(generation);
+        #[cfg(feature = "test-hooks")]
+        log_save(generation, &self.dirs);
         Ok(())
     }
 
@@ -460,6 +462,29 @@ fn is_not_found(err: &IngestError) -> bool {
 }
 
 /// `<key>.idx.a` or `<key>.idx.b`.
+/// Test hook (X1 ruling (a), XO FRAGO 10:44Z (C)): with
+/// `ALBUMEN_TEST_SAVE_LOG` set, each finished save appends
+/// `<pid>\t<generation>\t<paths>` to that file, so a test can check reads of
+/// another process's saves against that saver's own count.
+#[cfg(feature = "test-hooks")]
+fn log_save(generation: u64, dirs: &BTreeMap<String, DirRecord>) {
+    let Some(log) = std::env::var_os("ALBUMEN_TEST_SAVE_LOG") else {
+        return;
+    };
+    let line = format!(
+        "{}\t{generation}\t{}\n",
+        std::process::id(),
+        flatten_dirs(dirs).len()
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn slot_path(file: &Path, slot: usize) -> PathBuf {
     let mut name = file.as_os_str().to_owned();
     name.push(".");
