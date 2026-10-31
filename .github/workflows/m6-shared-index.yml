@@ -30,7 +30,9 @@ permissions:
 
 jobs:
   m6:
-    name: m6 shared index (ubuntu-24.04)
+    # On m6-x2-chunk-hash the check name says it is diagnostic; everywhere
+    # else it renders exactly as before: "m6 shared index (ubuntu-24.04)".
+    name: ${{ github.ref_name == 'm6-x2-chunk-hash' && 'm6 shared index (ubuntu-24.04) (DIAGNOSTIC not binding)' || 'm6 shared index (ubuntu-24.04)' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
