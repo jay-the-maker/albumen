@@ -281,6 +281,24 @@ jobs:
           grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' rest.log \
             || { echo "::error::index_shared ran no tests or ignored some"; exit 1; }
 
+      - name: Two-writer NotFound flake, 200 runs with seeds (merge blocker)
+        # XO FRAGO 11:54Z (1): both two-writer tests 200 times, each run
+        # printing its seed (M6 TWO_WRITERS seed=); every run must be green.
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen-ingest --test index_shared --no-run
+          fails=0
+          for i in $(seq 1 200); do
+            cargo test --release --locked -p albumen-ingest --test index_shared -- two_writers \
+              --nocapture --test-threads=1 >> two-writers-200.log 2>&1 \
+              || { fails=$((fails+1)); echo "::error::two-writer run $i failed"; }
+          done
+          seeds=$(grep -c 'M6 TWO_WRITERS seed=' two-writers-200.log || true)
+          green=$(grep -Ec 'M6 TWO_WRITERS RESULT .* rollbacks=0 kept' two-writers-200.log || true)
+          echo "M6 TWO_WRITERS_200 runs=200 fails=$fails seeds=$seeds green_results=$green"
+          grep -E 'ROLLBACK|panicked' -A2 two-writers-200.log | head -40 || true
+          test "$fails" -eq 0 && test "$seeds" -eq 400 && test "$green" -eq 400
+
       - name: M6 INVALID counter
         if: always()
         run: |

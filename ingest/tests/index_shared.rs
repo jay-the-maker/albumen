@@ -821,13 +821,16 @@ fn two_writers(same: bool) {
                         std::fs::write(lib.join(&rel), b"").unwrap();
                         own.insert(rel);
                     }
-                    let file = match kept.as_mut() {
+                    let (file, save_error) = match kept.as_mut() {
                         Some(index) => {
                             index.refresh().unwrap();
                             merges.store(index.merges, Ordering::Relaxed);
-                            index_file(index)
+                            (index_file(index), index.save_error.clone())
                         }
-                        None => index_file(&LibraryIndex::open(&lib, Some(&idx)).unwrap()),
+                        None => {
+                            let index = LibraryIndex::open(&lib, Some(&idx)).unwrap();
+                            (index_file(&index), index.save_error.clone())
+                        }
                     };
                     let (g, saved) = read_saved_file(&file).unwrap();
                     assert!(g >= last_gen, "writer {w}: generation went back {last_gen} -> {g}");
@@ -837,7 +840,7 @@ fn two_writers(same: bool) {
                         let n = rollbacks.fetch_add(1, Ordering::Relaxed);
                         if n < 5 {
                             println!(
-                                "M6 TWO_WRITERS ROLLBACK writer={w} iter={i} gen={g} missing={:?} extra={:?}",
+                                "M6 TWO_WRITERS ROLLBACK seed={seed} writer={w} iter={i} gen={g} missing={:?} extra={:?} save_error={save_error:?}",
                                 own.difference(&got).take(3).collect::<Vec<_>>(),
                                 got.difference(&own).take(3).collect::<Vec<_>>()
                             );
