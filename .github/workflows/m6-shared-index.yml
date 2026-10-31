@@ -395,6 +395,30 @@ jobs:
           grep -E '^M7 change key: key=changetime changetime_keys=[1-9][0-9]* key_failures=0 ' m7-key.log \
             || { echo "::error::no 'M7 change key: key=changetime changetime_keys>0 key_failures=0' line"; exit 1; }
 
+      - name: A8 stamps taken by name on build 26100 (GetFileInformationByName; printed and asserted)
+        # XO FRAGO 11:30Z (c): windows-2025 is build 26100, where
+        # GetFileInformationByName exists. Print the OS build and the A8
+        # held-open test's /api/found hide_stat_byname counts; fail unless
+        # the build is 10.0.26100, available=true, used > 0 and
+        # fell_back * 100 <= used (fallbacks at most 1% of by-name stats).
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cmd //c ver | tee m7-ver.log
+          grep -Eq '10\.0\.26100' m7-ver.log || { echo "::error::not Windows build 26100"; exit 1; }
+          cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
+            a_show_tombstone_rewritten_to_hidden_held_open_hides_on_the_next_request -- --exact --nocapture 2>&1 | tee m7-byname.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-byname.log \
+            || { echo "::error::the A8 held-open test did not run exactly 1 test green"; exit 1; }
+          line=$(grep -E 'M7 A8_OPEN stat_byname=' m7-byname.log) || { echo "::error::no M7 A8_OPEN stat_byname line"; exit 1; }
+          avail=$(sed -E 's/.*"available":(true|false).*/\1/' <<<"$line")
+          used=$(sed -E 's/.*"used":([0-9]+).*/\1/' <<<"$line")
+          fell=$(sed -E 's/.*"fell_back":([0-9]+).*/\1/' <<<"$line")
+          echo "M7 BYNAME_CI available=$avail used=$used fell_back=$fell threshold=fell_back*100<=used"
+          [ "$avail" = true ] || { echo "::error::GetFileInformationByName not available on this runner"; exit 1; }
+          [ "$used" -gt 0 ] || { echo "::error::by-name stat never used (used=$used)"; exit 1; }
+          [ $((fell * 100)) -le "$used" ] || { echo "::error::fell_back=$fell over 1% of used=$used"; exit 1; }
+
       - name: NTFS ChangeTime while a writer holds a tombstone open (printed and asserted)
         # XO 03:22Z (2): MS docs only promise file times at handle close.
         # Prints ChangeTime/LastWriteTime before, while open and after close;
