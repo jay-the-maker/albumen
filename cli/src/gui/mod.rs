@@ -958,14 +958,64 @@ static FRESH: Mutex<Option<Fresh>> = Mutex::new(None);
 /// test can prove an unchanged request reads none.
 static TOMB_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Request-path counters only (not `/api/found`'s own polls): tombstones
+/// read and folders listed by [`hidden_for`]; `/api/found` shows them as
+/// `hide_recheck_reads` and `hide_dirs_listed`.
+static RECHECK_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIRS_LISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set when the library is on ext2/3/4 (0xEF53): see [`stamp_window`].
+static EXT_STAMPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The same-tick window for one stamp, and the time it is measured from.
+///
+/// The time is the later of the mtime and (ctime key) the ctime: `rsync -t`
+/// sets an mtime back, but the ctime is when the entry really changed.
+///
+/// ext2/3/4 (XO 02:53Z): the filesystem window is 2 s because 0xEF53 may
+/// keep whole seconds. A ctime with a non-zero sub-second part, though,
+/// proves this inode is being stamped in ns (on disk, or in memory for a
+/// 128-byte inode, where a reload drops the ns and so changes the key and
+/// forces a re-list): a later change gets a different ctime unless it lands
+/// in the same kernel clock tick, which the fine window covers. A ctime of
+/// exactly .000000000 keeps the 2 s window (fail safe; a fine stamp is
+/// that by chance 1 time in 10^9).
+fn stamp_window(
+    mtime: SystemTime,
+    key: u64,
+    ctime_key: bool,
+    ext: bool,
+    fs_window: std::time::Duration,
+) -> (SystemTime, std::time::Duration) {
+    if !ctime_key {
+        return (mtime, fs_window);
+    }
+    let ctime = SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(key);
+    let w = if ext && !key.is_multiple_of(1_000_000_000) {
+        RECENT_FINE.min(fs_window)
+    } else {
+        fs_window
+    };
+    (mtime.max(ctime), w)
+}
+
 fn trusted_at(st: &Option<(SystemTime, u64)>, checked_at: SystemTime) -> bool {
-    let recent = recent();
-    st.is_some_and(|(t, _)| checked_at.duration_since(t).is_ok_and(|d| d >= recent))
+    st.is_some_and(|(t, key)| {
+        let (since, w) = stamp_window(
+            t,
+            key,
+            key_kind() == KeyKind::Ctime,
+            EXT_STAMPS.load(std::sync::atomic::Ordering::Relaxed),
+            recent(),
+        );
+        checked_at.duration_since(since).is_ok_and(|d| d >= w)
+    })
 }
 
 /// Stamp, then read, one tombstone (stamped BEFORE the read, so a rewrite
 /// during it differs next time). Logs an unreadable one.
 fn read_tomb(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
+    RECHECK_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t = read_tomb_quiet(lib, rel, checked_at);
     if let Err(e) = &t.verdict {
         eprintln!("albumen gui: hide: {}", e.replace('\n', ": "));
@@ -1121,6 +1171,7 @@ static FS_NAME: Mutex<String> = Mutex::new(String::new());
 fn set_window_for(library: &Path) {
     let (w, name) = fs_window(library);
     RECENT_MS.store(w.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    EXT_STAMPS.store(name == "ext2/3/4", std::sync::atomic::Ordering::Relaxed);
     *FS_NAME.lock().unwrap() = name;
 }
 
@@ -1359,10 +1410,12 @@ fn hidden_for(
     let f = fresh.as_mut().unwrap();
     let v = Arc::clone(&f.base);
     let checked_at = SystemTime::now();
-    let mut changed = !f.primed;
-    for (d, ds) in f.dirs.iter().zip(f.state.iter_mut()) {
-        let st = mtime(&lib.join(d));
-        if f.primed && ds.trusted && st.is_some() && st == ds.stamp {
+    let primed = f.primed;
+    // One folder: unchanged (stamp only its non-hiding tombstones) or
+    // listed again. Returns whether the hidden set may have changed.
+    let one = |d: &String, ds: &mut DirState, st: Option<(SystemTime, u64)>| -> bool {
+        let mut changed = false;
+        if primed && ds.trusted && st.is_some() && st == ds.stamp {
             for (rel, t) in ds.tombs.iter_mut() {
                 // A tombstone that hides is not re-read in an unchanged
                 // folder (even in its first tick): only an unhide or a note
@@ -1381,13 +1434,14 @@ fn hidden_for(
                 changed |= new.verdict != t.verdict;
                 *t = new;
             }
-            continue;
+            return changed;
         }
         // Listed again (stamp taken before the listing). The hidden set
         // is rebuilt only if a tombstone came, went or reads differently.
         ds.trusted = trusted_at(&st, checked_at);
         ds.stamp = st;
         let mut old = std::mem::take(&mut ds.tombs);
+        DIRS_LISTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match std::fs::read_dir(lib.join(d)) {
             Ok(rd) => {
                 changed |= ds.unlisted;
@@ -1431,6 +1485,46 @@ fn hidden_for(
             }
         }
         changed |= !old.is_empty();
+        changed
+    };
+    // Stamp every folder first; folders that must be listed again (a
+    // post-sync rebuild touches every folder) are done on up to 8 threads.
+    let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
+    let relist = f
+        .state
+        .iter()
+        .zip(&sts)
+        .filter(|(ds, st)| !(primed && ds.trusted && st.is_some() && **st == ds.stamp))
+        .count();
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8)
+        .min(relist);
+    let mut changed = !primed;
+    if threads <= 1 {
+        for ((d, ds), st) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts) {
+            changed |= one(d, ds, st);
+        }
+    } else {
+        // Interleaved so each thread gets a share of the listed folders.
+        type Job<'a> = (&'a String, &'a mut DirState, Option<(SystemTime, u64)>);
+        let mut work: Vec<Vec<Job>> = (0..threads).map(|_| Vec::new()).collect();
+        for (i, ((d, ds), st)) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts).enumerate() {
+            work[i % threads].push((d, ds, st));
+        }
+        let one = &one;
+        changed |= std::thread::scope(|sc| {
+            let hs: Vec<_> = work
+                .into_iter()
+                .map(|w| {
+                    sc.spawn(move || {
+                        w.into_iter()
+                            .fold(false, |c, (d, ds, st)| one(d, ds, st) | c)
+                    })
+                })
+                .collect();
+            hs.into_iter().fold(false, |c, h| h.join().unwrap() | c)
+        });
     }
     if lib.join("genesis.json").is_file() {
         let st: Vec<_> = family_logs(lib).iter().map(|p| mtime(p)).collect();
@@ -1642,6 +1736,8 @@ fn found_json(server: &Server) -> serde_json::Value {
         "index_note": server.index_note.lock().unwrap().clone(),
         "hide_note": current_hide_note(&server.config.library),
         "hide_tombstone_reads": TOMB_READS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_recheck_reads": RECHECK_READS.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_dirs_listed": DIRS_LISTED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_key": key_kind().name(),
         "hide_changetime_keys": CHANGETIME_KEYS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
@@ -2250,6 +2346,29 @@ mod tests {
     /// /api/found: a first walk (no saved index) records the photos it
     /// finds, at most one page, never other files; a second open from the
     /// saved index lists the same files.
+    #[test]
+    fn an_ext_stamp_is_fine_only_with_a_sub_second_ctime() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let two = Duration::from_secs(2);
+        let m = UNIX_EPOCH + Duration::from_secs(1_000);
+        // ext, ctime with ns: the fine window, from the later ctime.
+        let (t, w) = stamp_window(m, 1_005_000_000_123, true, true, two);
+        assert_eq!(w, Duration::from_millis(50));
+        assert_eq!(t, UNIX_EPOCH + Duration::from_nanos(1_005_000_000_123));
+        // ext, whole-second ctime (maybe a 1 s inode): 2 s.
+        assert_eq!(stamp_window(m, 1_005_000_000_000, true, true, two).1, two);
+        // not ext (nfs, unknown...): the filesystem's window even with ns.
+        assert_eq!(stamp_window(m, 1_005_000_000_123, true, false, two).1, two);
+        // no ctime key (portable, ChangeTime): mtime and the fs window.
+        assert_eq!(stamp_window(m, 7, false, true, two), (m, two));
+        // rsync -t set the mtime back: measured from the ctime.
+        let old = UNIX_EPOCH + Duration::from_secs(10);
+        assert_eq!(
+            stamp_window(old, 1_005_000_000_000, true, true, two).0,
+            UNIX_EPOCH + Duration::from_secs(1_005)
+        );
+    }
+
     #[test]
     fn the_same_tick_window_is_fine_only_on_known_fine_ctime_filesystems() {
         use std::time::Duration;

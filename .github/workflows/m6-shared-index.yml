@@ -124,6 +124,14 @@ jobs:
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
           grep -E '^M7 RECHECK_DIAG' m7-recheck.log
+          # XO 02:53Z bar (Linux, blocking): re-check p95 <= 10 ms and max <= 100 ms
+          # over ALL samples (the first 2 s after each sync included), every level.
+          awk '/^M7 RECHECK_DIAG files=/ {
+                 for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+                 bad = (v["recheck_p95_ms"] + 0 > 10 || v["recheck_max_ms"] + 0 > 100)
+                 printf "M7 RECHECK_BAR %s %s p95=%s max=%s %s\n", v["files"], v["tombstones"], v["recheck_p95_ms"], v["recheck_max_ms"], bad ? "FAIL" : "ok"
+                 fail += bad } END { exit fail > 0 }' m7-recheck.log \
+            || { echo "::error::M7 re-check bar missed: p95 <= 10 ms and max <= 100 ms over all samples"; exit 1; }
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
         run: |

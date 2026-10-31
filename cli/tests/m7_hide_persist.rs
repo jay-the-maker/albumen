@@ -1333,6 +1333,9 @@ fn an_unchanged_request_reads_no_tombstone() {
     ] {
         set_mtime(p, old);
     }
+    // Setting the mtimes back changed every ctime to now, and the window
+    // is measured from the later of the two (XO 02:53Z): let it pass.
+    std::thread::sleep(Duration::from_millis(2100));
     let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
     ready_found(&addr);
     assert_eq!(
@@ -1656,8 +1659,17 @@ fn m7_recheck_and_img_diagnostics() {
         let synced = Instant::now();
         let mut recheck = Vec::new();
         let mut sync_window = Vec::new();
-        // (ms, sample index, ms after the tombstone writes it started)
-        let mut slow: Vec<(f64, usize, f64)> = Vec::new();
+        // (ms, sample index, ms after the tombstone writes it started,
+        // tombstones read, folders listed by that request)
+        let mut slow: Vec<(f64, usize, f64, u64, u64)> = Vec::new();
+        let counters = |addr: &str| {
+            let f = found_page(addr);
+            (
+                f["hide_recheck_reads"].as_u64().unwrap(),
+                f["hide_dirs_listed"].as_u64().unwrap(),
+            )
+        };
+        let mut before = counters(&addr);
         for k in 0..100 {
             if k % 2 == 0 {
                 fs::write(&touch, b"x").unwrap();
@@ -1668,10 +1680,13 @@ fn m7_recheck_and_img_diagnostics() {
             let (code, _) = get(&addr, "/api/library?offset=0&limit=1");
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             recheck.push(ms);
-            slow.push((ms, k, synced.elapsed().as_secs_f64() * 1000.0 - ms));
+            let at = synced.elapsed().as_secs_f64() * 1000.0 - ms;
             if synced.elapsed() < Duration::from_secs(2) {
                 sync_window.push(ms);
             }
+            let after = counters(&addr);
+            slow.push((ms, k, at, after.0 - before.0, after.1 - before.1));
+            before = after;
             assert_eq!(code, 200);
         }
         // Steady state (XO 02:30Z (a)): 100 more, all 2 s+ after the last
@@ -1716,11 +1731,13 @@ fn m7_recheck_and_img_diagnostics() {
         );
         // Where the slowest re-checks fall (k=0 is the first request after
         // this level's tombstone writes).
+        let fmt = |(ms, k, at, r, l): &(f64, usize, f64, u64, u64)| {
+            format!("{ms:.1}ms@k={k},+{at:.0}ms,reads={r},listed={l}")
+        };
+        let first = fmt(&slow[0]);
         slow.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let top: Vec<String> = slow
-            .iter()
-            .take(3)
-            .map(|(ms, k, at)| format!("{ms:.1}ms@k={k},+{at:.0}ms"))
+        let top: Vec<String> = std::iter::once(format!("first={first}"))
+            .chain(slow.iter().take(3).map(fmt))
             .collect();
         println!(
             "M7 RECHECK_SLOWEST files={files} tombstones={written} {}",
