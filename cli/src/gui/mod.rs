@@ -565,7 +565,9 @@ fn publish_library(
     if ready && gen > 1 {
         let cur = s.library.lock().unwrap().clone();
         if let Some(v) = cur.filter(|v| v.generation == gen) {
+            lock_hold::set_role(lock_hold::WALK);
             current_view(s, v).count_full_len();
+            lock_hold::set_role(lock_hold::REQ);
         }
         // Product Lead 0951Z D1: the walk test waits on this (not a timer)
         // before it asks for the view the walk thread filtered.
@@ -1614,6 +1616,56 @@ fn tomb_io() {
     TOMB_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Who holds the hide-state lock (`FRESH`) and for how long: max and
+/// count per holder (walk pre-filter, background applier, request), so a
+/// request's lock wait names its cause (XO 10:09Z (1)).
+mod lock_hold {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub const REQ: u8 = 0;
+    pub const WALK: u8 = 1;
+    pub const APPLY: u8 = 2;
+    thread_local! {
+        static ROLE: std::cell::Cell<u8> = const { std::cell::Cell::new(REQ) };
+    }
+    static MAX_US: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    static COUNT: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    /// Tombstone file touches (all threads) during the longest hold.
+    static IO_AT_MAX: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    pub fn set_role(r: u8) {
+        ROLE.set(r);
+    }
+    pub struct Hold(std::time::Instant, u8, u64);
+    impl Hold {
+        pub fn start() -> Hold {
+            Hold(
+                std::time::Instant::now(),
+                ROLE.get(),
+                super::TOMB_IO.load(Relaxed),
+            )
+        }
+    }
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            let r = self.1 as usize;
+            let us = self.0.elapsed().as_micros() as u64;
+            if MAX_US[r].fetch_max(us, Relaxed) < us {
+                IO_AT_MAX[r].store(super::TOMB_IO.load(Relaxed) - self.2, Relaxed);
+            }
+            COUNT[r].fetch_add(1, Relaxed);
+        }
+    }
+    pub fn json() -> serde_json::Value {
+        let ms = |r: usize| MAX_US[r].load(Relaxed) as f64 / 1000.0;
+        let n = |r: usize| COUNT[r].load(Relaxed);
+        let io = |r: usize| IO_AT_MAX[r].load(Relaxed);
+        serde_json::json!({
+            "walk_max_ms": ms(1), "walk_n": n(1), "walk_io_at_max": io(1),
+            "apply_max_ms": ms(2), "apply_n": n(2), "apply_io_at_max": io(2),
+            "req_max_ms": ms(0), "req_n": n(0), "req_io_at_max": io(0),
+        })
+    }
+}
+
 /// Per-request hide cost, requests only (not the background applier):
 /// maxima and the last request, in `/api/found` (XO 09:12Z: one CI run
 /// must show where worker_error and the k=10 outlier spend their time).
@@ -1948,6 +2000,7 @@ fn hidden_for(
     let req_io0 = TOMB_IO.load(std::sync::atomic::Ordering::Relaxed);
     let is_req = !APPLY_ONLY.get();
     let mut fresh = FRESH.lock().unwrap();
+    let hold = lock_hold::Hold::start();
     let req_lock_us = req_t0.elapsed().as_micros() as u64;
     let mut req_keep_dirs = 0u64;
     hide_diag::mark("lock");
@@ -2560,6 +2613,7 @@ fn hidden_for(
             *lv = Some(Arc::clone(&f.base));
         }
     }
+    drop(hold);
     drop(fresh);
     if is_req {
         req_stats::record(
@@ -2908,6 +2962,7 @@ fn apply_landed() {
         return;
     }
     APPLY_ONLY.set(true);
+    lock_hold::set_role(lock_hold::APPLY);
     while APPLY_AGAIN.swap(false, SeqCst) {
         let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) else {
             break;
@@ -3591,6 +3646,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_view_same": VIEW_SAME.load(std::sync::atomic::Ordering::SeqCst),
         "hide_stamp_panics": STAMP_PANICS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_req": req_stats::json(),
+        "hide_lock_hold": lock_hold::json(),
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
         "hide_same_tick_ms": RECENT_MS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_fs": FS_NAME.lock().unwrap().clone(),

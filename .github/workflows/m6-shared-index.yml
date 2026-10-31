@@ -107,7 +107,7 @@ jobs:
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics --skip m7_no_flicker \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted --skip an_untrusted_real_tombstone_reread_cost_is_measured 2>&1 | tee m7.log
           grep -Eq '^test result: ok\. 35 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 33 tests green (12 filtered out)"; exit 1; }
+            || { echo "::error::m7_hide_persist did not run exactly 35 tests green (12 filtered out)"; exit 1; }
 
       - name: M7 untrusted tombstone re-read cost (diagnostic; XO FRAGO 09:28Z (b))
         # Product Lead 0926Z gate D2: a real SHOW tombstone whose stamp is
@@ -290,7 +290,7 @@ jobs:
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics --skip m7_no_flicker \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted --skip an_untrusted_real_tombstone_reread_cost_is_measured 2>&1 | tee m7.log
           grep -Eq '^test result: ok\. 34 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 32 tests green (12 filtered out) on Windows"; exit 1; }
+            || { echo "::error::m7_hide_persist did not run exactly 34 tests green (12 filtered out) on Windows"; exit 1; }
 
       - name: M7 untrusted tombstone re-read cost (diagnostic; XO FRAGO 09:28Z (b))
         # Product Lead 0926Z gate D2: a real SHOW tombstone whose stamp is

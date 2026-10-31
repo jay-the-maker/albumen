@@ -2885,7 +2885,7 @@ fn m7_recheck_and_img_diagnostics() {
         println!(
             "M7 RECHECK_SYNC_REQ files={files} tombstones={written} samples={} lock_wait_max_ms={:.2} \
              drain_max_ms={:.2} tomb_io_max={} keep_dirs_max={} slowest_ms={} slowest_lock_wait_ms={} \
-             slowest_drain_ms={} slowest_tomb_io={} slowest_keep_dirs={}",
+             slowest_drain_ms={} slowest_tomb_io={} slowest_keep_dirs={} lock_hold={}",
             sync_req.len(),
             sync_req.iter().map(|x| x.0).fold(0.0, f64::max),
             sync_req.iter().map(|x| x.1).fold(0.0, f64::max),
@@ -2896,6 +2896,7 @@ fn m7_recheck_and_img_diagnostics() {
             slowest.map_or("n/a".into(), |x| format!("{:.2}", x.1)),
             slowest.map_or("n/a".into(), |x| x.2.to_string()),
             slowest.map_or("n/a".into(), |x| x.3.to_string()),
+            found_page(&addr)["hide_lock_hold"],
         );
         println!(
             "M7 RECHECK_SPLIT files={files} tombstones={written} \
@@ -3328,7 +3329,7 @@ fn no_flicker(variant: &str) {
     println!(
         "M7 NO_FLICKER_REQ variant={variant} requests={} tomb_io_total={} tomb_io_max={} \
          lock_wait_max_ms={} drain_max_ms={} total_max_ms={} tombstone_reads={} recheck_reads={} \
-         keep_stats={}",
+         keep_stats={} lock_hold={}",
         r["requests"],
         r["tomb_io_total"],
         r["tomb_io_max"],
@@ -3338,6 +3339,7 @@ fn no_flicker(variant: &str) {
         f["hide_tombstone_reads"],
         f["hide_recheck_reads"],
         f["hide_keep_stats"],
+        f["hide_lock_hold"],
     );
     assert!(
         keep <= INLINE_CAP_MS && build <= INLINE_CAP_MS,
