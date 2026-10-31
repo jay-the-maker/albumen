@@ -177,8 +177,13 @@ jobs:
           for i in $(seq 1 "$(nproc)"); do timeout 900 bash -c 'while :; do :; done' & pids="$pids $!"; done
           for a in --test-threads=1 --test-threads=4; do
             echo "== m7_timing under load, $a"
-            cargo test --release --locked -p albumen --features test-hooks --test m7_timing -- --nocapture $a 2>&1 \
-              | grep -E '^test |test result|M7 NO_FLICKER_INLINE|M7 UNTRUSTED_REREADS|panicked|inline work' || true
+            # XO 11:34Z (e): the 5 ms re-read bar prints (M7 BAR_MISS_PRINT_ONLY)
+            # instead of failing in this step only; any panic is shown with
+            # the message lines after it.
+            ALBUMEN_M7_TIMING_PRINT_ONLY=1 cargo test --release --locked -p albumen --features test-hooks \
+              --test m7_timing -- --nocapture $a > "m7-load-t${a##*=}.log" 2>&1 || true
+            grep -E '^test |test result|M7 NO_FLICKER_INLINE|M7 UNTRUSTED_REREADS|M7 BAR_MISS_PRINT_ONLY|inline work' "m7-load-t${a##*=}.log" || true
+            grep -E -A4 'panicked at' "m7-load-t${a##*=}.log" || true
           done
           exit 0
 

@@ -96,10 +96,20 @@ fn an_untrusted_real_tombstone_reread_cost_is_measured() {
         );
         // Product Lead 0951Z D2 / XO 09:53Z (3): the re-read cost bar,
         // p95 over the 10 requests (= the max at n=10) <= 5 ms at 256.
-        assert!(
-            worst <= 5.0,
+        // XO 11:34Z (e): ALBUMEN_M7_TIMING_PRINT_ONLY=1 (set only by the
+        // print-only CPU-load step) prints a miss of this wall-clock bar
+        // instead of failing; the binding m7_timing step never sets it. The
+        // read count above stays asserted either way.
+        let miss = format!(
             "untrusted re-read cost over the bar: max_request_ms={worst:.2} (bar 5 ms at {N})"
         );
+        if std::env::var("ALBUMEN_M7_TIMING_PRINT_ONLY").as_deref() == Ok("1") {
+            if worst > 5.0 {
+                println!("M7 BAR_MISS_PRINT_ONLY {miss}");
+            }
+        } else {
+            assert!(worst <= 5.0, "{miss}");
+        }
     } else {
         assert!(
             reads <= 10 * N as u64,
