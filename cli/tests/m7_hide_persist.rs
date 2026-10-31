@@ -2294,6 +2294,9 @@ fn m7_recheck_and_img_diagnostics() {
         for path in ["/api/hide-status", "/api/found"] {
             let mut ms = Vec::new();
             let mut bytes = 0;
+            // PL ruling (b) on item 4: the watcher bar binds on the timed
+            // polls only, read as a before/after delta of its counters.
+            let w0 = found_page(&addr)["hide_found_notify"].clone();
             for _ in 0..100 {
                 let t = Instant::now();
                 let (code, body) = get(&addr, path);
@@ -2306,11 +2309,18 @@ fn m7_recheck_and_img_diagnostics() {
             // platform.
             let extra = if path == "/api/found" {
                 let f = found_page(&addr);
+                let w1 = &f["hide_found_notify"];
+                let d = |k: &str| {
+                    w1[k].as_u64().unwrap_or(0) as i64 - w0[k].as_u64().unwrap_or(0) as i64
+                };
                 format!(
-                    " found_note={} hide_lock_hold={} dirst={} watch={}",
+                    " found_note={} hide_lock_hold={} dirst={} watch_delta={{\"incr\":{},\"lost\":{},\"full\":{}}} watch={}",
                     f["hide_found_note"],
                     f["hide_lock_hold"],
                     f["hide_dirst"],
+                    d("incr"),
+                    d("lost"),
+                    d("full"),
                     // XO 14:22Z (b): watcher counters (CI: incr > 0, lost == 0 at 10k).
                     f["hide_found_notify"]
                 )

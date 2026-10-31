@@ -310,9 +310,10 @@ jobs:
             || { echo "::error::/api/found bar missed (50k/10k: samples >= 100, p95 <= 20 ms, max <= 100 ms)"; grep -E '^M7 POLL' m7-found-50k.log; exit 1; }
           # XO 14:22Z (b): the 10k-tombstone /api/found poll used notifications
           # (incr > 0) and lost none (lost == 0).
-          grep -E '^M7 POLL .*tombstones=10000 .*path=/api/found .*watch=\{[^ ]*"incr":[1-9][0-9]*[,}][^ ]*' m7-found-50k.log \
-            | grep -Eq 'watch=\{[^ ]*"lost":0[,}]' \
-            || { echo "::error::found watcher at 10k: need incr>0 and lost==0"; grep -E '^M7 POLL .*path=/api/found' m7-found-50k.log; exit 1; }
+          # PL ruling (b) (item 4): the bar binds on the delta over the 100
+          # timed polls (watch_delta); the process totals (watch=) are printed.
+          grep -E '^M7 POLL .*tombstones=10000 .*path=/api/found .*watch_delta=\{"incr":[1-9][0-9]*,"lost":0,' m7-found-50k.log >/dev/null \
+            || { echo "::error::found watcher at 10k over the timed polls: need incr delta>0 and lost delta==0"; grep -E '^M7 POLL .*path=/api/found' m7-found-50k.log; exit 1; }
           bash .github/m7-recheck-bar.sh m7-found-50k.log
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
@@ -701,9 +702,10 @@ jobs:
             || { echo "::error::/api/found bar missed (50k/10k: samples >= 100, p95 <= 20 ms, max <= 100 ms)"; grep -E '^M7 POLL' m7-recheck.log; exit 1; }
           # XO 14:22Z (b): the 10k-tombstone /api/found poll used notifications
           # (incr > 0) and lost none (lost == 0).
-          grep -E '^M7 POLL .*tombstones=10000 .*path=/api/found .*watch=\{[^ ]*"incr":[1-9][0-9]*[,}][^ ]*' m7-recheck.log \
-            | grep -Eq 'watch=\{[^ ]*"lost":0[,}]' \
-            || { echo "::error::found watcher at 10k: need incr>0 and lost==0"; grep -E '^M7 POLL .*path=/api/found' m7-recheck.log; exit 1; }
+          # PL ruling (b) (item 4): the bar binds on the delta over the 100
+          # timed polls (watch_delta); the process totals (watch=) are printed.
+          grep -E '^M7 POLL .*tombstones=10000 .*path=/api/found .*watch_delta=\{"incr":[1-9][0-9]*,"lost":0,' m7-recheck.log >/dev/null \
+            || { echo "::error::found watcher at 10k over the timed polls: need incr delta>0 and lost delta==0"; grep -E '^M7 POLL .*path=/api/found' m7-recheck.log; exit 1; }
           # XO 03:36Z (3): withheld time (server, and as the page sees it
           # through its 200 ms poll) p95 and max <= 1 s, checked by the bar
           # script on every M7 WITHHELD line (no line fails it).
