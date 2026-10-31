@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use albumen_ingest::index::{
     check_saved_file, newest_slot, read_saved_file, slot_files, LibraryIndex, CRASH_ENV,
-    SAVE_PAUSE_ENV,
+    PARTIAL_VANISH_ENV, SAVE_PAUSE_ENV,
 };
 
 const CHILD_ENV: &str = "ALBUMEN_M6_CHILD";
@@ -892,4 +892,72 @@ fn two_writers(same: bool) {
     );
     assert_eq!(rollbacks.load(Ordering::Relaxed), 0, "a stale listing won");
     assert_eq!(sorted(saved), want);
+}
+
+/// XO FRAGO 11:54Z (3): a save whose temp file is gone at the rename (the
+/// rename gave up at once on NotFound) writes it again and lands; the
+/// refresh does not fail and no temp file is left.
+#[test]
+fn vanished_temp_file_is_written_again() {
+    let library = tempfile::tempdir().unwrap();
+    let index_dir = tempfile::tempdir().unwrap();
+    let hand = tempfile::tempdir().unwrap();
+    let mut all = make_library(library.path(), 50);
+    let mut ix = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    std::env::set_var(
+        PARTIAL_VANISH_ENV,
+        format!("{}|{}", library.path().display(), hand.path().display()),
+    );
+    std::fs::write(library.path().join("d01/after-vanish.jpg"), b"").unwrap();
+    all.insert("d01/after-vanish.jpg".into());
+    let res = ix.refresh();
+    println!(
+        "M6 PARTIAL_VANISH fired={} ok={} partial_rewrites={} partials={:?}",
+        hand.path().join("vanished").exists(),
+        res.is_ok(),
+        ix.partial_rewrites,
+        partials(index_dir.path())
+    );
+    res.unwrap();
+    assert!(hand.path().join("vanished").exists(), "hook did not fire");
+    assert_eq!(ix.partial_rewrites, 1);
+    assert!(partials(index_dir.path()).is_empty());
+    let (_, saved) = read_saved_file(&index_file(&ix)).unwrap();
+    assert_eq!(sorted(saved), all);
+}
+
+/// XO FRAGO 11:54Z (4): a delete+add in a trusted folder whose mtime is
+/// then forced back to the old value (same tick as far as the mtime shows)
+/// is still picked up: off Windows the folder stamp takes the ctime too.
+#[cfg(unix)]
+#[test]
+fn delete_add_with_mtime_forced_equal_is_seen() {
+    let library = tempfile::tempdir().unwrap();
+    let index_dir = tempfile::tempdir().unwrap();
+    let mut all = make_library(library.path(), 50);
+    let d = library.path().join("d02");
+    let mut ix = LibraryIndex::open(library.path(), Some(index_dir.path())).unwrap();
+    // Past the racy window, so the next listing of d02 is trusted.
+    std::thread::sleep(Duration::from_millis(
+        albumen_ingest::index::RACY_NANOS / 1_000_000 + 200,
+    ));
+    std::fs::write(library.path().join("d03/touch.jpg"), b"").unwrap();
+    all.insert("d03/touch.jpg".into());
+    ix.refresh().unwrap();
+    let old = std::fs::metadata(&d).unwrap().modified().unwrap();
+    let gone = all.iter().find(|p| p.starts_with("d02/")).unwrap().clone();
+    std::fs::remove_file(library.path().join(&gone)).unwrap();
+    std::fs::write(d.join("same-tick.jpg"), b"").unwrap();
+    all.remove(&gone);
+    all.insert("d02/same-tick.jpg".into());
+    std::fs::File::open(&d).unwrap().set_modified(old).unwrap();
+    assert_eq!(std::fs::metadata(&d).unwrap().modified().unwrap(), old);
+    ix.refresh().unwrap();
+    let got = sorted(ix.paths().to_vec());
+    println!(
+        "M6 MTIME_EQUAL gone_back={} new_missing={}",
+        got.contains(&gone),
+        !got.contains("d02/same-tick.jpg")
+    );
+    assert_eq!(got, all);
 }

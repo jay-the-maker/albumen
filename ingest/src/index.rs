@@ -91,6 +91,54 @@ fn save_pause(root: &Path) {
     }
 }
 
+/// Test hook (XO FRAGO 11:54Z (1)/(2)), only with the `test-hooks`
+/// feature: `ALBUMEN_TEST_MUTATE=ours-always` makes a merge keep this
+/// writer's listing of every folder (the rollback bug), and
+/// `no-notfound-skip` makes an entry removed between a listing and its stat
+/// an error again (the NotFound flake). CI runs the rollback and two-writer
+/// tests under each and requires them to FAIL.
+pub const MUTATE_ENV: &str = "ALBUMEN_TEST_MUTATE";
+
+fn mutated(what: &str) -> bool {
+    #[cfg(feature = "test-hooks")]
+    {
+        std::env::var(MUTATE_ENV).is_ok_and(|v| v.split(',').any(|m| m == what))
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        let _ = what;
+        false
+    }
+}
+
+/// Test hook (XO FRAGO 11:54Z (3)): `<library root>|<handshake dir>`. A
+/// save for exactly that root
+/// removes its own temp file once just before the rename (as a cleanup
+/// tool or another program might), then creates `<handshake dir>/vanished`.
+/// Fires once per handshake dir.
+pub const PARTIAL_VANISH_ENV: &str = "ALBUMEN_TEST_PARTIAL_VANISH";
+
+fn partial_vanish(root: &str, partial: &Path) {
+    let Ok(value) = std::env::var(PARTIAL_VANISH_ENV) else {
+        return;
+    };
+    let Some((want, dir)) = value.split_once('|') else {
+        return;
+    };
+    let same = Path::new(want)
+        .canonicalize()
+        .is_ok_and(|p| p.to_string_lossy() == root);
+    let mark = Path::new(dir).join("vanished");
+    if !same || mark.exists() {
+        return;
+    }
+    let _ = std::fs::write(&mark, b"");
+    let _ = std::fs::remove_file(partial);
+}
+
+/// Times a save writes its temp file again when it is gone at the rename.
+const PARTIAL_REWRITES: u32 = 3;
+
 /// Times a refused rename is tried again, waiting 5 ms, then twice as long
 /// each time (about 2.5 s in all).
 const RENAME_RETRIES: u32 = 9;
@@ -150,6 +198,8 @@ pub struct LibraryIndex {
     pub merges: u64,
     /// Renames tried again after the file was held by another program.
     pub rename_retries: u64,
+    /// Saves whose temp file was gone at the rename and was written again.
+    pub partial_rewrites: u64,
 }
 
 /// A saved index read from disk.
@@ -218,6 +268,7 @@ impl LibraryIndex {
             dirty: false,
             merges: 0,
             rename_retries: 0,
+            partial_rewrites: 0,
         };
         if let Some(saved) = index.read_saved() {
             index.dirs = saved.dirs;
@@ -286,7 +337,7 @@ impl LibraryIndex {
             }
             Err(err) => return Err(err),
         };
-        let mtime_ns = meta.modified().map(to_ns).unwrap_or(0);
+        let mtime_ns = dir_stamp_ns(&meta);
         let mut changed = false;
         let fresh = self.dirs.get(&relative).is_some_and(|record| {
             record.mtime_ns == mtime_ns
@@ -364,7 +415,7 @@ impl LibraryIndex {
     fn merge(&mut self, other: BTreeMap<String, DirRecord>) {
         for (dir, theirs) in other {
             match self.dirs.get(&dir) {
-                Some(ours) if ours.listed_ns >= theirs.listed_ns => {}
+                Some(ours) if ours.listed_ns >= theirs.listed_ns || mutated("ours-always") => {}
                 _ => {
                     self.dirs.insert(dir, theirs);
                 }
@@ -420,24 +471,49 @@ impl LibraryIndex {
         // Only the lock holder writes temp files, so any left are a crashed
         // writer's.
         remove_stale_partials(&file, &partial);
-        let mut handle = dest::create_file(&partial)?;
         let half = crash.as_deref() == Some("before-rename");
         let body = if half {
             &bytes[..bytes.len() / 2]
         } else {
             &bytes[..]
         };
-        handle
-            .write_all(body)
-            .and_then(|()| handle.sync_all())
-            .map_err(|err| IngestError::io(&partial, err))?;
-        drop(handle);
+        let write = || -> Result<(), IngestError> {
+            let mut handle = dest::create_file(&partial)?;
+            handle
+                .write_all(body)
+                .and_then(|()| handle.sync_all())
+                .map_err(|err| IngestError::io(&partial, err))
+        };
+        write()?;
         if half {
             std::process::abort();
         }
-        if let Err(err) = self.rename_with_retry(&partial, &target) {
-            dest::remove_file_best_effort(&partial);
-            return Err(err);
+        partial_vanish(&root, &partial);
+        // XO FRAGO 11:54Z (3): a temp file gone at the rename (removed by
+        // something else; the lock is still ours, so the target slot is
+        // untouched) is written again and renamed, a bounded number of times.
+        let mut rewrites = 0;
+        loop {
+            match self.rename_with_retry(&partial, &target) {
+                Ok(()) => break,
+                Err(err)
+                    if is_not_found(&err)
+                        && rewrites < PARTIAL_REWRITES
+                        && !partial.exists()
+                        && !mutated("no-partial-rewrite") =>
+                {
+                    rewrites += 1;
+                    self.partial_rewrites += 1;
+                    if let Err(err) = write() {
+                        dest::remove_file_best_effort(&partial);
+                        return Err(err);
+                    }
+                }
+                Err(err) => {
+                    dest::remove_file_best_effort(&partial);
+                    return Err(err);
+                }
+            }
         }
         if crash.as_deref() == Some("after-rename") {
             std::process::abort();
@@ -504,6 +580,33 @@ impl LibraryIndex {
             }
         }
     }
+}
+
+/// A folder's stamp. XO FRAGO 11:54Z (4): with [`RACY_NANOS`] (2 s) at
+/// least the coarsest folder time (FAT), a change after a trusted listing
+/// always moves the mtime, unless the mtime is set back (rsync -t, a
+/// restore, `touch -d`). Off Windows the stamp is the later of the mtime and
+/// the ctime, which no program can set back, so a delete+add with the mtime
+/// forced equal still moves it (`m6_mtime_tests`). Windows keeps the mtime
+/// (a set-back mtime there is still trusted).
+fn dir_stamp_ns(meta: &std::fs::Metadata) -> u64 {
+    let m = meta.modified().map(to_ns).unwrap_or(0);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if mutated("mtime-only") {
+            return m;
+        }
+        let c = (meta.ctime().max(0) as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(meta.ctime_nsec().max(0) as u64);
+        if m == 0 {
+            return 0;
+        }
+        m.max(c)
+    }
+    #[cfg(not(unix))]
+    m
 }
 
 fn is_not_found(err: &IngestError) -> bool {
@@ -818,7 +921,8 @@ fn list_dir(root: &SourceRoot, dir: &Path) -> Result<Vec<(String, bool)>, Ingest
         let meta = match root.metadata_nofollow(&path) {
             Ok(meta) => meta,
             Err(IngestError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
+                if source.kind() == std::io::ErrorKind::NotFound
+                    && !mutated("no-notfound-skip") =>
             {
                 continue;
             }

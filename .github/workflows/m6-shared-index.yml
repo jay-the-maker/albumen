@@ -299,6 +299,35 @@ jobs:
           grep -E 'ROLLBACK|panicked' -A2 two-writers-200.log | head -40 || true
           test "$fails" -eq 0 && test "$seeds" -eq 400 && test "$green" -eq 400
 
+      - name: Mutations must fail their tests (ours-always, NotFound, temp file, mtime)
+        # XO FRAGO 11:54Z (2): ALBUMEN_TEST_MUTATE (test-hooks feature only,
+        # no source patch) switches each fix off; the step passes only if
+        # every listed test then FAILS.
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen-ingest --features test-hooks --test index_shared --no-run
+          bad=0
+          for pair in \
+            "ours-always paused_writer_takes_the_newer_listing" \
+            "no-partial-rewrite vanished_temp_file_is_written_again" \
+            "mtime-only delete_add_with_mtime_forced_equal_is_seen"; do
+            set -- $pair
+            log="mutate-$1.log"
+            if ALBUMEN_TEST_MUTATE=$1 cargo test --release --locked -p albumen-ingest --features test-hooks \
+                --test index_shared -- --exact "$2" --nocapture > "$log" 2>&1; then
+              echo "::error::mutation $1: $2 passed (the test does not catch it)"; bad=1
+            elif grep -Eq '^test result: FAILED\. 0 passed; 1 failed' "$log"; then
+              echo "M6 MUTATION $1 test=$2 outcome=FAILED_AS_REQUIRED"
+              grep -m1 -A2 'panicked at' "$log" || true
+            else
+              echo "::error::mutation $1: $2 did not run as 1 failed test"; cat "$log"; bad=1
+            fi
+          done
+          ALBUMEN_TEST_MUTATE=ours-always cargo test --release --locked -p albumen-ingest --features test-hooks \
+            --lib index::merge_tests > mutate-ours-always-lib.log 2>&1 && { echo "::error::ours-always: merge unit tests passed"; bad=1; } || true
+          grep -E '^test result' mutate-ours-always-lib.log || true
+          test "$bad" -eq 0
+
       - name: M6 INVALID counter
         if: always()
         run: |
