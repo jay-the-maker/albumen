@@ -3700,3 +3700,48 @@ fn m7_exhausted_panics_keep_shown_photos_and_back_off() {
         f["hide_worker_panics"], f["hide_exhausted"]
     );
 }
+
+/// XO FRAGO 09:45Z (3): a panic while stamping a tombstone (par_map
+/// thread) fails closed. The request answers, the tombstone gets no stamp
+/// (untrusted: read again on every poll), the photo stays hidden, and a
+/// corruption of it is in the note on the next poll.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn a_panic_while_stamping_a_tombstone_fails_closed() {
+    let tomb = "d00/IMG_0003.JPG.albumen-tombstone";
+    let (lib, all) = open_small(
+        2,
+        &["d00/IMG_0003.JPG"],
+        &[("ALBUMEN_TEST_STAMP_PANIC", tomb)],
+    );
+    let want: std::collections::HashSet<String> = all
+        .iter()
+        .filter(|p| p.as_str() != "d00/IMG_0003.JPG")
+        .cloned()
+        .collect();
+    let n = |f: &serde_json::Value, k: &str| f[k].as_u64().unwrap();
+    let mut last = found_page(&lib.addr);
+    for _ in 0..3 {
+        let f = found_page(&lib.addr);
+        assert!(
+            n(&f, "hide_stamp_panics") > n(&last, "hide_stamp_panics"),
+            "the injected stamp panic did not run: {f}"
+        );
+        assert!(
+            n(&f, "hide_tombstone_reads") > n(&last, "hide_tombstone_reads"),
+            "a tombstone whose stamp panicked was trusted (not read again): {f}"
+        );
+        assert_eq!(lib.set(), want, "a photo whose stamp panicked showed");
+        last = f;
+    }
+    fs::write(lib.path().join(tomb), b"#corrupt").unwrap();
+    let f = found_page(&lib.addr);
+    let note = f["hide_note"].as_str().unwrap_or_default();
+    assert!(note.contains("IMG_0003.JPG.albumen-tombstone"), "{f}");
+    assert_eq!(lib.set(), want, "a corrupted tombstone showed its photo");
+    println!(
+        "M7 STAMP_PANIC panics={} reads={} note=yes",
+        n(&f, "hide_stamp_panics"),
+        n(&f, "hide_tombstone_reads")
+    );
+}

@@ -1024,7 +1024,14 @@ fn current_hide_note(library: &Path) -> Option<String> {
             // every tombstone gets its own handle stamp (`mtime`), which sees
             // the writer and leaves the stamp untrusted (fail closed). The
             // stamps run on `hide_threads()` threads (r12), outside the lock.
-            let stamps = par_map(&watch, |rel: &String| mtime(&library.join(rel)));
+            let stamps = par_map(
+                &watch,
+                |rel: &String| {
+                    stamp_panic_hook(rel);
+                    mtime(&library.join(rel))
+                },
+                |_| None,
+            );
             let mut guard = FOUND_TOMBS.lock().unwrap();
             let cache = guard.get_or_insert_with(Default::default);
             let keep: std::collections::HashSet<&String> = watch.iter().collect();
@@ -2910,28 +2917,66 @@ fn apply_landed() {
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static APPLY_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Threads for re-lists and the carried-show stats: one core is left for
-/// requests (XO 04:08Z, the Windows k=1/k=2 stalls).
 /// `f` over `items` on up to `hide_threads()` scoped threads (in order);
-/// one thread under 1,024 items.
-fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+/// one thread under 1,024 items. XO FRAGO 09:45Z (3): fails closed. A
+/// panic in `f` is caught per item and that item gets `fallback` (for a
+/// tombstone stamp: no stamp, so it is untrusted and read again, and an
+/// unreadable one is hidden); the request does not panic.
+/// `hide_stamp_panics` in `/api/found` counts them.
+fn par_map<T: Sync, R: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> R + Sync,
+    fallback: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let one = |t: &T| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(t))).unwrap_or_else(|_| {
+            STAMP_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            fallback(t)
+        })
+    };
     let threads = hide_threads();
     if threads <= 1 || items.len() < 1024 {
-        return items.iter().map(f).collect();
+        return items.iter().map(one).collect();
     }
     let chunk = items.len().div_ceil(threads);
-    let f = &f;
+    let one = &one;
     std::thread::scope(|sc| {
         let hs: Vec<_> = items
             .chunks(chunk)
-            .map(|c| sc.spawn(move || c.iter().map(f).collect::<Vec<R>>()))
+            .map(|c| (c, sc.spawn(move || c.iter().map(one).collect::<Vec<R>>())))
             .collect();
         hs.into_iter()
-            .flat_map(|h| h.join().expect("stamp thread"))
+            .flat_map(|(c, h)| {
+                // `one` catches every panic of `f`; a thread that still died
+                // (fallback panicked) gives its whole chunk the fallback.
+                h.join().unwrap_or_else(|_| {
+                    STAMP_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    c.iter().map(&fallback).collect::<Vec<R>>()
+                })
+            })
             .collect()
     })
 }
 
+/// Test hook (XO FRAGO 09:45Z (3)): `ALBUMEN_TEST_STAMP_PANIC=<suffix>`
+/// panics the stamp of a tombstone whose path ends with it.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn stamp_panic_hook(rel: &str) {
+    if let Some(v) = std::env::var_os("ALBUMEN_TEST_STAMP_PANIC") {
+        if !v.is_empty() && rel.ends_with(&*v.to_string_lossy()) {
+            panic!("ALBUMEN_TEST_STAMP_PANIC {rel}");
+        }
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+fn stamp_panic_hook(_: &str) {}
+
+/// Panics caught in [`par_map`] (`hide_stamp_panics`).
+static STAMP_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Threads for re-lists and the carried-show stats: one core is left for
+/// requests (XO 04:08Z, the Windows k=1/k=2 stalls).
 fn hide_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, |n| n.get())
@@ -3531,6 +3576,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_key": key_kind().name(),
         "hide_changetime_keys": CHANGETIME_KEYS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_dir_listed": DIR_LISTED.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_stamp_panics": STAMP_PANICS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_req": req_stats::json(),
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
         "hide_same_tick_ms": RECENT_MS.load(std::sync::atomic::Ordering::Relaxed),
