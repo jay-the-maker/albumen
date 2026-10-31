@@ -895,29 +895,35 @@ const RECENT: std::time::Duration = std::time::Duration::from_secs(2);
 static SERVE_NOTES: Mutex<std::collections::BTreeMap<String, String>> =
     Mutex::new(std::collections::BTreeMap::new());
 
-/// An entry's mtime plus a change key mtime alone misses (for files, also
-/// a hash of the contents, see [`content_key`]): `rsync -t`/`-a`
+/// An entry's mtime plus a change key mtime alone misses: `rsync -t`/`-a`
 /// brings a hide in and puts the folder's old mtime back (A8). On Unix the
-/// key is the ctime, which no user call can set back. Elsewhere it is, for
-/// a folder, its entry count plus a hash of its tombstone names and sizes;
-/// for a file, its size.
+/// key is the ctime alone, which no user call can set back. Elsewhere it
+/// is, for a folder, its entry count plus a hash of its tombstone names and
+/// sizes; for a file, its size plus a hash of its bytes (see
+/// [`content_key`]).
 fn mtime(p: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::symlink_metadata(p).ok()?;
-    let mut key = os_key(p, &m);
-    if m.is_file() {
-        key = key.wrapping_mul(31).wrapping_add(content_key(p, &m));
-    }
-    Some((m.modified().ok()?, key))
+    Some((m.modified().ok()?, os_key(p, &m)))
+}
+
+#[cfg(unix)]
+fn os_key(_: &Path, m: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    (m.ctime() as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(m.ctime_nsec() as u64)
 }
 
 /// Largest stamped file (a tombstone) hashed whole; tombstones are tiny.
+#[cfg(not(unix))]
 const CONTENT_KEY_MAX: u64 = 16 * 1024;
 
-/// A hash of a stamped file's bytes, so a same-size rewrite with its mtime
-/// set back (hidden true <-> false) is seen on every OS. Windows' change
-/// time is not exposed by stable std, so this is the cross-OS check. A
-/// file over the cap or that can't be read gets a fresh key every time, so
-/// its folder is re-read on each request (fail closed).
+/// Off Unix, a hash of a stamped file's bytes, so a same-size rewrite with
+/// its mtime set back (hidden true <-> false) is seen; stable std does not
+/// expose the Windows change time. A file over the cap or that can't be
+/// read gets a fresh key every time: it is always re-read (caching is off
+/// for it).
+#[cfg(not(unix))]
 fn content_key(p: &Path, m: &std::fs::Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     static UNSTABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -935,19 +941,11 @@ fn content_key(p: &Path, m: &std::fs::Metadata) -> u64 {
     }
 }
 
-#[cfg(unix)]
-fn os_key(_: &Path, m: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    (m.ctime() as u64)
-        .wrapping_mul(1_000_000_000)
-        .wrapping_add(m.ctime_nsec() as u64)
-}
-
 #[cfg(not(unix))]
 fn os_key(p: &Path, m: &std::fs::Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     if !m.is_dir() {
-        return m.len();
+        return m.len().wrapping_mul(31).wrapping_add(content_key(p, m));
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let mut count = 0u64;
