@@ -541,6 +541,7 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
         found_paths: Default::default(),
         index_note: Default::default(),
     });
+    *SERVER.lock().unwrap() = Some(Arc::downgrade(&server));
     if server.config.demo {
         // The demo library is tiny: have it ready before the first request.
         publish_library(
@@ -636,6 +637,8 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
                 (o.parse().unwrap_or(0), limit)
             });
             let found = server.found.load(std::sync::atomic::Ordering::Relaxed);
+            // M7: hides made since the listing apply on this request.
+            let cur = cur.map(|v| current_view(server, v));
             match cur {
                 Some(v) => {
                     if !v.ready {
@@ -655,7 +658,10 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             // A Live Photo's movie, bytes as on disk, streamed with Range
             // support so the player can seek. No transcode.
             let rel = http::query_param(&req.target, "p").unwrap_or_default();
-            match live::open_video(&server.config.library, &rel) {
+            let open = (!hidden_now(server, &rel))
+                .then(|| live::open_video(&server.config.library, &rel))
+                .flatten();
+            match open {
                 Some((mut file, len)) => {
                     live::write_video(&mut stream, &mut file, len, req.header("range"))
                 }
@@ -668,7 +674,10 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
         }
         ("GET", "/img") => {
             let rel = http::query_param(&req.target, "p").unwrap_or_default();
-            match read_image(&server.config.library, &rel) {
+            let read = (!hidden_now(server, &rel))
+                .then(|| read_image(&server.config.library, &rel))
+                .flatten();
+            match read {
                 Some((bytes, mime)) => http::respond(&mut stream, 200, mime, &bytes),
                 None => http::respond(&mut stream, 404, "text/plain", b"not found"),
             }
@@ -849,6 +858,216 @@ fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
         paths.retain(|p| !hidden.paths.contains(p));
     }
     paths
+}
+
+/// M7: hide state as of the last request, for one ready listing. Keyed by
+/// the stat of every directory holding a listed photo (a new tombstone
+/// changes its directory), every watched tombstone (a rewrite in place) and
+/// the family log directories (a new entry), so nothing is re-read until a
+/// file changes. Reads only; nothing in the library is written.
+struct Fresh {
+    generation: u64,
+    dirs: Vec<String>,
+    stamp: Vec<Option<SystemTime>>,
+    hidden: Arc<std::collections::HashSet<String>>,
+}
+
+static FRESH: Mutex<Option<Fresh>> = Mutex::new(None);
+
+fn mtime(p: &Path) -> Option<SystemTime> {
+    std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// Family log directories (`members/<m>/log`), or none outside a family
+/// library. Their own mtimes change when an entry is added.
+fn family_logs(library: &Path) -> Vec<PathBuf> {
+    if !library.join("genesis.json").is_file() {
+        return Vec::new();
+    }
+    let mut out = vec![library.join("members")];
+    if let Ok(rd) = std::fs::read_dir(library.join("members")) {
+        for e in rd.flatten() {
+            out.push(e.path().join("log"));
+        }
+    }
+    out.sort();
+    out
+}
+
+fn stamp(library: &Path, dirs: &[String]) -> Vec<Option<SystemTime>> {
+    let mut st: Vec<Option<SystemTime>> = dirs.iter().map(|d| mtime(&library.join(d))).collect();
+    for f in family_logs(library) {
+        st.push(mtime(&f));
+    }
+    for t in HIDE_WATCH.lock().unwrap().clone().unwrap_or_default() {
+        st.push(mtime(&library.join(t)));
+    }
+    st
+}
+
+/// The listed paths hidden right now. Re-evaluated with
+/// [`albumen_ingest::hides::hidden_paths`] whenever the stamp changed:
+/// tombstones are found by listing each photo directory again, the family
+/// log is re-read. Fails closed: a directory that can't be listed hides its
+/// photos, and hide errors keep their photos hidden and set the quiet line.
+fn hidden_for(server: &Server, v: &LibraryView) -> Arc<std::collections::HashSet<String>> {
+    use albumen_ingest::hides::TOMBSTONE_SUFFIX;
+    let lib = &server.config.library;
+    let mut fresh = FRESH.lock().unwrap();
+    if fresh.as_ref().is_none_or(|f| f.generation != v.generation) {
+        let mut dirs: Vec<String> = (0..v.len() as u32)
+            .map(|i| {
+                v.path(i)
+                    .rsplit_once('/')
+                    .map_or("", |(d, _)| d)
+                    .to_string()
+            })
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        *fresh = Some(Fresh {
+            generation: v.generation,
+            dirs,
+            stamp: Vec::new(),
+            hidden: Default::default(),
+        });
+    }
+    let f = fresh.as_mut().unwrap();
+    let now = stamp(lib, &f.dirs);
+    if !f.stamp.is_empty() && now == f.stamp {
+        return Arc::clone(&f.hidden);
+    }
+    let mut all: Vec<String> = (0..v.len() as u32).map(|i| v.path(i).to_string()).collect();
+    let mut unlisted = std::collections::HashSet::new();
+    let mut tombs = Vec::new();
+    for d in &f.dirs {
+        match std::fs::read_dir(lib.join(d)) {
+            Ok(rd) => {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if name.ends_with(TOMBSTONE_SUFFIX) {
+                        tombs.push(if d.is_empty() {
+                            name
+                        } else {
+                            format!("{d}/{name}")
+                        });
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("albumen gui: hide: can't list {d} ({err}); hiding its photos");
+                unlisted.insert(d.clone());
+            }
+        }
+    }
+    all.extend(tombs.iter().cloned());
+    let h = albumen_ingest::hides::hidden_paths(lib, &all, None);
+    for err in &h.errors {
+        eprintln!("albumen gui: hide: {}", err.replace('\n', ": "));
+    }
+    *HIDE_NOTE.lock().unwrap() = hide_note(&h.errors);
+    *HIDE_WATCH.lock().unwrap() = Some(tombs);
+    let mut hidden: std::collections::HashSet<String> = h.paths.into_iter().collect();
+    for i in 0..v.len() as u32 {
+        let p = v.path(i);
+        if unlisted.contains(p.rsplit_once('/').map_or("", |(d, _)| d)) {
+            hidden.insert(p.to_string());
+        }
+    }
+    // An unhide needs the photo back, which the view no longer holds: list
+    // again in the background (hides only ever narrow the view here).
+    let unhid = f.hidden.iter().any(|p| !hidden.contains(p));
+    f.stamp = stamp(lib, &f.dirs);
+    f.hidden = Arc::new(hidden);
+    let out = Arc::clone(&f.hidden);
+    drop(fresh);
+    if unhid {
+        if let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
+            refresh_thumbs(&s);
+        }
+    }
+    out
+}
+
+/// The server, for the background re-list an unhide needs.
+static SERVER: Mutex<Option<std::sync::Weak<Server>>> = Mutex::new(None);
+
+/// The cached view minus anything hidden since it was built. A ready view
+/// that lost photos is replaced (so pages and counts stay consistent) unless
+/// a newer listing was published meanwhile.
+fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
+    if !v.ready {
+        return v;
+    }
+    let hidden = hidden_for(server, &v);
+    if !(0..v.len() as u32).any(|i| hidden.contains(v.path(i))) {
+        return v;
+    }
+    let mut out = LibraryView {
+        generation: v.generation,
+        ready: true,
+        library: v.library.clone(),
+        files: v.files,
+        image_bytes: v.image_bytes,
+        ..Default::default()
+    };
+    let mut map = vec![u32::MAX; v.len()];
+    for (i, slot) in map.iter_mut().enumerate() {
+        if hidden.contains(v.path(i as u32)) {
+            out.files = out.files.saturating_sub(1);
+            continue;
+        }
+        *slot = out.record_ends.len() as u32;
+        out.records
+            .extend_from_slice(slice_at(&v.records, &v.record_ends, i));
+        out.record_ends.push(out.records.len() as u32);
+        out.paths.extend_from_slice(v.path(i as u32).as_bytes());
+        out.path_ends.push(out.paths.len() as u32);
+    }
+    for e in &v.events {
+        let photos: Vec<u32> = e
+            .photos
+            .iter()
+            .map(|&p| map[p as usize])
+            .filter(|&p| p != u32::MAX)
+            .collect();
+        let Some(&first) = photos.first() else {
+            continue;
+        };
+        let cover = match map[e.cover as usize] {
+            u32::MAX => first,
+            c => c,
+        };
+        out.events.push(EventIdx {
+            title: e.title.clone(),
+            day: e.day.clone(),
+            cover,
+            photos,
+        });
+    }
+    let out = Arc::new(out);
+    let mut lv = server.library.lock().unwrap();
+    if lv.as_ref().is_some_and(|c| Arc::ptr_eq(c, &v)) {
+        *lv = Some(Arc::clone(&out));
+    }
+    out
+}
+
+/// Whether `rel` is hidden right now, for `/img` and `/video`: its own
+/// tombstone (read now, fail closed) or the current hide state of the
+/// listing. Before a listing is ready only the tombstone is checked.
+fn hidden_now(server: &Server, rel: &str) -> bool {
+    if !matches!(
+        albumen_ingest::hides::receiver_hidden(&server.config.library, rel),
+        Ok(false)
+    ) {
+        return true;
+    }
+    let cur = server.library.lock().unwrap().clone();
+    match cur {
+        Some(v) if v.ready => hidden_for(server, &v).contains(rel),
+        _ => false,
+    }
 }
 
 /// The library's files from the persisted M3 path index (the one search
