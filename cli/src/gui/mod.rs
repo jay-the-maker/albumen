@@ -2518,7 +2518,7 @@ fn hidden_for(
                 jobs.len(),
                 keep_done.as_secs_f64() * 1e3,
                 (t.elapsed() - keep_done).as_secs_f64() * 1e3,
-                KEEP_DETAIL.lock().unwrap()
+                keep_detail_get()
             )
         });
     }
@@ -2959,6 +2959,29 @@ const APPLY_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 /// out).
 /// How the last keep_shown spent its time (for `inline_t`).
 static KEEP_DETAIL: Mutex<String> = Mutex::new(String::new());
+/// XO FRAGO 11:30Z (d): KEEP_DETAIL is only ever try_locked (a diagnostic
+/// never waits on another request); each write or read given up is counted
+/// here (`/api/found` `keep_detail_skipped`).
+static KEEP_DETAIL_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn keep_detail_set(make: impl FnOnce() -> String) {
+    match KEEP_DETAIL.try_lock() {
+        Ok(mut g) => *g = make(),
+        Err(_) => {
+            KEEP_DETAIL_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn keep_detail_get() -> String {
+    match KEEP_DETAIL.try_lock() {
+        Ok(g) => g.clone(),
+        Err(_) => {
+            KEEP_DETAIL_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            "keep_detail=busy".to_string()
+        }
+    }
+}
 
 fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<bool>) {
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
@@ -3112,11 +3135,13 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
     let run = |n: usize| check(&jobs[n], &sets[n]);
     if threads == 1 || jobs.len() < 4 {
         let r = (0..jobs.len()).map(run).unzip();
-        *KEEP_DETAIL.lock().unwrap() = format!(
-            "group_ms={:.2} threads=1 checks_ms={:.2}",
-            grouped.as_secs_f64() * 1e3,
-            (t_keep.elapsed() - grouped).as_secs_f64() * 1e3
-        );
+        keep_detail_set(|| {
+            format!(
+                "group_ms={:.2} threads=1 checks_ms={:.2}",
+                grouped.as_secs_f64() * 1e3,
+                (t_keep.elapsed() - grouped).as_secs_f64() * 1e3
+            )
+        });
         return r;
     }
     let out: Vec<Mutex<Option<(Withhold, bool)>>> =
@@ -3150,15 +3175,17 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
     {
         let w = workers.into_inner().unwrap();
         let mx = |f: fn(&(u64, u64, u64)) -> u64| w.iter().map(f).max().unwrap_or(0) as f64 / 1e3;
-        *KEEP_DETAIL.lock().unwrap() = format!(
-            "group_ms={:.2} threads={threads} checks_ms={:.2} worker_start_delay_max_ms={:.2} \
+        keep_detail_set(|| {
+            format!(
+                "group_ms={:.2} threads={threads} checks_ms={:.2} worker_start_delay_max_ms={:.2} \
              worker_wall_max_ms={:.2} worker_cpu_max_ms={:.2}",
-            grouped.as_secs_f64() * 1e3,
-            (t_keep.elapsed() - grouped).as_secs_f64() * 1e3,
-            mx(|x| x.0),
-            mx(|x| x.1),
-            mx(|x| x.2)
-        );
+                grouped.as_secs_f64() * 1e3,
+                (t_keep.elapsed() - grouped).as_secs_f64() * 1e3,
+                mx(|x| x.0),
+                mx(|x| x.1),
+                mx(|x| x.2)
+            )
+        });
     }
     let out: Vec<(Withhold, bool)> = out
         .into_iter()
@@ -4252,6 +4279,9 @@ fn found_json(server: &Server) -> serde_json::Value {
         "lib_req_last": LIB_REQ_LAST.lock().unwrap().clone(),
     });
     out["lib_req_skipped"] = LIB_REQ_SKIPPED
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["keep_detail_skipped"] = KEEP_DETAIL_SKIPPED
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["hide_found_note"] = found_note_t::json();
@@ -5909,7 +5939,8 @@ mod tests {
 
     /// XO FRAGO 10:44Z (F): what the always-on /api/library step timers
     /// (92f33bd) cost per request: `hide_diag` start, eight marks, finish,
-    /// and `lib_req_record` (format + the LIB_REQ_LAST lock), on vs off,
+    /// `lib_req_record` (format + the LIB_REQ_LAST lock) and the keep_shown
+    /// KEEP_DETAIL try_lock write (XO FRAGO 11:30Z (d)), on vs off,
     /// with and without a second thread reading LIB_REQ_LAST the way
     /// /api/found does. Diagnostic: `cargo test --release -p albumen --bin
     /// albumen step_timer_overhead -- --ignored --nocapture`.
@@ -5933,6 +5964,7 @@ mod tests {
                     Duration::from_micros(5),
                     Duration::from_micros(60),
                 );
+                keep_detail_set(|| format!("group_ms={:.2} threads=1 checks_ms={:.2}", 0.1, 0.2));
             }
             std::hint::black_box(t.elapsed())
         };
@@ -5948,6 +5980,7 @@ mod tests {
                 std::thread::spawn(move || {
                     while !stop.load(Ordering::Relaxed) {
                         std::hint::black_box(LIB_REQ_LAST.lock().unwrap().clone());
+                        std::hint::black_box(keep_detail_get());
                     }
                 })
             });
@@ -5958,8 +5991,15 @@ mod tests {
                 r.join().unwrap();
             }
             println!(
-                "M7 STEP_TIMER_OVERHEAD contended_reader={contended} n={N} off_ns p50={} p99={} max={} on_ns p50={} p99={} max={} lib_req_skipped={}",
-                off.0, off.1, off.2, on.0, on.1, on.2, LIB_REQ_SKIPPED.load(Ordering::Relaxed)
+                "M7 STEP_TIMER_OVERHEAD contended_reader={contended} n={N} off_ns p50={} p99={} max={} on_ns p50={} p99={} max={} lib_req_skipped={} keep_detail_skipped={}",
+                off.0,
+                off.1,
+                off.2,
+                on.0,
+                on.1,
+                on.2,
+                LIB_REQ_SKIPPED.load(Ordering::Relaxed),
+                KEEP_DETAIL_SKIPPED.load(Ordering::Relaxed)
             );
         }
     }
