@@ -158,6 +158,8 @@ jobs:
             || { echo "::error::expected 4 M7 NO_FLICKER_INLINE lines (keep_shown and set build under the cap)"; exit 1; }
           # XO 09:12Z: per-request tombstone file touches and lock wait per variant.
           grep -E 'M7 NO_FLICKER_REQ variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_REQ lines"; exit 1; }
+          # XO 13:30Z (3): retake_stale, gen_backwards and walk_failures per variant (printed, not a bar).
+          grep -E 'M7 NO_FLICKER_RETAKE variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_RETAKE lines"; exit 1; }
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
 
@@ -456,6 +458,8 @@ jobs:
             || { echo "::error::expected 4 M7 NO_FLICKER_INLINE lines (keep_shown and set build under the cap)"; exit 1; }
           # XO 09:12Z: per-request tombstone file touches and lock wait per variant.
           grep -E 'M7 NO_FLICKER_REQ variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_REQ lines"; exit 1; }
+          # XO 13:30Z (3): retake_stale, gen_backwards and walk_failures per variant (printed, not a bar).
+          grep -E 'M7 NO_FLICKER_RETAKE variant=' m7-nf.log || { echo "::error::no M7 NO_FLICKER_RETAKE lines"; exit 1; }
           grep -Ec '^(test m7_no_flicker[a-z_]* \.\.\. )?M7 NO_FLICKER_REWALKS variant=[a-z_]+ generation=22 max=22$' m7-nf.log | grep -qx 4 \
             || { echo "::error::expected 4 M7 NO_FLICKER_REWALKS lines with generation == 22"; exit 1; }
 

@@ -2270,6 +2270,9 @@ fn hidden_for(
     let req_lock_us = req_t0.elapsed().as_micros() as u64;
     let mut req_keep_dirs = 0u64;
     hide_diag::mark("lock");
+    if fresh.as_ref().is_some_and(|f| f.generation > v.generation) {
+        GEN_BACKWARDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     if fresh.as_ref().is_none_or(|f| f.generation != v.generation) {
         // Grouped by borrowed folder name (one String per folder, not per
         // photo): this runs on the first request of every re-walk.
@@ -3580,6 +3583,9 @@ type Shows = Vec<(String, (SystemTime, u64))>;
 /// Marks a fail-closed retake answer's version (never cached or stored).
 const RETAKE_VERSION_BIT: u64 = 1 << 63;
 static REQ_RETAKE_STALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Requests whose view was older than the state's generation (a walk
+/// installed while the request held the previous view).
+static GEN_BACKWARDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The blink wait releases FRESH (XO 12:30Z (1)); off with
 /// ALBUMEN_REQ_WAIT_UNLOCKED=0 (for an A/B).
 fn req_wait_unlocked_on() -> bool {
@@ -4759,6 +4765,9 @@ fn found_json(server: &Server) -> serde_json::Value {
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
     out["hide_req_retake_stale"] = REQ_RETAKE_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_gen_backwards"] = GEN_BACKWARDS
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["hide_prestamp_req_stale"] = PRESTAMP_REQ_STALE

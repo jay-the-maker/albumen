@@ -997,6 +997,15 @@ fn no_flicker(variant: &str) {
     // another platform names its photo and tombstone state.
     let causes = found_page(&addr)["hide_rewalk_causes"].clone();
     println!("M7 NO_FLICKER_REWALK_CAUSES variant={variant} causes={causes}");
+    {
+        // XO 13:30Z (3): the unlocked-wait retakes and requests that came
+        // with an older view than the state's (a 23rd re-walk's suspects).
+        let f = found_page(&addr);
+        println!(
+            "M7 NO_FLICKER_RETAKE variant={variant} retake_stale={} gen_backwards={} walk_failures={}",
+            f["hide_req_retake_stale"], f["hide_gen_backwards"], f["walk_failures"]
+        );
+    }
     println!("M7 NO_FLICKER_REWALKS variant={variant} generation={rewalks} max={MAX_REWALKS}");
     // XO 05:41Z (3): asserted, not only printed. One walk at the start and
     // at most one per grown listing (21); a re-list of the folder with the
