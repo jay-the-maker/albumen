@@ -2058,13 +2058,7 @@ fn hidden_for(
     let req_t0 = std::time::Instant::now();
     let req_io0 = TOMB_IO.load(std::sync::atomic::Ordering::Relaxed);
     let is_req = !APPLY_ONLY.get();
-    if is_req {
-        REQ_WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
     let mut fresh = FRESH.lock().unwrap();
-    if is_req {
-        REQ_WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
     let req_lock_us = req_t0.elapsed().as_micros() as u64;
     let mut req_keep_dirs = 0u64;
     hide_diag::mark("lock");
@@ -3035,10 +3029,6 @@ fn apply_landed() {
 }
 
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Requests waiting for (or about to take) the FRESH lock.
-static REQ_WAITING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Applier passes skipped because a request was waiting.
-static YIELDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static APPLY_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Threads for re-lists and the carried-show stats: one core is left for
@@ -3643,7 +3633,6 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_changetime_keys": CHANGETIME_KEYS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_dir_listed": DIR_LISTED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_req": req_stats::json(),
-        "hide_applier_yields": YIELDED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
         "hide_same_tick_ms": RECENT_MS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_fs": FS_NAME.lock().unwrap().clone(),

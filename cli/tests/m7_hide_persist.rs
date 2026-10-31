@@ -2221,6 +2221,80 @@ fn an_unreadable_tombstone_is_not_reread_while_its_stamp_is_unchanged() {
     );
 }
 
+/// Product Lead 0926Z gate D2 / XO FRAGO 09:28Z (b): the production path,
+/// no test hook. A real SHOW tombstone whose stamp can never be trusted
+/// (mtime an hour in the future, as a sync from a skewed clock leaves it)
+/// is read again on every request, by design: an untrusted show may have
+/// been rewritten to a hide without a stamp change, so trusting it would
+/// break A8. The cost is real, so it is measured and printed
+/// (`M7 UNTRUSTED_REREADS`) for CI: 256 such tombstones, 10 requests,
+/// reads per request and ms per request, beside a real HIDDEN tombstone
+/// (also future-dated) that must stay hidden and is not re-read.
+#[test]
+fn an_untrusted_real_tombstone_reread_cost_is_measured() {
+    const N: usize = 256;
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let future = SystemTime::now() + Duration::from_secs(3600);
+    let mut want = Vec::new();
+    for i in 0..=N {
+        let name = format!("IMG_{i:04}.JPG");
+        fs::write(
+            library.path().join(&name),
+            format!("synthetic-m7-untrusted-{name}"),
+        )
+        .unwrap();
+        let tomb = library.path().join(format!("{name}.albumen-tombstone"));
+        if i == 0 {
+            fs::write(&tomb, br#"{"hidden":true,"reason":"hide"}"#).unwrap();
+        } else {
+            fs::write(&tomb, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+            want.push(name);
+        }
+        set_mtime(&tomb, future);
+    }
+    set_mtime(
+        library.path(),
+        SystemTime::now() - Duration::from_secs(3600),
+    );
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    let reads = || found_page(&addr)["hide_recheck_reads"].as_u64().unwrap();
+    assert_eq!(
+        listed(&addr),
+        want,
+        "a hidden photo showed, or a shown one did not"
+    );
+    let r0 = reads();
+    let mut worst = 0.0f64;
+    let t = Instant::now();
+    for _ in 0..10 {
+        let q = Instant::now();
+        assert_eq!(
+            listed(&addr),
+            want,
+            "a hidden photo showed, or a shown one did not"
+        );
+        worst = worst.max(q.elapsed().as_secs_f64() * 1000.0);
+    }
+    let ms = t.elapsed().as_secs_f64() * 1000.0 / 10.0;
+    let r1 = reads();
+    println!(
+        "M7 UNTRUSTED_REREADS tombstones={N} requests=10 reads={} reads_per_request={:.1} \
+         per_request_ms={ms:.2} max_request_ms={worst:.2}",
+        r1 - r0,
+        (r1 - r0) as f64 / 10.0
+    );
+    // The hidden one is not re-read: at most the N untrusted shows each request.
+    assert!(
+        r1 - r0 <= 10 * N as u64,
+        "the hidden tombstone was re-read too"
+    );
+}
+
 /// Product Lead 0912Z D2 (A8 for an open writer): in a listed folder (70
 /// more tombstones, so 72: the masked listing on Windows), a valid SHOW
 /// tombstone is rewritten in place to a valid HIDDEN one through a handle
@@ -2666,7 +2740,7 @@ fn m7_recheck_and_img_diagnostics() {
         println!(
             "M7 RECHECK_SYNC_REQ files={files} tombstones={written} samples={} lock_wait_max_ms={:.2} \
              drain_max_ms={:.2} tomb_io_max={} keep_dirs_max={} slowest_ms={} slowest_lock_wait_ms={} \
-             slowest_drain_ms={} slowest_tomb_io={} slowest_keep_dirs={} applier_yields={}",
+             slowest_drain_ms={} slowest_tomb_io={} slowest_keep_dirs={}",
             sync_req.len(),
             sync_req.iter().map(|x| x.0).fold(0.0, f64::max),
             sync_req.iter().map(|x| x.1).fold(0.0, f64::max),
@@ -2677,7 +2751,6 @@ fn m7_recheck_and_img_diagnostics() {
             slowest.map_or("n/a".into(), |x| format!("{:.2}", x.1)),
             slowest.map_or("n/a".into(), |x| x.2.to_string()),
             slowest.map_or("n/a".into(), |x| x.3.to_string()),
-            found_page(&addr)["hide_applier_yields"],
         );
         println!(
             "M7 RECHECK_SPLIT files={files} tombstones={written} \
@@ -3088,7 +3161,7 @@ fn no_flicker(variant: &str) {
     println!(
         "M7 NO_FLICKER_REQ variant={variant} requests={} tomb_io_total={} tomb_io_max={} \
          lock_wait_max_ms={} drain_max_ms={} total_max_ms={} tombstone_reads={} recheck_reads={} \
-         keep_stats={} applier_yields={}",
+         keep_stats={}",
         r["requests"],
         r["tomb_io_total"],
         r["tomb_io_max"],
@@ -3098,7 +3171,6 @@ fn no_flicker(variant: &str) {
         f["hide_tombstone_reads"],
         f["hide_recheck_reads"],
         f["hide_keep_stats"],
-        f["hide_applier_yields"],
     );
     assert!(
         keep <= INLINE_CAP_MS && build <= INLINE_CAP_MS,
