@@ -616,7 +616,7 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 49 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
