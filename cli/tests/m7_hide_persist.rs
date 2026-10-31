@@ -2830,3 +2830,89 @@ fn m7_applier_retries_are_bounded() {
         *set == want
     });
 }
+/// XO 12:52Z (d), A9 option (c): `/api/found` stamps only what a change
+/// notification named. With notifications dropped (the test hook drops
+/// every queued event and reports the loss, as an overflow does) a
+/// corrupted tombstone is still in the note on the next poll (full stamp,
+/// fail closed); with notifications on, a later corruption is caught by the
+/// notification alone (no full stamp on that poll).
+#[test]
+fn dropped_notifications_still_put_a_corrupted_tombstone_in_the_note_within_one_poll() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for name in ["IMG_0001.JPG", "IMG_0002.JPG"] {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-drop-{name}"),
+        )
+        .unwrap();
+    }
+    let good = br#"{"hidden":true,"reason":"hide"}"#;
+    let mut bad = good.to_vec();
+    bad[0] = b'#';
+    let tomb = library.path().join("IMG_0002.JPG.albumen-tombstone");
+    fs::write(&tomb, good).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    set_mtime(&tomb, old);
+    set_mtime(library.path(), old);
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    assert!(ready_found(&addr)["hide_note"].is_null());
+    std::thread::sleep(Duration::from_millis(2100));
+    found_page(&addr);
+    let warm = found_page(&addr);
+    let watched = cfg!(any(target_os = "linux", windows));
+    let n = |f: &serde_json::Value, k: &str| f["hide_found_notify"][k].as_u64().unwrap();
+    println!("M7 NOTIFY warm {}", warm["hide_found_notify"]);
+    if watched {
+        assert!(n(&warm, "incr") > 0, "no poll used notifications: {warm}");
+    }
+    // Dropped: the loss is reported, so the poll stamps everything.
+    let flag = library.path().join(".albumen-test-notify-drop");
+    fs::write(&flag, b"").unwrap();
+    fs::write(&tomb, &bad).unwrap();
+    set_mtime(&tomb, old);
+    let polled = found_page(&addr);
+    println!(
+        "M7 NOTIFY dropped {} note={}",
+        polled["hide_found_notify"], polled["hide_note"]
+    );
+    let note = polled["hide_note"].as_str().unwrap_or_default();
+    assert!(note.contains("IMG_0002.JPG.albumen-tombstone"), "{polled}");
+    if watched {
+        assert!(n(&polled, "lost") > n(&warm, "lost"), "{polled}");
+    }
+    // Fixed, notifications back, and past the same-tick window again.
+    fs::remove_file(&flag).unwrap();
+    fs::write(&tomb, good).unwrap();
+    set_mtime(&tomb, old);
+    let mut fixed = found_page(&addr);
+    for _ in 0..20 {
+        if fixed["hide_note"].is_null() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        fixed = found_page(&addr);
+    }
+    assert!(fixed["hide_note"].is_null(), "{fixed}");
+    std::thread::sleep(Duration::from_millis(2100));
+    found_page(&addr);
+    let quiet = found_page(&addr);
+    fs::write(&tomb, &bad).unwrap();
+    set_mtime(&tomb, old);
+    let polled = found_page(&addr);
+    println!(
+        "M7 NOTIFY notified {} note={}",
+        polled["hide_found_notify"], polled["hide_note"]
+    );
+    let note = polled["hide_note"].as_str().unwrap_or_default();
+    assert!(note.contains("IMG_0002.JPG.albumen-tombstone"), "{polled}");
+    if watched {
+        assert_eq!(
+            n(&polled, "full"),
+            n(&quiet, "full"),
+            "a full stamp ran: {polled}"
+        );
+    }
+}

@@ -18,6 +18,7 @@ use std::time::SystemTime;
 use albumen_ingest::{IngestError, SourceRoot};
 
 pub mod demo;
+mod found_watch;
 pub mod http;
 pub mod live;
 pub mod taken;
@@ -1037,21 +1038,59 @@ fn current_hide_note(library: &Path) -> Option<String> {
             // every tombstone gets its own handle stamp (`mtime`), which sees
             // the writer and leaves the stamp untrusted (fail closed). The
             // stamps run on `hide_threads()` threads (r12), outside the lock.
+            //
+            // A9 (c) (XO 12:52Z (d)): only the tombstones a change
+            // notification named are stamped again, plus every untrusted,
+            // unstamped or new one; any doubt (no watcher, overflow, a lost
+            // or new folder) stamps them all (`found_watch`). One poll at a
+            // time, so a drained notification is never seen by a poll that
+            // then publishes a note from an older cache.
+            static NOTE_RUN: Mutex<()> = Mutex::new(());
+            let _run = NOTE_RUN.lock().unwrap_or_else(|e| e.into_inner());
+            let dirty = found_watch::take(library, &watch);
+            let todo: Vec<bool> = {
+                let guard = FOUND_TOMBS.lock().unwrap();
+                watch
+                    .iter()
+                    .map(|rel| {
+                        let Some(d) = &dirty else { return true };
+                        d.contains(rel)
+                            || guard
+                                .as_ref()
+                                .and_then(|c| c.get(rel))
+                                .is_none_or(|t| !t.trusted || t.stamp.is_none())
+                    })
+                    .collect()
+            };
+            let picked: Vec<&String> = watch
+                .iter()
+                .zip(&todo)
+                .filter_map(|(r, &t)| t.then_some(r))
+                .collect();
             let t_stamp = std::time::Instant::now();
-            let stamps = par_map(
-                &watch,
-                |rel: &String| {
+            let fresh = par_map(
+                &picked,
+                |rel: &&String| {
                     stamp_panic_hook(rel);
                     mtime(&library.join(rel))
                 },
                 |_| None,
             );
-            found_note_t::stamped(t_stamp.elapsed(), watch.len());
+            found_note_t::stamped(t_stamp.elapsed(), picked.len());
+            let mut fresh = fresh.into_iter();
             let mut guard = FOUND_TOMBS.lock().unwrap();
             let cache = guard.get_or_insert_with(Default::default);
             let keep: std::collections::HashSet<&String> = watch.iter().collect();
             cache.retain(|k, _| keep.contains(k));
-            for (rel, st) in watch.iter().zip(stamps) {
+            for (rel, &todo) in watch.iter().zip(&todo) {
+                if !todo {
+                    // Trusted, stamped, and no notification named it.
+                    if let Some(Err(e)) = cache.get(rel).map(|t| &t.verdict) {
+                        errors.push(e.clone());
+                    }
+                    continue;
+                }
+                let st = fresh.next().flatten();
                 if key_kind() == KeyKind::Portable {
                     // mtime() hashed the bytes.
                     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1060,7 +1099,15 @@ fn current_hide_note(library: &Path) -> Option<String> {
                     .get(rel)
                     .is_some_and(|t| (t.trusted) && st.is_some() && st == t.stamp);
                 if !reuse {
-                    cache.insert(rel.clone(), read_tomb_quiet(library, rel, checked_at));
+                    let mut t = read_tomb_quiet(library, rel, checked_at);
+                    if st.is_none() {
+                        // No stamp this poll (it failed or panicked): never
+                        // trusted, so every poll stamps and reads it again
+                        // even when no notification names it (fail closed).
+                        t.stamp = None;
+                        t.trusted = false;
+                    }
+                    cache.insert(rel.clone(), t);
                 }
                 if let Some(Err(e)) = cache.get(rel).map(|t| &t.verdict) {
                     errors.push(e.clone());
@@ -4708,6 +4755,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["hide_found_note"] = found_note_t::json();
+    out["hide_found_notify"] = found_watch::json();
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
     out["hide_req_retake_stale"] = REQ_RETAKE_STALE

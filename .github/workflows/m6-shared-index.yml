@@ -102,12 +102,12 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 38 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation) = 45 here, plus 5 timing tests (4 no-flicker + 1 untrusted-reread) in the m7_timing binary run with --test-threads=1 = 50 (r14 option b; the coarse-ctime test is Unix-only).
+          # so they are filtered out here and run in their own steps: 41 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation, 12:47Z prekeep gap + unlocked-wait race; the A9 (c) test counts in the 41) = 48 here, plus 5 timing tests (4 no-flicker + 1 untrusted-reread) in the m7_timing binary run with --test-threads=1 = 53 (r14 option b; the coarse-ctime test is Unix-only).
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 38 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 38 tests green (7 filtered out)"; exit 1; }
+          grep -Eq '^test result: ok\. 41 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 41 tests green (7 filtered out)"; exit 1; }
 
       - name: Step-timer overhead, timers on vs off (counted; XO FRAGO 11:05Z (4))
         # The timer record paths take no blocking lock (dirst names use
@@ -197,7 +197,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             -- m7_synced_in m7_unhide_while_pending m7_pending_limit m7_exhausted --nocapture --test-threads=1 2>&1 | tee m7-r2.log
-          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out' m7-r2.log \
+          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out' m7-r2.log \
             || { echo "::error::the XO 04:41Z tests did not run exactly 5 green with 0 ignored"; exit 1; }
           for l in SYNCED_IN UNHIDE_WHILE_PENDING PENDING_LIMIT EXHAUSTED; do
             grep -E "^(test m7_[a-z_]* \.\.\. )?M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
@@ -216,7 +216,7 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 47 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
@@ -240,7 +240,7 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-found-50k.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out' m7-found-50k.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 47 filtered out' m7-found-50k.log \
             || { echo "::error::m7_recheck_and_img_diagnostics at 50k did not run exactly 1 test green"; exit 1; }
           grep -E '^M7 POLL' m7-found-50k.log
           # Product Lead 0905Z (4): sync2s_max is held to the existing re-check
@@ -372,12 +372,54 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 37 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation) = 44 here, plus 5 timing tests (4 no-flicker + 1 untrusted-reread) in the m7_timing binary run with --test-threads=1 = 49 (r14 option b).
+          # so they are filtered out here and run in their own steps: 40 + 2 + 5 (XO 04:41Z, FRAGO 06:29Z, 10:42Z race, 11:05Z cap + same-generation, 12:47Z prekeep gap + unlocked-wait race; the A9 (c) test counts in the 40) = 47 here, plus 5 timing tests (4 no-flicker + 1 untrusted-reread) in the m7_timing binary run with --test-threads=1 = 52 (r14 option b).
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 39 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 39 tests green (7 filtered out) on Windows"; exit 1; }
+          grep -Eq '^test result: ok\. 40 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 40 tests green (7 filtered out) on Windows"; exit 1; }
+
+      - name: M6 paused writer, vanish and mutation tests on Windows (XO 12:47Z; exact counts)
+        # The Linux m6 job runs these; m7-windows did not. index_shared has 14
+        # tests per OS (one cfg(windows), one cfg(unix)), so --exact leaves
+        # 13 filtered. The mtime-only mutation's test is cfg(unix) and does
+        # not exist here: 2 mutation pairs + the merge unit test, each must FAIL.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p albumen-ingest --features test-hooks --test index_shared \
+            -- --exact paused_writer_takes_the_newer_listing --nocapture 2>&1 | tee m6w-paused.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out' m6w-paused.log \
+            || { echo "::error::paused_writer_takes_the_newer_listing did not run exactly 1 green (13 filtered)"; exit 1; }
+          cargo test --release --locked -p albumen-ingest --features test-hooks --lib index::vanish_tests \
+            -- --nocapture 2>&1 | tee m6w-vanish.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m6w-vanish.log \
+            || { echo "::error::index::vanish_tests did not run exactly 1 green"; exit 1; }
+          bad=0; caught=0
+          for pair in \
+            "ours-always paused_writer_takes_the_newer_listing" \
+            "no-partial-rewrite vanished_temp_file_is_written_again"; do
+            set -- $pair
+            log="m6w-mutate-$1.log"
+            if ALBUMEN_TEST_MUTATE=$1 cargo test --release --locked -p albumen-ingest --features test-hooks \
+                --test index_shared -- --exact "$2" --nocapture > "$log" 2>&1; then
+              echo "::error::mutation $1: $2 passed (the test does not catch it)"; bad=1
+            elif grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out' "$log"; then
+              echo "M6 MUTATION_WIN $1 test=$2 outcome=FAILED_AS_REQUIRED"; caught=$((caught+1))
+            else
+              echo "::error::mutation $1: $2 did not run as 1 failed test"; cat "$log"; bad=1
+            fi
+          done
+          if ALBUMEN_TEST_MUTATE=ours-always cargo test --release --locked -p albumen-ingest --features test-hooks \
+              --lib index::merge_tests > m6w-mutate-ours-always-lib.log 2>&1; then
+            echo "::error::ours-always: merge unit tests passed"; bad=1
+          elif grep -Eq '^test result: FAILED\. 0 passed; 1 failed; 0 ignored' m6w-mutate-ours-always-lib.log; then
+            caught=$((caught+1))
+          else
+            echo "::error::ours-always: merge_tests did not run as 1 failed test"; bad=1
+          fi
+          echo "M6 MUTATION_WIN_SUMMARY caught=$caught expected=3"
+          test "$bad" -eq 0 && test "$caught" -eq 3
 
       - name: M7 untrusted tombstone re-read cost (diagnostic; XO FRAGO 09:28Z (b))
         # Product Lead 0926Z gate D2: a real SHOW tombstone whose stamp is
@@ -427,7 +469,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             -- m7_synced_in m7_unhide_while_pending m7_pending_limit m7_exhausted --nocapture --test-threads=1 2>&1 | tee m7-r2.log
-          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out' m7-r2.log \
+          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out' m7-r2.log \
             || { echo "::error::the XO 04:41Z tests did not run exactly 5 green with 0 ignored"; exit 1; }
           for l in SYNCED_IN UNHIDE_WHILE_PENDING PENDING_LIMIT EXHAUSTED; do
             grep -E "^(test m7_[a-z_]* \.\.\. )?M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
@@ -512,7 +554,7 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
