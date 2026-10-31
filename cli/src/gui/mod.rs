@@ -1007,22 +1007,40 @@ fn current_hide_note(library: &Path) -> Option<String> {
             // and read again. Elsewhere (and with the portable key) the
             // plain stat, as before (Linux: a stat is what a listing entry
             // costs; the listing made p50 0.25 -> 5 ms on the box).
+            // XO 08:22Z (1): Windows CI 435dadd listed every watched folder
+            // (all of its entries) on every poll, so 20 tombstones in 20
+            // folders of 1,000 photos cost 20,000 entries a poll (/api/found
+            // p50 46.7 ms at 0 tombstones). A folder is listed only when it
+            // holds enough tombstones that one listing beats a stat each
+            // (LIST_MIN); otherwise each tombstone gets its own stamp. Every
+            // tombstone is still stamped on every poll (a hide corrupted in
+            // place shows within one poll).
+            const LIST_MIN: usize = 64;
+            let mut per_dir: std::collections::HashMap<&str, usize> = Default::default();
+            for rel in &watch {
+                *per_dir
+                    .entry(rel.rsplit_once('/').map_or("", |(d, _)| d))
+                    .or_default() += 1;
+            }
             let mut listed: std::collections::HashMap<
                 &str,
                 std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)>,
             > = Default::default();
             for rel in &watch {
                 let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
-                let entries = listed.entry(dir).or_insert_with(|| {
-                    if key_kind() != KeyKind::ChangeTime {
-                        return Default::default();
+                let st = if per_dir.get(dir).copied().unwrap_or(0) < LIST_MIN {
+                    mtime(&library.join(rel))
+                } else {
+                    let entries = listed.entry(dir).or_insert_with(|| {
+                        if key_kind() != KeyKind::ChangeTime {
+                            return Default::default();
+                        }
+                        dir_change_stamps(&library.join(dir))
+                    });
+                    match entries.get(std::ffi::OsStr::new(name)) {
+                        Some(st) => Some(*st),
+                        None => mtime(&library.join(rel)),
                     }
-                    dir_change_stamps(&library.join(dir))
-                });
-                let path = library.join(rel);
-                let st = match entries.get(std::ffi::OsStr::new(name)) {
-                    Some(st) => Some(*st),
-                    None => mtime(&path),
                 };
                 if key_kind() == KeyKind::Portable {
                     // mtime() hashed the bytes.
@@ -1203,6 +1221,12 @@ struct DirState {
     /// Changes whenever `tombs` or `unlisted` may have (0: an empty state,
     /// such as one handed to a worker).
     ver: u64,
+    /// For a pending folder: its stamp when it was handed to the worker.
+    sent_st: Option<(SystemTime, u64)>,
+    /// For a pending folder: its tombstones that read as a trusted show
+    /// when it was handed over (their stamps), so a re-check of its carried
+    /// show does not withhold them while they are unchanged.
+    sent_shows: Arc<Vec<(String, (SystemTime, u64))>>,
 }
 
 /// One folder's part of the hard-hidden set, its tombstone files and
@@ -1757,7 +1781,7 @@ fn end_of_file(file: &std::fs::File) -> Option<u64> {
 /// the read (a writer still open, Windows): `hide_writer_untrusted`.
 static WRITER_UNTRUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Every plain file's stamp in one folder from ONE directory handle
+/// Every tombstone's stamp in one folder from ONE directory handle
 /// (Windows, FileIdBothDirectoryInfo): (LastWriteTime as std gives it,
 /// ChangeTime), the same stamp [`mtime`] takes with a file open each.
 /// Directories, reparse points and entries with no ChangeTime are left out
@@ -1775,6 +1799,9 @@ fn dir_change_stamps(
         FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
     };
     let mut out = std::collections::HashMap::new();
+    let suffix: Vec<u16> = albumen_ingest::hides::TOMBSTONE_SUFFIX
+        .encode_utf16()
+        .collect();
     let Ok(file) = std::fs::OpenOptions::new()
         .access_mode(FILE_LIST_DIRECTORY)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
@@ -1811,7 +1838,9 @@ fn dir_change_stamps(
             let name = unsafe { std::slice::from_raw_parts(rec.FileName.as_ptr(), len) };
             let plain =
                 rec.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-            if plain && rec.ChangeTime != 0 && rec.LastWriteTime > 0 {
+            // Only tombstones are kept (no name copy for the photos).
+            let tomb = name.len() > suffix.len() && name.ends_with(&suffix);
+            if tomb && plain && rec.ChangeTime != 0 && rec.LastWriteTime > 0 {
                 // FILETIME (100 ns since 1601) -> SystemTime, as std does.
                 const EPOCH_DIFF: i64 = 116_444_736_000_000_000;
                 let t = rec.LastWriteTime - EPOCH_DIFF;
@@ -2079,8 +2108,39 @@ fn hidden_for(
     changed |= drain_relists(f);
     let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
     let mut jobs: Vec<RelistJob> = Vec::new();
+    // Pending folders that changed after they were handed over: their
+    // carried show is checked again below.
+    let mut moved: Vec<RelistJob> = Vec::new();
     for (i, ((d, ds), st)) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts).enumerate() {
         if let Some(since) = ds.pending {
+            // XO 08:24Z (c): the rsync-style flake. A folder still being
+            // listed in the background (its listing started before a hide
+            // arrived) kept the carried show computed at hand-over, so a
+            // photo whose tombstone came after it stayed shown (fail open)
+            // until that stale listing landed. When the folder's stamp
+            // moved (or is not yet trusted) the show is re-checked against
+            // the tombstones present now, none of them trusted (fail
+            // closed); the listing itself is redone when it lands.
+            if primed && (st != ds.sent_st || !trusted_at(&ds.sent_st, checked_at)) {
+                ds.sent_st = st;
+                let mut probe = DirState::default();
+                for (rel, stamp) in ds.sent_shows.iter() {
+                    probe.tombs.insert(
+                        rel.clone(),
+                        TombState {
+                            stamp: Some(*stamp),
+                            trusted: true,
+                            verdict: Ok(false),
+                        },
+                    );
+                }
+                moved.push(RelistJob {
+                    i,
+                    dir: d.clone(),
+                    ds: probe,
+                    st,
+                });
+            }
             match ds.retry_at {
                 // A listing that kept panicking: sent again after its
                 // backoff (XO 04:41Z (4)); shown photos stay under `keep`.
@@ -2116,6 +2176,15 @@ fn hidden_for(
             let taken = std::mem::take(ds);
             ds.fails = fails;
             ds.pending = Some(std::time::Instant::now());
+            ds.sent_st = st;
+            ds.sent_shows = Arc::new(
+                taken
+                    .tombs
+                    .iter()
+                    .filter(|(_, t)| t.trusted && t.verdict == Ok(false))
+                    .filter_map(|(r, t)| Some((r.clone(), t.stamp?)))
+                    .collect(),
+            );
             jobs.push(RelistJob {
                 i,
                 dir: d.clone(),
@@ -2125,6 +2194,14 @@ fn hidden_for(
         }
     }
     hide_diag::mark("stamps");
+    if !moved.is_empty() {
+        let (keeps, _) = keep_shown(lib, f, &moved);
+        for (j, keep) in moved.iter().zip(keeps) {
+            f.state[j.i].keep = Arc::new(keep);
+            f.state[j.i].ver = next_ver();
+        }
+        changed = true;
+    }
     // Folders (index in `f`) where a shown photo would blink out.
     let mut blinking: std::collections::HashSet<usize> = Default::default();
     if !jobs.is_empty() && primed {

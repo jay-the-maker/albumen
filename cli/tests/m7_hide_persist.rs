@@ -1693,6 +1693,97 @@ fn a_pending_folder_hides_no_visible_photo() {
     assert_eq!(listed(&addr), want);
 }
 
+/// XO 08:24Z (b): a hide that arrives while its folder is being listed in
+/// the background (the walk thread's pre-filter after a sync started that
+/// listing; held at ALBUMEN_TEST_RELIST_GATE, certain rather than timed)
+/// applies on the very next request (A8, fail closed), and stays applied
+/// once the stale listing lands.
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs a debug build or --features test-hooks"
+)]
+fn a_hide_during_a_pending_listing_applies_on_the_next_request() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let dir = library.path().join("a");
+    fs::create_dir_all(&dir).unwrap();
+    for n in 1..=3 {
+        let p = dir.join(format!("IMG_000{n}.JPG"));
+        fs::write(&p, format!("synthetic-m7-prefilter-{n}")).unwrap();
+        set_mtime(&p, old);
+    }
+    // a/2: a show tombstone, unchanged throughout (must not blink).
+    fs::write(
+        dir.join("IMG_0002.JPG.albumen-tombstone"),
+        br#"{"hidden":false,"reason":"unhide"}"#,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let (_gui, addr, _) = start_env(
+        library.path(),
+        work.path(),
+        index.path(),
+        home.path(),
+        &[("ALBUMEN_TEST_RELIST_GATE", "a")],
+    );
+    ready_found(&addr);
+    let all = ["a/IMG_0001.JPG", "a/IMG_0002.JPG", "a/IMG_0003.JPG"];
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    // A sync adds a photo: the next request hands a to a worker, held at
+    // the gate (its listing has not seen the hide below).
+    let gate = library.path().join(".albumen-test-gate");
+    fs::write(&gate, b"").unwrap();
+    fs::write(dir.join("IMG_0004.JPG"), b"synthetic-m7-prefilter-4").unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let _ = listed(&addr);
+    assert_eq!(
+        found_page(&addr)["hide_pending_dirs"],
+        1,
+        "a was not pending"
+    );
+    // The hide arrives while a's listing is held.
+    fs::write(
+        dir.join("IMG_0001.JPG.albumen-tombstone"),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    let next = listed(&addr);
+    println!("M7 A8 hide during pending listing: {next:?}");
+    assert!(
+        !next.contains(&"a/IMG_0001.JPG".to_string()),
+        "the hide showed while a was pending: {next:?}"
+    );
+    for p in ["a/IMG_0002.JPG", "a/IMG_0003.JPG"] {
+        assert!(next.contains(&p.to_string()), "{p} blinked out: {next:?}");
+    }
+    // The stale listing lands; the hide still applies after it.
+    fs::remove_file(&gate).unwrap();
+    let t = Instant::now();
+    loop {
+        let now = listed(&addr);
+        assert!(
+            !now.contains(&"a/IMG_0001.JPG".to_string()),
+            "the hide showed after the stale listing: {now:?}"
+        );
+        if found_page(&addr)["hide_pending_dirs"] == 0
+            && now.contains(&"a/IMG_0004.JPG".to_string())
+        {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(15), "a never settled");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!listed(&addr).contains(&"a/IMG_0001.JPG".to_string()));
+}
+
 /// XO 03:36Z (5): a re-list worker that panics is caught and logged; its
 /// folder's photos are hidden meanwhile (fail closed) and the folder is
 /// listed again, so it never stays pending.

@@ -102,12 +102,12 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 26 + 2 + 4 no-flicker + 5 (XO 04:41Z, FRAGO 06:29Z) = 37 (the coarse-ctime test is Unix-only).
+          # so they are filtered out here and run in their own steps: 27 + 2 + 4 no-flicker + 5 (XO 04:41Z, FRAGO 06:29Z) = 38 (the coarse-ctime test is Unix-only).
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics --skip m7_no_flicker \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 26 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 26 tests green (11 filtered out)"; exit 1; }
+          grep -Eq '^test result: ok\. 27 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 27 tests green (11 filtered out)"; exit 1; }
 
       - name: M7 no-flicker acceptance (ctime, coarse 2 s window, worker error, worker panic; merge-blocking)
         # Product Lead doc 1Ak9gqDUQp4BfibMVlw4fd4qLw8CKUxPH section 2 (XO 04:08Z):
@@ -141,7 +141,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             -- m7_synced_in m7_unhide_while_pending m7_pending_limit m7_exhausted --nocapture --test-threads=1 2>&1 | tee m7-r2.log
-          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out' m7-r2.log \
+          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out' m7-r2.log \
             || { echo "::error::the XO 04:41Z tests did not run exactly 5 green with 0 ignored"; exit 1; }
           for l in SYNCED_IN UNHIDE_WHILE_PENDING PENDING_LIMIT EXHAUSTED; do
             grep -E "^(test m7_[a-z_]* \.\.\. )?M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
@@ -160,15 +160,11 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
           grep -E '^M7 RECHECK_DIAG' m7-recheck.log
-          # Product Lead 07:03Z (merge-blocking): page-path /api/found at
-          # 50k with 10k tombstones, >= 100 samples, p95 <= 20 ms, max <= 100 ms.
-          awk '/^M7 POLL files=50000 tombstones=10000 samples=[0-9]+ path=\/api\/found /{n++; for(i=1;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]} if(v["samples"]<100||v["p95_ms"]>20||v["max_ms"]>100) bad++} END{exit !(n>=1 && bad==0)}' m7-recheck.log \
-            || { echo "::error::/api/found bar missed (50k/10k: samples >= 100, p95 <= 20 ms, max <= 100 ms)"; grep -E '^M7 POLL' m7-recheck.log; exit 1; }
           # XO 03:36Z (3): withheld time (server, and as the page sees it
           # through its 200 ms poll) p95 and max <= 1 s, checked by the bar
           # script on every M7 WITHHELD line (no line fails it).
@@ -176,6 +172,26 @@ jobs:
           # XO 02:53Z/03:09Z bar (blocking): both fields required on every line,
           # p95 <= 10 ms and max <= 100 ms over ALL samples.
           bash .github/m7-recheck-bar.sh m7-recheck.log
+
+      - name: M7 /api/found at 50000 files on Linux (bar p95 <= 20 ms, max <= 100 ms at 10k tombstones)
+        # XO 08:24Z (a), D2: the step above runs FILES (380000 by default),
+        # so its files=50000 assert never matched (n=0). This run is at
+        # 50000 files, where the /api/found bar is defined, with the same
+        # assert and the same re-check bar script.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
+            cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
+            m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-found-50k.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out' m7-found-50k.log \
+            || { echo "::error::m7_recheck_and_img_diagnostics at 50k did not run exactly 1 test green"; exit 1; }
+          grep -E '^M7 POLL' m7-found-50k.log
+          # Product Lead 07:03Z (merge-blocking): page-path /api/found at
+          # 50k with 10k tombstones, >= 100 samples, p95 <= 20 ms, max <= 100 ms.
+          awk '/^M7 POLL files=50000 tombstones=10000 samples=[0-9]+ path=\/api\/found /{n++; for(i=1;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]} if(v["samples"]<100||v["p95_ms"]>20||v["max_ms"]>100) bad++} END{exit !(n>=1 && bad==0)}' m7-found-50k.log \
+            || { echo "::error::/api/found bar missed (50k/10k: samples >= 100, p95 <= 20 ms, max <= 100 ms)"; grep -E '^M7 POLL' m7-found-50k.log; exit 1; }
+          bash .github/m7-recheck-bar.sh m7-found-50k.log
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
         run: |
@@ -247,12 +263,12 @@ jobs:
         run: |
           set -o pipefail
           # The scale and RECHECK_DIAG tests fail in CI without their env var,
-          # so they are filtered out here and run in their own steps: 25 + 2 + 4 no-flicker + 5 (XO 04:41Z, FRAGO 06:29Z) = 36.
+          # so they are filtered out here and run in their own steps: 26 + 2 + 4 no-flicker + 5 (XO 04:41Z, FRAGO 06:29Z) = 37.
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics --skip m7_no_flicker \
             --skip m7_synced_in --skip m7_unhide_while_pending --skip m7_pending_limit --skip m7_exhausted 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 25 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 25 tests green (11 filtered out) on Windows"; exit 1; }
+          grep -Eq '^test result: ok\. 26 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 26 tests green (11 filtered out) on Windows"; exit 1; }
 
       - name: M7 no-flicker acceptance (changetime, coarse 2 s window, worker error, worker panic; merge-blocking)
         # Product Lead doc 1Ak9gqDUQp4BfibMVlw4fd4qLw8CKUxPH section 2 (XO 04:08Z):
@@ -286,7 +302,7 @@ jobs:
           set -o pipefail
           cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             -- m7_synced_in m7_unhide_while_pending m7_pending_limit m7_exhausted --nocapture --test-threads=1 2>&1 | tee m7-r2.log
-          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out' m7-r2.log \
+          grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out' m7-r2.log \
             || { echo "::error::the XO 04:41Z tests did not run exactly 5 green with 0 ignored"; exit 1; }
           for l in SYNCED_IN UNHIDE_WHILE_PENDING PENDING_LIMIT EXHAUSTED; do
             grep -E "^(test m7_[a-z_]* \.\.\. )?M7 $l " m7-r2.log || { echo "::error::no M7 $l line"; exit 1; }
@@ -347,7 +363,7 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
