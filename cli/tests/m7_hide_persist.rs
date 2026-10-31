@@ -1083,3 +1083,104 @@ fn a_new_hide_applies_on_the_next_gui_request() {
     assert_eq!(get(&addr, "/img?p=IMG_0001.JPG").0, 200);
     assert_eq!(kept(&originals), before, "an original changed");
 }
+
+fn listed(addr: &str) -> Vec<String> {
+    let (code, body) = get(addr, "/api/library");
+    assert_eq!(code, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "ready", "{v}");
+    let mut p: Vec<String> = v["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap().to_string())
+        .collect();
+    p.sort();
+    p
+}
+
+fn set_mtime(path: &Path, t: SystemTime) {
+    fs::File::open(path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(t))
+        .unwrap();
+}
+
+/// M7 mtime race (XO 00:18Z): a tombstone written in the same mtime tick as
+/// the GUI's last hide check (made deterministic by putting the folder's
+/// mtime back to what that check saw) must still reach the next request.
+#[test]
+fn a_hide_in_the_same_mtime_tick_still_applies_on_the_next_request() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let sub = library.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    for name in ["IMG_0001.JPG", "sub/IMG_0003.JPG"] {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-tick-{name}"),
+        )
+        .unwrap();
+    }
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    assert_eq!(listed(&addr), ["IMG_0001.JPG", "sub/IMG_0003.JPG"]);
+    let tick = fs::metadata(&sub).unwrap().modified().unwrap();
+    fs::write(
+        sub.join("IMG_0003.JPG.albumen-tombstone"),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    set_mtime(&sub, tick);
+    let shown = listed(&addr);
+    println!("M7 same-tick next request: {shown:?}");
+    assert_eq!(shown, ["IMG_0001.JPG"], "same-tick hide missed");
+    assert_eq!(get(&addr, "/img?p=sub/IMG_0003.JPG").0, 404);
+}
+
+/// A hidden video is never served, and a hide file beside it that can't be
+/// read hides it (fail closed) and says so in the quiet line. Same for /img.
+#[test]
+fn hidden_and_unreadable_hides_404_video_and_img_with_a_note() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let vids = library.path().join("vids");
+    fs::create_dir(&vids).unwrap();
+    fs::write(library.path().join("IMG_0001.JPG"), b"synthetic-m7-vid-a").unwrap();
+    fs::write(library.path().join("IMG_0002.JPG"), b"synthetic-m7-vid-b").unwrap();
+    fs::write(vids.join("clip.MOV"), b"synthetic-m7-video").unwrap();
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    assert!(ready_found(&addr)["hide_note"].is_null());
+    assert_eq!(get(&addr, "/video?p=vids/clip.MOV").0, 200);
+    let tomb = vids.join("clip.MOV.albumen-tombstone");
+    fs::write(&tomb, br#"{"hidden":true}"#).unwrap();
+    let (code, _) = get(&addr, "/video?p=vids/clip.MOV");
+    println!("M7 hidden video: {code}");
+    assert_eq!(code, 404, "hidden video served");
+    fs::write(&tomb, b"{").unwrap();
+    let (code, _) = get(&addr, "/video?p=vids/clip.MOV");
+    let note = found_page(&addr)["hide_note"].clone();
+    println!("M7 unreadable video hide: {code} note={note}");
+    assert_eq!(code, 404, "video with an unreadable hide file served");
+    assert!(
+        note.as_str()
+            .unwrap_or_default()
+            .contains("clip.MOV.albumen-tombstone"),
+        "{note}"
+    );
+    fs::write(library.path().join("IMG_0002.JPG.albumen-tombstone"), b"{").unwrap();
+    let (code, _) = get(&addr, "/img?p=IMG_0002.JPG");
+    let note = found_page(&addr)["hide_note"].clone();
+    println!("M7 unreadable img hide: {code} note={note}");
+    assert_eq!(code, 404);
+    assert!(
+        note.as_str()
+            .unwrap_or_default()
+            .contains("IMG_0002.JPG.albumen-tombstone"),
+        "{note}"
+    );
+}
