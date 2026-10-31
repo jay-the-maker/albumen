@@ -156,6 +156,8 @@ fn gui_and_search_tool_share_one_index() {
             let mut times_us = Vec::new();
             // (start offset ms from the reader's start, UTC epoch ms, duration us)
             let mut slow_at = Vec::new();
+            // Diagnostic only (no bar): the 5 slowest reads (start us, us).
+            let mut top: Vec<(u128, u64)> = Vec::new();
             let start = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 let t = Instant::now();
@@ -165,6 +167,11 @@ fn gui_and_search_tool_share_one_index() {
                 let checked = check_saved_file(&file);
                 let us = t.elapsed().as_micros() as u64;
                 times_us.push(us);
+                if top.len() < 5 || us > top[4].1 {
+                    top.push(((t - start).as_micros(), us));
+                    top.sort_unstable_by_key(|x| std::cmp::Reverse(x.1));
+                    top.truncate(5);
+                }
                 max_read_us.fetch_max(us, Ordering::Relaxed);
                 if us > 100_000 {
                     slow_reads.fetch_add(1, Ordering::Relaxed);
@@ -176,14 +183,17 @@ fn gui_and_search_tool_share_one_index() {
                     first_failure.lock().unwrap().get_or_insert(err);
                 }
             }
-            (times_us, slow_at)
+            (times_us, slow_at, top, start)
         })
     };
 
     let mut regressions = 0;
     let mut last_generation = 0;
     let mut merges = 0;
+    // Diagnostic only: each iteration's GUI open + search refresh window.
+    let mut windows: Vec<(Instant, Instant)> = Vec::new();
     for _ in 0..iters {
+        let w0 = Instant::now();
         for _ in 0..=rng.below(3) {
             mutate(library.path(), &mut all, &mut rng, &mut serial);
         }
@@ -204,6 +214,7 @@ fn gui_and_search_tool_share_one_index() {
         search.refresh().unwrap();
         assert_eq!(search.save_error, None);
         let (gui_paths, gui_error, gui_merges) = gui.join().unwrap();
+        windows.push((w0, Instant::now()));
         merges += gui_merges;
         assert_eq!(gui_error, None);
         assert_eq!(gui_paths, all, "GUI listing differs from the tree");
@@ -221,7 +232,24 @@ fn gui_and_search_tool_share_one_index() {
     }
     merges += search.merges;
     stop.store(true, Ordering::Relaxed);
-    let (mut times_us, slow_at) = reader.join().unwrap();
+    let (mut times_us, slow_at, top, r0) = reader.join().unwrap();
+    for (rank, (at_us, us)) in top.iter().enumerate() {
+        let (a, b) = (*at_us, *at_us + *us as u128);
+        let rel = |i: Instant| i.saturating_duration_since(r0).as_micros();
+        let hit = windows
+            .iter()
+            .position(|(s, e)| rel(*s) < b && rel(*e) > a)
+            .map_or("none".to_string(), |i| {
+                let (s, e) = windows[i];
+                format!("iter={i} window_ms={:.2}", (e - s).as_secs_f64() * 1000.0)
+            });
+        println!(
+            "M6 X2 TOP_READ seed={seed} rank={} at_ms={:.1} read_ms={:.2} overlaps={hit}",
+            rank + 1,
+            a as f64 / 1000.0,
+            *us as f64 / 1000.0
+        );
+    }
     times_us.sort_unstable();
     let pct = |q: f64| {
         times_us
