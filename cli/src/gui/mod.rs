@@ -972,6 +972,18 @@ struct Fresh {
     /// Each folder's pending flag and keep set as of the last build, so the
     /// next build revisits only the folders that changed (XO 05:00Z (a)).
     built: Vec<(bool, Arc<Withhold>)>,
+    /// Each folder's state version as of the last build and what it added
+    /// to `hard`, so a build revisits only the folders whose tombstones or
+    /// listing changed (XO 05:41Z (1)): the cost follows the changed
+    /// folders, not every tombstone of the library.
+    cver: Vec<u64>,
+    contrib: Vec<Contrib>,
+    /// How many sources (folders, the family log) hide each `hard` photo.
+    hard_n: std::collections::HashMap<String, u32>,
+    /// What the family log added to `hard` at the last build.
+    fam_contrib: Vec<String>,
+    /// The family log was read again since the last build.
+    fam_dirty: bool,
     /// A confirmed listing holds a photo the view lacks: list the library
     /// again (XO 04:41Z (1)).
     grew: bool,
@@ -1014,6 +1026,24 @@ struct DirState {
     retry_at: Option<std::time::Instant>,
     /// Set on the result of a listing that kept panicking.
     failed: bool,
+    /// Changes whenever `tombs` or `unlisted` may have (0: an empty state,
+    /// such as one handed to a worker).
+    ver: u64,
+}
+
+/// One folder's part of the hard-hidden set, its tombstone files and
+/// their errors, as of its state version.
+#[derive(Default, Clone)]
+struct Contrib {
+    hides: Vec<String>,
+    tombs: Vec<String>,
+    errors: Vec<String>,
+}
+
+/// A new version for a folder state whose tombstones or listing changed.
+fn next_ver() -> u64 {
+    static VER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    VER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 struct TombState {
@@ -1636,7 +1666,9 @@ fn hidden_for(
 ) -> (Arc<std::collections::HashSet<String>>, u64) {
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
     let lib = &server.config.library;
+    hide_diag::start();
     let mut fresh = FRESH.lock().unwrap();
+    hide_diag::mark("lock");
     if fresh.as_ref().is_none_or(|f| f.generation != v.generation) {
         // Grouped by borrowed folder name (one String per folder, not per
         // photo): this runs on the first request of every re-walk.
@@ -1728,10 +1760,16 @@ fn hidden_for(
             hard,
             hard_w,
             built: Vec::new(),
+            cver: Vec::new(),
+            contrib: Vec::new(),
+            hard_n: Default::default(),
+            fam_contrib: Vec::new(),
+            fam_dirty: true,
             grew: false,
             prev,
         });
     }
+    hide_diag::mark("init");
     let f = fresh.as_mut().unwrap();
     let v = Arc::clone(&f.base);
     let checked_at = SystemTime::now();
@@ -1759,6 +1797,9 @@ fn hidden_for(
                 changed |= new.verdict != t.verdict;
                 *t = new;
             }
+        }
+        if changed {
+            ds.ver = next_ver();
         }
         changed
     };
@@ -1818,34 +1859,43 @@ fn hidden_for(
             });
         }
     }
-    let mut blink = false;
+    hide_diag::mark("stamps");
+    // Folders (index in `f`) where a shown photo would blink out.
+    let mut blinking: std::collections::HashSet<usize> = Default::default();
     if !jobs.is_empty() && primed {
         // Which photos of each folder about to go pending stay on screen:
         // one stat of each shown photo's own tombstone, on up to 8 threads.
         let t = std::time::Instant::now();
         let (keeps, b) = keep_shown(lib, f, &jobs);
-        blink = b;
-        for (j, keep) in jobs.iter().zip(keeps) {
+        for ((j, keep), b) in jobs.iter().zip(keeps).zip(b) {
             f.state[j.i].keep = Arc::new(keep);
+            if b {
+                blinking.insert(j.i);
+            }
         }
         let us = t.elapsed().as_micros() as u64;
         KEEP_STAT_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
         KEEP_STAT_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
     }
+    hide_diag::mark("keep");
     // The previous view has served once this generation has been checked.
     if !APPLY_ONLY.get() {
         f.prev = None;
     }
     if !jobs.is_empty() {
         changed = true;
+        // Folders that would blink are listed first, so the wait for them
+        // is not spent behind the others.
+        jobs.sort_by_key(|j| !blinking.contains(&j.i));
         let rx = spawn_relists(lib.to_path_buf(), jobs, checked_at, f.generation);
         // Once primed the request does not wait at all (XO 04:08Z): the
         // per-photo carried show keeps what is on screen, and a coalescing
         // background applier puts finished folders (and the rebuilt view)
         // in place. Only the very first answer is done in full.
+        let waits = primed && !blinking.is_empty();
         let deadline = primed.then(|| {
             std::time::Instant::now()
-                + if blink {
+                + if !blinking.is_empty() {
                     BLINK_BUDGET
                 } else {
                     Default::default()
@@ -1859,13 +1909,25 @@ fn hidden_for(
                     .ok(),
             };
             match got {
-                Some(done) => apply_relist(f, done),
+                Some(done) => {
+                    // Waiting is only for the folders that would blink:
+                    // once they are in, the rest finish in the background
+                    // (their shown photos stay under `keep`), XO 05:41Z (2).
+                    if done.generation == f.generation {
+                        blinking.remove(&done.i);
+                    }
+                    apply_relist(f, done);
+                    if waits && blinking.is_empty() {
+                        break;
+                    }
+                }
                 None => break,
             }
         }
         // Whatever is still running reports through the shared queue.
         RELISTS.lock().unwrap().push(rx);
     }
+    hide_diag::mark("wait");
     PENDING_DIRS.store(
         f.state.iter().filter(|d| d.pending.is_some()).count() as u64,
         std::sync::atomic::Ordering::Relaxed,
@@ -1889,9 +1951,11 @@ fn hidden_for(
                 paths: h.paths.into_iter().collect(),
                 errors: h.errors,
             });
+            f.fam_dirty = true;
             changed = true;
         }
     } else if f.family.take().is_some() {
+        f.fam_dirty = true;
         changed = true;
     }
     f.primed = true;
@@ -1900,42 +1964,121 @@ fn hidden_for(
         return (Arc::clone(&f.hidden), f.version);
     }
     let built = std::time::Instant::now();
-    let mut hidden = std::collections::HashSet::new();
-    let mut errors = Vec::new();
-    let mut tombs = Vec::new();
-    for ds in f.state.iter() {
-        for (rel, t) in &ds.tombs {
-            tombs.push(rel.clone());
-            let hides = match &t.verdict {
-                Ok(h) => *h,
-                Err(e) => {
-                    errors.push(e.clone());
-                    true
+    // The hard-hidden set, kept up to date per changed folder: a folder
+    // whose state version is unchanged since the last build is skipped, so
+    // a request with one changed folder does not walk every tombstone.
+    let mut hard = std::mem::take(&mut f.hard);
+    let full = f.cver.len() != f.state.len();
+    let old_full = full.then(|| Arc::clone(&hard));
+    if full {
+        f.cver = vec![u64::MAX; f.state.len()];
+        f.contrib = vec![Contrib::default(); f.state.len()];
+        f.hard_n.clear();
+        f.fam_contrib.clear();
+        f.fam_dirty = true;
+        hard = Default::default();
+    }
+    let mut added: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut watch_changed = full;
+    let mut errors_changed = full;
+    {
+        let hs = Arc::make_mut(&mut hard);
+        let hard_n = &mut f.hard_n;
+        let mut swap =
+            |old: &[String], new: &[String], added: &mut Vec<String>, removed: &mut Vec<String>| {
+                let o: std::collections::HashSet<&str> = old.iter().map(String::as_str).collect();
+                let n: std::collections::HashSet<&str> = new.iter().map(String::as_str).collect();
+                for p in old.iter().filter(|p| !n.contains(p.as_str())) {
+                    if let Some(c) = hard_n.get_mut(p) {
+                        *c -= 1;
+                        if *c == 0 {
+                            hard_n.remove(p);
+                            hs.remove(p);
+                            removed.push(p.clone());
+                        }
+                    }
+                }
+                for p in new.iter().filter(|p| !o.contains(p.as_str())) {
+                    let c = hard_n.entry(p.clone()).or_insert(0);
+                    *c += 1;
+                    if *c == 1 {
+                        hs.insert(p.clone());
+                        added.push(p.clone());
+                    }
                 }
             };
-            if hides {
-                if let Some(o) = rel.strip_suffix(TOMBSTONE_SUFFIX) {
-                    hidden.insert(o.to_string());
+        for (i, (ds, photos)) in f.state.iter().zip(&f.photos_in).enumerate() {
+            if f.cver[i] == ds.ver {
+                continue;
+            }
+            f.cver[i] = ds.ver;
+            let mut c = Contrib::default();
+            for (rel, t) in &ds.tombs {
+                c.tombs.push(rel.clone());
+                let hides = match &t.verdict {
+                    Ok(h) => *h,
+                    Err(e) => {
+                        c.errors.push(e.clone());
+                        true
+                    }
+                };
+                if hides {
+                    if let Some(o) = rel.strip_suffix(TOMBSTONE_SUFFIX) {
+                        c.hides.push(o.to_string());
+                    }
                 }
             }
+            if ds.unlisted {
+                c.hides
+                    .extend(photos.iter().map(|&k| v.path(k).to_string()));
+            }
+            let old = std::mem::take(&mut f.contrib[i]);
+            watch_changed |= old.tombs != c.tombs;
+            errors_changed |= old.errors != c.errors;
+            swap(&old.hides, &c.hides, &mut added, &mut removed);
+            f.contrib[i] = c;
+        }
+        if std::mem::take(&mut f.fam_dirty) {
+            let new: Vec<String> = f
+                .family
+                .as_ref()
+                .map_or(Vec::new(), |fam| fam.paths.clone());
+            let old = std::mem::take(&mut f.fam_contrib);
+            swap(&old, &new, &mut added, &mut removed);
+            f.fam_contrib = new;
+            errors_changed = true;
         }
     }
-    for (ds, photos) in f.state.iter().zip(&f.photos_in) {
-        if ds.unlisted {
-            hidden.extend(photos.iter().map(|&i| v.path(i).to_string()));
+    if let Some(old) = &old_full {
+        added = hard.iter().filter(|p| !old.contains(*p)).cloned().collect();
+        removed = old.iter().filter(|p| !hard.contains(*p)).cloned().collect();
+    }
+    if errors_changed {
+        let mut errors: Vec<String> = f
+            .contrib
+            .iter()
+            .flat_map(|c| c.errors.iter().cloned())
+            .collect();
+        if let Some(fam) = &f.family {
+            errors.extend(fam.errors.iter().cloned());
         }
+        *HIDE_NOTE.lock().unwrap() = hide_note(&errors);
     }
-    if let Some(fam) = &f.family {
-        hidden.extend(fam.paths.iter().cloned());
-        errors.extend(fam.errors.iter().cloned());
+    if watch_changed {
+        *HIDE_WATCH.lock().unwrap() = Some(
+            f.contrib
+                .iter()
+                .flat_map(|c| c.tombs.iter().cloned())
+                .collect(),
+        );
     }
-    *HIDE_NOTE.lock().unwrap() = hide_note(&errors);
-    *HIDE_WATCH.lock().unwrap() = Some(tombs);
+    let hidden: &std::collections::HashSet<String> = &hard;
     // An unhide needs the photo back, which the view no longer holds: list
     // again in the background (hides only ever narrow the view here). A
     // photo only withheld (pending folder) is in the base view, so putting
-    // that back is enough. The old hidden set is the old hard set plus the
-    // old withheld set, so only the (small) hard sets are walked here.
+    // that back is enough. The photos that left the hard set are `removed`
+    // (plus `hard_w`), so only those are walked here.
     // (Checked after the withheld update below: a hard-hidden photo whose
     // folder just went pending moves from the hard set to the withheld set,
     // which is not an unhide; testing it against the old withheld set made
@@ -1952,8 +2095,9 @@ fn hidden_for(
         let old: Vec<String> = f.withheld.drain().collect();
         // Photos withheld under the old generation all count as changed.
         let hidden_all = Arc::make_mut(&mut f.hidden);
+        // (A new generation is a full build: `old_full` is the old hard set.)
         for p in old {
-            if !f.hard.contains(&p) {
+            if !old_full.as_ref().is_some_and(|h| h.contains(&p)) {
                 hidden_all.remove(&p);
             }
         }
@@ -1999,14 +2143,12 @@ fn hidden_for(
     // A photo hidden, then withheld while its folder was pending, then
     // shown is an unhide too: test against the hard-hidden set, not only
     // the photos withheld at the last check (the base view lacks it).
-    unhid |= f
-        .hard
+    unhid |= removed
         .iter()
         .chain(&f.hard_w)
         .any(|p| !hidden.contains(p) && !withheld.contains(p));
     // Hard-hidden before and now only withheld; walks the (small) hard sets.
-    let hard_w: std::collections::HashSet<String> = f
-        .hard
+    let hard_w: std::collections::HashSet<String> = removed
         .iter()
         .chain(&f.hard_w)
         .filter(|p| withheld.contains(*p) && !hidden.contains(*p))
@@ -2014,13 +2156,12 @@ fn hidden_for(
         .collect();
     // The served set (hard plus withheld) changes only at the touched
     // photos and where the hard set changed.
-    touched.extend(f.hard.iter().filter(|p| !hidden.contains(*p)).cloned());
-    touched.extend(
-        hidden
-            .iter()
-            .filter(|p| new_gen || !f.hard.contains(*p))
-            .cloned(),
-    );
+    touched.extend(removed.iter().cloned());
+    if new_gen {
+        touched.extend(hidden.iter().cloned());
+    } else {
+        touched.extend(added.iter().cloned());
+    }
     let mut delta = false;
     {
         let all = Arc::make_mut(&mut f.hidden);
@@ -2033,7 +2174,7 @@ fn hidden_for(
         f.version += 1;
     }
     f.hard_w = hard_w;
-    f.hard = Arc::new(hidden);
+    f.hard = hard;
     HIDE_VERSION.store(f.version, std::sync::atomic::Ordering::Relaxed);
     let us = built.elapsed().as_micros() as u64;
     BUILD_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
@@ -2050,6 +2191,7 @@ fn hidden_for(
         }
     }
     drop(fresh);
+    hide_diag::mark("build");
     if unhid || grew {
         if let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
             refresh_thumbs(&s);
@@ -2120,8 +2262,9 @@ const APPLY_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 /// whose own tombstone is absent, or unchanged since a trusted read that
 /// said show. One listing per folder (and a stat per tombstone present), on up to 8 threads. A stat that
 /// fails other than "not found" withholds the photo (fail closed).
-/// Also says whether any shown photo is withheld (it would blink out).
-fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, bool) {
+/// Also says, per folder, whether a shown photo is withheld (it would blink
+/// out).
+fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<bool>) {
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
     // Photos of each folder that were off screen (the reference hidden set,
     // grouped by folder): they stay withheld. Walks the hidden set, which
@@ -2173,7 +2316,15 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, bool
             Ok(rd) => {
                 for e in rd {
                     let Ok(e) = e else { return all };
-                    let n = e.file_name().to_string_lossy().into_owned();
+                    let n = e.file_name();
+                    // Only a tombstone's name is copied: a folder of
+                    // thousands of photos costs no allocation per photo.
+                    if !cfg!(windows)
+                        && !n.as_encoded_bytes().ends_with(TOMBSTONE_SUFFIX.as_bytes())
+                    {
+                        continue;
+                    }
+                    let n = n.to_string_lossy().into_owned();
                     let fl = fold(&n);
                     if let Some(stem) = fl.strip_suffix(&fold(TOMBSTONE_SUFFIX)) {
                         tombs.insert(stem.to_string(), n);
@@ -2245,9 +2396,7 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, bool
     };
     let run = |n: usize| check(&jobs[n], &sets[n]);
     if threads == 1 || jobs.len() < 4 {
-        let out: Vec<(Withhold, bool)> = (0..jobs.len()).map(run).collect();
-        let b = out.iter().any(|o| o.1);
-        return (out.into_iter().map(|o| o.0).collect(), b);
+        return (0..jobs.len()).map(run).unzip();
     }
     let out: Vec<Mutex<Option<(Withhold, bool)>>> =
         (0..jobs.len()).map(|_| Mutex::new(None)).collect();
@@ -2267,8 +2416,7 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, bool
         .into_iter()
         .map(|m| m.into_inner().unwrap().unwrap_or_default())
         .collect();
-    let b = out.iter().any(|o| o.1);
-    (out.into_iter().map(|o| o.0).collect(), b)
+    out.into_iter().unzip()
 }
 
 /// Test hook: `ALBUMEN_TEST_RELIST_DELAY_MS` delays each background
@@ -2606,6 +2754,7 @@ fn relist_dir(
         }
     }
     changed |= !old.is_empty();
+    ds.ver = next_ver();
     changed
 }
 
@@ -2625,11 +2774,18 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
         if filtered.as_ref().is_some_and(|(w, ver)| {
             *ver == version && w.upgrade().is_some_and(|f| Arc::ptr_eq(&f, &v))
         }) {
+            hide_diag::finish("same");
             return v;
         }
     }
-    if !(0..v.len() as u32).any(|i| hidden.contains(v.path(i))) {
+    // Which photos are hidden: one lookup per photo, split over the hide
+    // threads for a large library (the first request after a sync rebuilds
+    // the view: 380k lookups, XO 05:41Z (2)).
+    let shown = shown_mask(&v, &hidden);
+    hide_diag::mark("mask");
+    if shown.iter().all(|&s| s) {
         *FILTERED.lock().unwrap() = Some((Arc::downgrade(&v), version));
+        hide_diag::finish("none");
         return v;
     }
     let mut out = LibraryView {
@@ -2640,19 +2796,35 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
         image_bytes: v.image_bytes,
         ..Default::default()
     };
-    let mut map = vec![u32::MAX; v.len()];
-    for (i, slot) in map.iter_mut().enumerate() {
-        if hidden.contains(v.path(i as u32)) {
-            out.files = out.files.saturating_sub(1);
+    // Copied a run of shown photos at a time (a few thousand hidden among
+    // 380k leave long runs), the bytes on the hide threads: the arenas are
+    // ~100 MB at 380k and a copy per photo took ~50 ms (XO 05:41Z (2)).
+    let n = v.len();
+    let mut map = vec![u32::MAX; n];
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if !shown[i] {
+            i += 1;
             continue;
         }
-        *slot = out.record_ends.len() as u32;
-        out.records
-            .extend_from_slice(slice_at(&v.records, &v.record_ends, i));
-        out.record_ends.push(out.records.len() as u32);
-        out.paths.extend_from_slice(v.path(i as u32).as_bytes());
-        out.path_ends.push(out.paths.len() as u32);
+        let a = i;
+        while i < n && shown[i] {
+            i += 1;
+        }
+        runs.push((a, i));
     }
+    let mut k = 0u32;
+    for &(a, b) in &runs {
+        for slot in &mut map[a..b] {
+            *slot = k;
+            k += 1;
+        }
+    }
+    out.files = out.files.saturating_sub(n - k as usize);
+    (out.records, out.record_ends) = gather_runs(&v.records, &v.record_ends, &runs);
+    (out.paths, out.path_ends) = gather_runs(&v.paths, &v.path_ends, &runs);
+    hide_diag::mark("runs");
     for e in &v.events {
         let photos: Vec<u32> = e
             .photos
@@ -2680,6 +2852,127 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
         *lv = Some(Arc::clone(&out));
     }
     *FILTERED.lock().unwrap() = Some((Arc::downgrade(&out), version));
+    hide_diag::finish("copy");
+    out
+}
+
+/// The entries `runs` (half-open index ranges, ascending) of an arena with
+/// end offsets `ends`, as a new arena and ends. Large copies are split over
+/// the hide threads.
+fn gather_runs(buf: &[u8], ends: &[u32], runs: &[(usize, usize)]) -> (Vec<u8>, Vec<u32>) {
+    let start = |i: usize| if i == 0 { 0 } else { ends[i - 1] as usize };
+    let mut out_ends = Vec::with_capacity(runs.iter().map(|r| r.1 - r.0).sum());
+    // (source range, destination offset) of each run's bytes.
+    let mut parts = Vec::with_capacity(runs.len());
+    let mut at = 0usize;
+    for &(a, b) in runs {
+        let (from, to) = (start(a), ends[b - 1] as usize);
+        out_ends.extend(ends[a..b].iter().map(|&e| (e as usize - from + at) as u32));
+        parts.push((from..to, at));
+        at += to - from;
+    }
+    let mut out = vec![0u8; at];
+    let threads = if at < (8 << 20) { 1 } else { hide_threads() };
+    let per = at.div_ceil(threads.max(1)).max(1);
+    std::thread::scope(|sc| {
+        let mut rest: &mut [u8] = &mut out;
+        let mut base = 0usize;
+        let mut parts = parts.into_iter().peekable();
+        while parts.peek().is_some() {
+            // One thread's share: whole runs up to about `per` bytes.
+            let mut mine = Vec::new();
+            let mut len = 0usize;
+            while let Some(p) = parts.next_if(|_| len < per) {
+                len += p.0.len();
+                mine.push(p);
+            }
+            let (chunk, tail) = std::mem::take(&mut rest).split_at_mut(len);
+            rest = tail;
+            let b0 = base;
+            base += len;
+            let job = move || {
+                for (r, d) in mine {
+                    chunk[d - b0..d - b0 + r.len()].copy_from_slice(&buf[r]);
+                }
+            };
+            if threads == 1 {
+                job();
+            } else {
+                sc.spawn(job);
+            }
+        }
+    });
+    (out, out_ends)
+}
+
+/// Opt-in timing of the hide work in one library request: with
+/// ALBUMEN_HIDE_DIAG_FILE set, each filtered request appends one line of
+/// phase times (ms since the request's hide work began) to that file. Off
+/// (one cached env lookup) otherwise. For the 380k profile (XO 05:41Z).
+mod hide_diag {
+    use std::cell::RefCell;
+    use std::time::Instant;
+    type Marks = (Instant, Vec<(&'static str, f64)>);
+    thread_local!(static MARKS: RefCell<Option<Marks>> = const { RefCell::new(None) });
+    fn file() -> Option<&'static std::path::PathBuf> {
+        static F: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+        F.get_or_init(|| std::env::var_os("ALBUMEN_HIDE_DIAG_FILE").map(Into::into))
+            .as_ref()
+    }
+    pub fn start() {
+        if file().is_some() {
+            MARKS.with(|m| *m.borrow_mut() = Some((Instant::now(), Vec::new())));
+        }
+    }
+    pub fn mark(what: &'static str) {
+        if file().is_some() {
+            MARKS.with(|m| {
+                if let Some((t, v)) = m.borrow_mut().as_mut() {
+                    v.push((what, t.elapsed().as_secs_f64() * 1000.0));
+                }
+            });
+        }
+    }
+    pub fn finish(what: &'static str) {
+        let Some(path) = file() else { return };
+        mark(what);
+        let Some((_, v)) = MARKS.with(|m| m.borrow_mut().take()) else {
+            return;
+        };
+        let mut line = String::from("hide_diag");
+        for (k, ms) in v {
+            line.push_str(&format!(" {k}={ms:.2}"));
+        }
+        line.push('\n');
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
+/// For each photo of `v`, whether it is not in `hidden`.
+fn shown_mask(v: &LibraryView, hidden: &std::collections::HashSet<String>) -> Vec<bool> {
+    let n = v.len();
+    let threads = if n < 50_000 { 1 } else { hide_threads() };
+    if threads == 1 {
+        return (0..n as u32).map(|i| !hidden.contains(v.path(i))).collect();
+    }
+    let mut out = vec![true; n];
+    let chunk = n.div_ceil(threads);
+    std::thread::scope(|sc| {
+        for (k, part) in out.chunks_mut(chunk).enumerate() {
+            sc.spawn(move || {
+                for (j, s) in part.iter_mut().enumerate() {
+                    *s = !hidden.contains(v.path((k * chunk + j) as u32));
+                }
+            });
+        }
+    });
     out
 }
 

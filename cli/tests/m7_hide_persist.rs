@@ -1400,6 +1400,9 @@ fn an_unchanged_request_reads_no_tombstone() {
 /// 50k files, and 100 ms (inside the request max) above that.
 const INLINE_CAP_MS: f64 = 40.0;
 const INLINE_CAP_LARGE_MS: f64 = 100.0;
+/// Library re-walks allowed in the no-flicker run: the first walk plus one
+/// per grown listing (1 release + 20 syncs), XO 05:41Z (3).
+const MAX_REWALKS: u64 = 22;
 
 const HOOKS: bool = cfg!(any(debug_assertions, feature = "test-hooks"));
 
@@ -2492,13 +2495,18 @@ fn no_flicker(variant: &str) {
             );
         }
     };
+    // End to end (request and the test's own parse), printed beside the
+    // request-only time (XO 05:41Z (4)).
+    let e2e = std::cell::RefCell::new(Vec::new());
     let timed = |addr: &str, times: &mut Vec<f64>| {
         // The request only (XO 05:06Z (d)): the test's own JSON parse of
         // the answer is not the server's time.
         let t = Instant::now();
         let (code, body) = get(addr, "/api/library");
         times.push(t.elapsed().as_secs_f64() * 1000.0);
-        parse_listed(code, &body)
+        let r = parse_listed(code, &body);
+        e2e.borrow_mut().push(t.elapsed().as_secs_f64() * 1000.0);
+        r
     };
     let r1 = timed(&addr, &mut times);
     check(&r1, &unhidden, &mut disappearances, &mut h_shown, false);
@@ -2614,13 +2622,24 @@ fn no_flicker(variant: &str) {
     let (_, st) = get(&addr, "/api/hide-status");
     let st: serde_json::Value = serde_json::from_str(&st).unwrap();
     let rewalks = st["generation"].as_u64().unwrap_or(0);
-    println!("M7 NO_FLICKER_REWALKS variant={variant} generation={rewalks}");
+    println!("M7 NO_FLICKER_REWALKS variant={variant} generation={rewalks} max={MAX_REWALKS}");
+    // XO 05:41Z (3): asserted, not only printed. One walk at the start and
+    // at most one per grown listing (21); a re-list of the folder with the
+    // hidden photo starting one would push this over.
+    assert!(
+        rewalks <= MAX_REWALKS,
+        "{rewalks} library re-walks (at most {MAX_REWALKS})"
+    );
     let r_p95 = pct(&mut times.clone(), 0.95);
     let r_max = pct(&mut times.clone(), 1.0);
+    let e2e = e2e.into_inner();
+    let e_p95 = pct(&mut e2e.clone(), 0.95);
+    let e_max = pct(&mut e2e.clone(), 1.0);
     println!(
         "M7 NO_FLICKER variant={variant} key={key} requests={} disappearances={disappearances} \
          h_shown={h_shown} release_to_new_ms={back:.1} withheld_samples={} withheld_p95_ms={w_p95:.1} \
-         withheld_max_ms={w_max:.1} recheck_p95_ms={r_p95:.1} recheck_max_ms={r_max:.1}",
+         withheld_max_ms={w_max:.1} recheck_p95_ms={r_p95:.1} recheck_max_ms={r_max:.1} \
+         e2e_p95_ms={e_p95:.1} e2e_max_ms={e_max:.1}",
         times.len(),
         withheld.len()
     );
