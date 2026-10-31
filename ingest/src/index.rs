@@ -890,10 +890,14 @@ mod check_cache {
     }
 
     pub(super) fn store(file: &Path, generation: u64, identity: FileIdentity) {
+        store_at(file, generation, identity, i128::from(super::now_ns()));
+    }
+
+    /// [`store`] with the clock passed in, so tests can pin the 2 s edge.
+    pub(super) fn store_at(file: &Path, generation: u64, identity: FileIdentity, now_ns: i128) {
         let mut guard = VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
         let map = guard.get_or_insert_with(HashMap::new);
-        let now = i128::from(super::now_ns());
-        if cfg!(unix) && now - identity.ctime_ns >= MIN_AGE_NS {
+        if cfg!(unix) && now_ns - identity.ctime_ns >= MIN_AGE_NS {
             map.insert(file.to_path_buf(), (generation, identity));
         } else {
             map.remove(file);
@@ -1169,16 +1173,28 @@ mod check_cache_tests {
     }
 
     #[test]
-    fn slot_under_two_seconds_old_is_never_cached() {
+    fn slot_is_cached_only_from_two_seconds_after_its_ctime() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.idx.a");
         replace(&path, &body(5, "one.jpg"));
-        let before = check_hashes_on_this_thread();
-        for _ in 0..3 {
-            assert_eq!(check_saved_file(&path), Ok(5));
-        }
-        // Still young (well under MIN_AGE_NS): every check hashed.
-        assert_eq!(check_hashes_on_this_thread() - before, 3);
+        let identity = FileIdentity::of(&std::fs::File::open(&path).unwrap()).unwrap();
+        let hashes = || check_hashes_on_this_thread();
+
+        // ctime + 1.999 s: not remembered, so the next check hashes.
+        check_cache::store_at(&path, 5, identity, identity.ctime_ns + 1_999_999_999);
+        assert!(!check_cache::hit(&path, 5, &identity));
+        let before = hashes();
+        assert_eq!(check_saved_file(&path), Ok(5));
+        assert_eq!(hashes() - before, 1);
+
+        // ctime + 2.000 s: remembered, so the next check does not hash.
+        check_cache::store_at(&path, 5, identity, identity.ctime_ns + 2_000_000_000);
+        assert!(check_cache::hit(&path, 5, &identity));
+        let before = hashes();
+        assert_eq!(check_saved_file(&path), Ok(5));
+        assert_eq!(hashes() - before, 0);
+        // A different generation is never a hit, even when remembered.
+        assert!(!check_cache::hit(&path, 6, &identity));
     }
 
     #[test]
