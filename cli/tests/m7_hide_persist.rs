@@ -2159,6 +2159,83 @@ fn a_corrupted_tombstone_in_a_listed_folder_is_in_the_note_within_one_poll() {
     corrupted_tombstone_note_case(70, false);
 }
 
+/// Product Lead 0912Z D2 (A8 for an open writer): in a listed folder (70
+/// more tombstones, so 72: the masked listing on Windows), a valid SHOW
+/// tombstone is rewritten in place to a valid HIDDEN one through a handle
+/// that stays open across the next request. The photo must be gone from
+/// /api/library on that request and stay gone, with the handle still open
+/// and after it closes. Caught by the tombstone's own stamp, not a note.
+#[test]
+fn a_show_tombstone_rewritten_to_hidden_held_open_hides_on_the_next_request() {
+    use std::io::{Seek, Write};
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for name in ["IMG_0001.JPG", "IMG_0002.JPG"] {
+        fs::write(library.path().join(name), format!("synthetic-m7-d2-{name}")).unwrap();
+    }
+    let show = br#"{"hidden":false,"reason":"hide"}"#;
+    // Same length, valid JSON: an in-place rewrite, no truncate.
+    let hide = br#"{"hidden":true, "reason":"hide"}"#;
+    assert_eq!(show.len(), hide.len());
+    let tomb = library.path().join("IMG_0002.JPG.albumen-tombstone");
+    fs::write(&tomb, show).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    for i in 0..70 {
+        let photo = library.path().join(format!("IMG_X{i:04}.JPG"));
+        fs::write(&photo, format!("synthetic-m7-d2-x{i}")).unwrap();
+        let t = library
+            .path()
+            .join(format!("IMG_X{i:04}.JPG.albumen-tombstone"));
+        fs::write(&t, show).unwrap();
+        set_mtime(&t, old);
+    }
+    set_mtime(&tomb, old);
+    set_mtime(library.path(), old);
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    // Past the coarsest same-tick window; the show is trusted and shown.
+    std::thread::sleep(Duration::from_millis(2100));
+    for _ in 0..2 {
+        assert!(
+            listed(&addr).iter().any(|p| p == "IMG_0002.JPG"),
+            "not shown before"
+        );
+    }
+    let mut h = fs::OpenOptions::new().write(true).open(&tomb).unwrap();
+    h.seek(std::io::SeekFrom::Start(0)).unwrap();
+    h.write_all(hide).unwrap();
+    h.flush().unwrap();
+    // The next request, the handle still open.
+    let next = listed(&addr);
+    assert!(
+        !next.iter().any(|p| p == "IMG_0002.JPG"),
+        "A8: a show rewritten to hidden (writer open) was served on the next request"
+    );
+    assert_ne!(
+        get(&addr, "/img?p=IMG_0002.JPG").0,
+        200,
+        "A8: /img served it"
+    );
+    for k in 0..5 {
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !listed(&addr).iter().any(|p| p == "IMG_0002.JPG"),
+            "A8: shown again {k} polls later (writer open)"
+        );
+    }
+    drop(h);
+    for k in 0..3 {
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !listed(&addr).iter().any(|p| p == "IMG_0002.JPG"),
+            "A8: shown again {k} polls after the writer closed"
+        );
+    }
+    assert!(listed(&addr).iter().any(|p| p == "IMG_0001.JPG"));
+}
+
 /// Product Lead 0905Z D2: the same in a listed folder, the in-place
 /// corruption written through a handle that stays OPEN across the poll
 /// (NTFS may update a listing's times lazily while a writer holds the
@@ -2230,12 +2307,13 @@ fn corrupted_tombstone_note_case(extra: usize, hold_open: bool) {
     };
     let polled = found_page(&addr);
     if cfg!(windows) && extra >= 70 {
-        // The listing path ran: every tombstone of the folder (72) was
-        // stamped from the one masked listing at least once.
-        let listed = polled["hide_dir_listed"].as_u64().unwrap_or(0);
+        // Product Lead 0912Z: this poll's own listing (a delta), not the
+        // earlier polls'.
+        let n = |f: &serde_json::Value| f["hide_dir_listed"].as_u64().unwrap_or(0);
+        let listed = n(&polled) - n(&quiet);
         assert!(
             listed >= 72,
-            "listing path not used: hide_dir_listed={listed}"
+            "listing path not used by this poll: hide_dir_listed delta={listed}"
         );
     }
     let note = polled["hide_note"].as_str().unwrap_or_default().to_string();
@@ -2343,8 +2421,19 @@ fn m7_recheck_and_img_diagnostics() {
         // (ms, sample index, ms after the tombstone writes it started,
         // tombstones read, folders listed by that request)
         let mut slow: Vec<(f64, usize, f64, u64, u64)> = Vec::new();
+        // Per sample: the request's own lock wait, drain, tombstone file
+        // touches (opens on Windows) and keep folders (XO 09:12Z).
+        let mut sync_req: Vec<(f64, f64, u64, u64, f64)> = Vec::new();
+        let last_req = std::cell::Cell::new((0.0, 0.0, 0u64, 0u64));
         let counters = |addr: &str| {
             let f = found_page(addr);
+            let r = &f["hide_req"];
+            last_req.set((
+                r["last_lock_wait_ms"].as_f64().unwrap_or(-1.0),
+                r["last_drain_ms"].as_f64().unwrap_or(-1.0),
+                r["last_tomb_io"].as_u64().unwrap_or(0),
+                r["last_keep_dirs"].as_u64().unwrap_or(0),
+            ));
             (
                 f["hide_recheck_reads"].as_u64().unwrap(),
                 f["hide_dirs_listed"].as_u64().unwrap(),
@@ -2370,6 +2459,10 @@ fn m7_recheck_and_img_diagnostics() {
                 sync_window.push(ms);
             }
             let after = counters(&addr);
+            if at < 2000.0 {
+                let (l, d, io, kd) = last_req.get();
+                sync_req.push((l, d, io, kd, ms));
+            }
             if withheld.is_none() && after.2 == 0 {
                 withheld = Some((synced.elapsed().as_secs_f64() * 1000.0, k));
             }
@@ -2501,6 +2594,29 @@ fn m7_recheck_and_img_diagnostics() {
                 format!("{:.1}", pct(&mut v.to_vec(), 0.95))
             }
         };
+        let slowest = sync_req
+            .iter()
+            .copied()
+            .fold(None::<(f64, f64, u64, u64, f64)>, |m, x| match m {
+                Some(m) if m.4 >= x.4 => Some(m),
+                _ => Some(x),
+            });
+        println!(
+            "M7 RECHECK_SYNC_REQ files={files} tombstones={written} samples={} lock_wait_max_ms={:.2} \
+             drain_max_ms={:.2} tomb_io_max={} keep_dirs_max={} slowest_ms={} slowest_lock_wait_ms={} \
+             slowest_drain_ms={} slowest_tomb_io={} slowest_keep_dirs={} applier_yields={}",
+            sync_req.len(),
+            sync_req.iter().map(|x| x.0).fold(0.0, f64::max),
+            sync_req.iter().map(|x| x.1).fold(0.0, f64::max),
+            sync_req.iter().map(|x| x.2).max().unwrap_or(0),
+            sync_req.iter().map(|x| x.3).max().unwrap_or(0),
+            slowest.map_or("n/a".into(), |x| format!("{:.1}", x.4)),
+            slowest.map_or("n/a".into(), |x| format!("{:.2}", x.0)),
+            slowest.map_or("n/a".into(), |x| format!("{:.2}", x.1)),
+            slowest.map_or("n/a".into(), |x| x.2.to_string()),
+            slowest.map_or("n/a".into(), |x| x.3.to_string()),
+            found_page(&addr)["hide_applier_yields"],
+        );
         println!(
             "M7 RECHECK_SPLIT files={files} tombstones={written} \
              sync2s_p95_ms={} sync2s_max_ms={} sync2s_samples={} steady_p95_ms={} steady_p50_ms={:.1} \
@@ -2904,6 +3020,24 @@ fn no_flicker(variant: &str) {
         f["hide_build_max_ms"].as_f64().unwrap(),
     );
     println!("M7 NO_FLICKER_INLINE variant={variant} keep_max_ms={keep} build_max_ms={build}");
+    // XO 09:12Z / Product Lead 0912Z (4): per-request file touches and lock
+    // wait, so one Windows run shows where the cost is.
+    let r = &f["hide_req"];
+    println!(
+        "M7 NO_FLICKER_REQ variant={variant} requests={} tomb_io_total={} tomb_io_max={} \
+         lock_wait_max_ms={} drain_max_ms={} total_max_ms={} tombstone_reads={} recheck_reads={} \
+         keep_stats={} applier_yields={}",
+        r["requests"],
+        r["tomb_io_total"],
+        r["tomb_io_max"],
+        r["lock_wait_max_ms"],
+        r["drain_max_ms"],
+        r["total_max_ms"],
+        f["hide_tombstone_reads"],
+        f["hide_recheck_reads"],
+        f["hide_keep_stats"],
+        f["hide_applier_yields"],
+    );
     assert!(
         keep <= INLINE_CAP_MS && build <= INLINE_CAP_MS,
         "inline work: keep_shown {keep} ms, build {build} ms"

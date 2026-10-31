@@ -1048,7 +1048,7 @@ fn current_hide_note(library: &Path) -> Option<String> {
                 }
                 let reuse = cache
                     .get(rel)
-                    .is_some_and(|t| t.trusted && st.is_some() && st == t.stamp);
+                    .is_some_and(|t| (t.trusted) && st.is_some() && st == t.stamp);
                 if !reuse {
                     cache.insert(rel.clone(), read_tomb_quiet(library, rel, checked_at));
                 }
@@ -1358,6 +1358,7 @@ fn read_tomb(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
 fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
     let path = lib.join(rel);
     TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tomb_io();
     if let Some(err) = tomb_error_hook(rel) {
         return TombState {
             stamp: None,
@@ -1592,6 +1593,61 @@ static CHANGETIME_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// NtQueryDirectoryFile path), never from a stat: `hide_dir_listed`
 /// (Product Lead 0905Z D2: proves the listing path ran).
 static DIR_LISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Tombstone file touches (reads, plus stamps on the request path; on
+/// Windows each is an open): process-wide, so a request's delta can include
+/// a background re-list running at the same time.
+static TOMB_IO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn tomb_io() {
+    TOMB_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Per-request hide cost, requests only (not the background applier):
+/// maxima and the last request, in `/api/found` (XO 09:12Z: one CI run
+/// must show where worker_error and the k=10 outlier spend their time).
+mod req_stats {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static COUNT: AtomicU64 = AtomicU64::new(0);
+    pub static LOCK_MAX_US: AtomicU64 = AtomicU64::new(0);
+    pub static DRAIN_MAX_US: AtomicU64 = AtomicU64::new(0);
+    pub static IO_MAX: AtomicU64 = AtomicU64::new(0);
+    pub static IO_TOTAL: AtomicU64 = AtomicU64::new(0);
+    pub static TOTAL_MAX_US: AtomicU64 = AtomicU64::new(0);
+    pub static LAST_LOCK_US: AtomicU64 = AtomicU64::new(0);
+    pub static LAST_DRAIN_US: AtomicU64 = AtomicU64::new(0);
+    pub static LAST_IO: AtomicU64 = AtomicU64::new(0);
+    pub static LAST_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+    pub static LAST_KEEP_DIRS: AtomicU64 = AtomicU64::new(0);
+    pub fn record(lock: u64, drain: u64, io: u64, total: u64, keep_dirs: u64) {
+        COUNT.fetch_add(1, Relaxed);
+        LOCK_MAX_US.fetch_max(lock, Relaxed);
+        DRAIN_MAX_US.fetch_max(drain, Relaxed);
+        IO_MAX.fetch_max(io, Relaxed);
+        IO_TOTAL.fetch_add(io, Relaxed);
+        TOTAL_MAX_US.fetch_max(total, Relaxed);
+        LAST_LOCK_US.store(lock, Relaxed);
+        LAST_DRAIN_US.store(drain, Relaxed);
+        LAST_IO.store(io, Relaxed);
+        LAST_TOTAL_US.store(total, Relaxed);
+        LAST_KEEP_DIRS.store(keep_dirs, Relaxed);
+    }
+    pub fn json() -> serde_json::Value {
+        let ms = |a: &AtomicU64| a.load(Relaxed) as f64 / 1000.0;
+        serde_json::json!({
+            "requests": COUNT.load(Relaxed),
+            "lock_wait_max_ms": ms(&LOCK_MAX_US),
+            "drain_max_ms": ms(&DRAIN_MAX_US),
+            "tomb_io_max": IO_MAX.load(Relaxed),
+            "tomb_io_total": IO_TOTAL.load(Relaxed),
+            "total_max_ms": ms(&TOTAL_MAX_US),
+            "last_lock_wait_ms": ms(&LAST_LOCK_US),
+            "last_drain_ms": ms(&LAST_DRAIN_US),
+            "last_tomb_io": LAST_IO.load(Relaxed),
+            "last_total_ms": ms(&LAST_TOTAL_US),
+            "last_keep_dirs": LAST_KEEP_DIRS.load(Relaxed),
+        })
+    }
+}
 static KEY_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn os_key(p: &Path, m: &std::fs::Metadata) -> Option<u64> {
@@ -1992,7 +2048,18 @@ fn hidden_for(
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
     let lib = &server.config.library;
     hide_diag::start();
+    let req_t0 = std::time::Instant::now();
+    let req_io0 = TOMB_IO.load(std::sync::atomic::Ordering::Relaxed);
+    let is_req = !APPLY_ONLY.get();
+    if is_req {
+        REQ_WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     let mut fresh = FRESH.lock().unwrap();
+    if is_req {
+        REQ_WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    let req_lock_us = req_t0.elapsed().as_micros() as u64;
+    let mut req_keep_dirs = 0u64;
     hide_diag::mark("lock");
     if fresh.as_ref().is_none_or(|f| f.generation != v.generation) {
         // Grouped by borrowed folder name (one String per folder, not per
@@ -2113,7 +2180,10 @@ fn hidden_for(
                 if t.verdict == Ok(true) {
                     continue;
                 }
-                if t.trusted && t.stamp.is_some() && mtime(&lib.join(rel)) == t.stamp {
+                if t.trusted && t.stamp.is_some() && {
+                    tomb_io();
+                    mtime(&lib.join(rel)) == t.stamp
+                } {
                     if key_kind() == KeyKind::Portable {
                         // mtime() hashed the bytes off Unix.
                         TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2138,7 +2208,9 @@ fn hidden_for(
     // but for the carried show, fail closed) until the background finishes it (XO 03:22Z),
     // so a request never waits on thousands of tombstone reads.
     let mut changed = !primed;
+    let drain_t0 = std::time::Instant::now();
     changed |= drain_relists(f);
+    let req_drain_us = drain_t0.elapsed().as_micros() as u64;
     hide_diag::mark("drain");
     let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
     hide_diag::mark("dirst");
@@ -2260,6 +2332,7 @@ fn hidden_for(
         // Which photos of each folder about to go pending stay on screen:
         // one stat of each shown photo's own tombstone, on up to 8 threads.
         let t = std::time::Instant::now();
+        req_keep_dirs = jobs.len() as u64;
         let (keeps, b) = keep_shown(lib, f, &jobs);
         for ((j, keep), b) in jobs.iter().zip(keeps).zip(b) {
             f.state[j.i].keep = Arc::new(keep);
@@ -2598,6 +2671,15 @@ fn hidden_for(
         }
     }
     drop(fresh);
+    if is_req {
+        req_stats::record(
+            req_lock_us,
+            req_drain_us,
+            TOMB_IO.load(std::sync::atomic::Ordering::Relaxed) - req_io0,
+            req_t0.elapsed().as_micros() as u64,
+            req_keep_dirs,
+        );
+    }
     hide_diag::mark("build");
     if unhid || grew {
         if let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
@@ -2807,10 +2889,10 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
             // entry whose metadata could not be read is not kept).
             let kept = meta.as_ref().is_some_and(|m| {
                 j.ds.tombs.get(&rel).is_some_and(|t| {
-                    t.trusted
-                        && t.verdict == Ok(false)
-                        && t.stamp.is_some()
-                        && stamp_of(&path, m) == t.stamp
+                    t.trusted && t.verdict == Ok(false) && t.stamp.is_some() && {
+                        tomb_io();
+                        stamp_of(&path, m) == t.stamp
+                    }
                 })
             });
             if !kept {
@@ -2946,6 +3028,10 @@ fn apply_landed() {
 }
 
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Requests waiting for (or about to take) the FRESH lock.
+static REQ_WAITING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Applier passes skipped because a request was waiting.
+static YIELDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static APPLY_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Threads for re-lists and the carried-show stats: one core is left for
@@ -3549,6 +3635,8 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_key": key_kind().name(),
         "hide_changetime_keys": CHANGETIME_KEYS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_dir_listed": DIR_LISTED.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_req": req_stats::json(),
+        "hide_applier_yields": YIELDED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
         "hide_same_tick_ms": RECENT_MS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_fs": FS_NAME.lock().unwrap().clone(),
