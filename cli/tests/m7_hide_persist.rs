@@ -2842,8 +2842,25 @@ fn m7_synced_in_photos_show_without_unhide_or_scan() {
 #[cfg(any(debug_assertions, feature = "test-hooks"))]
 #[test]
 fn m7_unhide_while_pending_shows_the_photo() {
+    unhide_while_pending(&[]);
+}
+
+/// FRAGO 06:29Z (4): the same with no growth path (a re-listed folder never
+/// counts as grown), so only the unhide (the carried hard-then-withheld
+/// set) can bring the photo back: without it, 'the unhidden photo never
+/// showed'.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_unhide_while_pending_shows_the_photo_with_no_growth() {
+    unhide_while_pending(&[("ALBUMEN_TEST_NO_GROW", "1")]);
+}
+
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn unhide_while_pending(extra: &[(&str, &str)]) {
     let u = "d01/IMG_0003.JPG";
-    let (l, all) = open_small(4, &[u], &[("ALBUMEN_TEST_RELIST_GATE", "d01")]);
+    let mut env = vec![("ALBUMEN_TEST_RELIST_GATE", "d01")];
+    env.extend_from_slice(extra);
+    let (l, all) = open_small(4, &[u], &env);
     let _ = &l.gui;
     assert!(!l.set().contains(u), "u shown before the unhide");
     let gate = l.path().join(".albumen-test-gate");
@@ -2874,6 +2891,36 @@ fn m7_unhide_while_pending_shows_the_photo() {
         "the unhide was not seen as one (only a grown folder brought it back): {causes}"
     );
     assert!(ms <= 1000.0, "unhidden photo {ms:.1} ms after the release");
+}
+
+/// FRAGO 06:29Z (3): a walk sent for a new photo that panics is retried,
+/// so the photo still shows (the first walk after startup panics once).
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_a_new_photos_walk_that_panics_is_retried() {
+    let (l, all) = open_small(4, &[], &[("ALBUMEN_TEST_PANIC_WALKS", "1")]);
+    let _ = &l.gui;
+    assert_eq!(l.set().len(), all.len());
+    let p = "d03/SYNC_0001.JPG";
+    fs::write(l.path().join(p), b"synthetic-m7-r6-walk-retry").unwrap();
+    let ms = l.until(
+        10,
+        "the new photo never showed after its walk panicked",
+        |s| s.contains(p),
+    );
+    // The timed retry (1 s after the panic) also runs; the photo may show
+    // first by the re-list that sees it again.
+    std::thread::sleep(Duration::from_millis(1500));
+    let f = settled(&l.addr);
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    want.insert(p.to_string());
+    assert_eq!(l.set(), want, "final set");
+    println!(
+        "M7 WALK_RETRY shown_ms={ms:.1} failures={} retries={}",
+        f["walk_failures"], f["walk_retries"]
+    );
+    assert_eq!(f["walk_failures"].as_u64(), Some(1), "{f}");
+    assert!(f["walk_retries"].as_u64() >= Some(1), "{f}");
 }
 
 /// XO 04:41Z (3): a folder held past PENDING_LIMIT (10 s, a hung worker) is

@@ -356,21 +356,84 @@ struct ThumbView {
 /// each scan), so /api/library never reads the index or stats every HEIC.
 /// A newer generation always wins over an older one that finishes late.
 fn refresh_thumbs(server: &Arc<Server>) {
+    refresh_thumbs_try(server, 0);
+}
+
+/// Walks that panicked (FRAGO 06:29Z (3)); a photo already sent on a walk
+/// is sent again once this moves (see `grew_sent`).
+static WALK_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Walks started again after one panicked.
+static WALK_RETRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const WALK_TRIES: u32 = 4;
+
+/// Test hook: the first N walks after startup panic
+/// (`ALBUMEN_TEST_PANIC_WALKS=N`), so a test proves a new photo's walk is
+/// retried.
+fn walk_panic_hook() {
+    static LEFT: std::sync::OnceLock<std::sync::atomic::AtomicI64> = std::sync::OnceLock::new();
+    static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let left = LEFT.get_or_init(|| {
+        std::sync::atomic::AtomicI64::new(
+            std::env::var("ALBUMEN_TEST_PANIC_WALKS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+        )
+    });
+    // The startup walk is never failed (the page waits on it).
+    if SEEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+        return;
+    }
+    if left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+        panic!("test hook: walk panic");
+    }
+}
+
+fn refresh_thumbs_try(server: &Arc<Server>, attempt: u32) {
     use std::sync::atomic::Ordering;
     let gen = server.thumb_gen.fetch_add(1, Ordering::SeqCst) + 1;
     let s = Arc::clone(server);
     std::thread::spawn(move || {
+        let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            walk_panic_hook();
+            walk_once(&s, gen);
+        }));
+        if walked.is_err() {
+            // A new photo's walk is not lost: logged, counted and started
+            // again after 1, 2, 4 s; past that the next re-list that sees
+            // the photo sends it again (WALK_FAILURES clears `grew_sent`).
+            WALK_FAILURES.fetch_add(1, Ordering::SeqCst);
+            eprintln!(
+                "albumen gui: walk panicked (attempt {}); {}",
+                attempt + 1,
+                if attempt + 1 < WALK_TRIES {
+                    "retrying"
+                } else {
+                    "giving up until the next change"
+                }
+            );
+            if attempt + 1 < WALK_TRIES {
+                std::thread::sleep(std::time::Duration::from_secs(1 << attempt));
+                WALK_RETRIES.fetch_add(1, Ordering::SeqCst);
+                refresh_thumbs_try(&s, attempt + 1);
+            }
+        }
+    });
+}
+
+fn walk_once(s: &Arc<Server>, gen: u64) {
+    {
         let lib = &s.config.library;
         // One listing for the thumbnails and the page, from the M3 index.
         let files = if s.config.demo {
             library_files(lib)
         } else {
             let files = library_files_indexed(lib, &s.found, &s.found_paths, &s.index_note);
-            retry_pending_save(&s);
+            retry_pending_save(s);
             files
         };
         let Some(cache) = live::cache_dir(lib) else {
-            publish_library(&s, gen, files, &Default::default());
+            publish_library(s, gen, files, &Default::default());
             return;
         };
         let scan = s
@@ -385,14 +448,14 @@ fn refresh_thumbs(server: &Arc<Server>) {
             .filter(|r| thumbs::is_heic(r))
             .collect();
         let r = thumbs::refresh(lib, &heics, &thumbs::thumbs_root(&cache), scan.as_deref());
-        publish_library(&s, gen, files, &r.cached);
+        publish_library(s, gen, files, &r.cached);
         {
             let mut view = s.thumbs.lock().unwrap();
             if gen > view.generation {
                 *view = ThumbView { generation: gen };
             }
         }
-    });
+    }
 }
 
 /// One background retry loop at a time for an index save left pending.
@@ -615,6 +678,7 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             // listing's generation. The page fetches /api/library only
             // when the version or generation changes.
             let body = hide_status_json(server).to_string();
+            refresh_hide_note_in_background(&server.config.library);
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/found") => {
@@ -800,6 +864,38 @@ fn library_files(library: &Path) -> Vec<String> {
 /// process, so one note.
 static HIDE_NOTE: Mutex<Option<String>> = Mutex::new(None);
 
+/// Bumped whenever the quiet hide line changes (FRAGO 06:29Z (2)), so the
+/// page reads /api/found only when it moved, not on idle ticks.
+static HIDE_NOTE_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// A background re-check of the hide line is running (one at a time).
+static NOTE_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn set_hide_note(note: Option<String>) {
+    let mut cur = HIDE_NOTE.lock().unwrap();
+    if *cur != note {
+        *cur = note;
+        HIDE_NOTE_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Re-check the hide line off the request path (the status poll stays a
+/// few numbers): a tombstone that breaks or is fixed moves the note
+/// version, which the next status poll carries to the page.
+fn refresh_hide_note_in_background(library: &Path) {
+    use std::sync::atomic::Ordering::AcqRel;
+    if NOTE_REFRESHING
+        .compare_exchange(false, true, AcqRel, std::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let library = library.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(|| current_hide_note(&library));
+        NOTE_REFRESHING.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
 /// One quiet line for hide problems: the photo stays hidden (fail closed),
 /// and the user is told which file made that call.
 fn hide_note(errors: &[String]) -> Option<String> {
@@ -858,37 +954,28 @@ fn current_hide_note(library: &Path) -> Option<String> {
             // One listing per folder: each tombstone's metadata comes with
             // it (Windows: no stat per tombstone, FRAGO 06:13Z (2)); a
             // tombstone the listing lacks gets the plain stat.
+            // One enumeration per folder (Windows, FRAGO 06:29Z (1)): the
+            // handle-based directory listing carries each entry's
+            // ChangeTime and LastWriteTime, so a tombstone's stamp costs no
+            // open of its own; only a tombstone whose stamp moved is opened
+            // and read again. Elsewhere (and with the portable key) the
+            // plain stat, as before (Linux: a stat is what a listing entry
+            // costs; the listing made p50 0.25 -> 5 ms on the box).
             let mut listed: std::collections::HashMap<
                 &str,
-                std::collections::HashMap<std::ffi::OsString, std::fs::Metadata>,
+                std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)>,
             > = Default::default();
             for rel in &watch {
                 let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
                 let entries = listed.entry(dir).or_insert_with(|| {
-                    let mut m = std::collections::HashMap::new();
-                    // Linux: a stat costs what the entry's metadata does,
-                    // so only Windows lists (the 0-tombstone /api/found
-                    // p50 went 0.25 -> 5 ms on the box with a listing).
-                    if !cfg!(windows) {
-                        return m;
+                    if key_kind() != KeyKind::ChangeTime {
+                        return Default::default();
                     }
-                    if let Ok(rd) = std::fs::read_dir(library.join(dir)) {
-                        for e in rd.flatten() {
-                            let n = e.file_name();
-                            if n.as_encoded_bytes()
-                                .ends_with(albumen_ingest::hides::TOMBSTONE_SUFFIX.as_bytes())
-                            {
-                                if let Ok(md) = e.metadata() {
-                                    m.insert(n, md);
-                                }
-                            }
-                        }
-                    }
-                    m
+                    dir_change_stamps(&library.join(dir))
                 });
                 let path = library.join(rel);
                 let st = match entries.get(std::ffi::OsStr::new(name)) {
-                    Some(md) => stamp_of(&path, md),
+                    Some(st) => Some(*st),
                     None => mtime(&path),
                 };
                 if key_kind() == KeyKind::Portable {
@@ -915,7 +1002,7 @@ fn current_hide_note(library: &Path) -> Option<String> {
                 errors.push(e.clone());
             }
         }
-        *HIDE_NOTE.lock().unwrap() = hide_note(&errors);
+        set_hide_note(hide_note(&errors));
         return HIDE_NOTE.lock().unwrap().clone();
     }
     HIDE_NOTE
@@ -934,7 +1021,7 @@ fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
     for err in &hidden.errors {
         eprintln!("albumen gui: hide: {}", err.replace('\n', ": "));
     }
-    *HIDE_NOTE.lock().unwrap() = hide_note(&hidden.errors);
+    set_hide_note(hide_note(&hidden.errors));
     *HIDE_WATCH.lock().unwrap() = Some(
         paths
             .iter()
@@ -1025,6 +1112,9 @@ struct Fresh {
     /// while that walk runs (slow on Windows CI: 41/42 walks for 22)
     /// must not start another for the same photo.
     grew_sent: std::collections::HashSet<String>,
+    /// WALK_FAILURES when `grew_sent` was last trusted: a walk that panicked
+    /// may have lost those photos, so they are sent again.
+    grew_epoch: u64,
     /// The previous generation's view, kept until this generation's first
     /// check has decided which photos of a pending folder were on screen.
     prev: Option<Prev>,
@@ -1621,6 +1711,89 @@ fn end_of_file(file: &std::fs::File) -> Option<u64> {
 /// the read (a writer still open, Windows): `hide_writer_untrusted`.
 static WRITER_UNTRUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Every plain file's stamp in one folder from ONE directory handle
+/// (Windows, FileIdBothDirectoryInfo): (LastWriteTime as std gives it,
+/// ChangeTime), the same stamp [`mtime`] takes with a file open each.
+/// Directories, reparse points and entries with no ChangeTime are left out
+/// (the caller stats those). Empty if the folder can't be listed.
+#[cfg(windows)]
+fn dir_change_stamps(
+    dir: &Path,
+) -> std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
+    };
+    let mut out = std::collections::HashMap::new();
+    let Ok(file) = std::fs::OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+    else {
+        return out;
+    };
+    // u64 words keep the buffer 8-byte aligned, as the records need.
+    let mut buf = vec![0u64; 8 * 1024];
+    let mut class = FileIdBothDirectoryRestartInfo;
+    loop {
+        // SAFETY: the handle is open for the call and the buffer is the
+        // size passed.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle() as _,
+                class,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+            )
+        } != 0;
+        if !ok {
+            break;
+        }
+        class = FileIdBothDirectoryInfo;
+        let base = buf.as_ptr() as *const u8;
+        let mut off = 0usize;
+        loop {
+            // SAFETY: `off` follows NextEntryOffset within the buffer the
+            // call filled; each record is aligned and holds FileNameLength
+            // bytes of name after its header.
+            let rec = unsafe { &*(base.add(off) as *const FILE_ID_BOTH_DIR_INFO) };
+            let len = rec.FileNameLength as usize / 2;
+            let name = unsafe { std::slice::from_raw_parts(rec.FileName.as_ptr(), len) };
+            let plain =
+                rec.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+            if plain && rec.ChangeTime != 0 && rec.LastWriteTime > 0 {
+                // FILETIME (100 ns since 1601) -> SystemTime, as std does.
+                const EPOCH_DIFF: i64 = 116_444_736_000_000_000;
+                let t = rec.LastWriteTime - EPOCH_DIFF;
+                let when = if t >= 0 {
+                    SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(t as u64 * 100)
+                } else {
+                    SystemTime::UNIX_EPOCH - std::time::Duration::from_nanos((-t) as u64 * 100)
+                };
+                CHANGETIME_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                out.insert(
+                    std::ffi::OsString::from_wide(name),
+                    (when, rec.ChangeTime as u64),
+                );
+            }
+            if rec.NextEntryOffset == 0 {
+                break;
+            }
+            off += rec.NextEntryOffset as usize;
+        }
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn dir_change_stamps(_: &Path) -> std::collections::HashMap<std::ffi::OsString, (SystemTime, u64)> {
+    Default::default()
+}
+
 #[cfg(not(windows))]
 fn change_time(_: &Path) -> Option<u64> {
     None
@@ -1811,6 +1984,7 @@ fn hidden_for(
             fam_dirty: true,
             grew: false,
             grew_sent: Default::default(),
+            grew_epoch: WALK_FAILURES.load(std::sync::atomic::Ordering::SeqCst),
             prev,
         });
     }
@@ -2108,7 +2282,7 @@ fn hidden_for(
         if let Some(fam) = &f.family {
             errors.extend(fam.errors.iter().cloned());
         }
-        *HIDE_NOTE.lock().unwrap() = hide_note(&errors);
+        set_hide_note(hide_note(&errors));
     }
     if watch_changed {
         *HIDE_WATCH.lock().unwrap() = Some(
@@ -2689,6 +2863,14 @@ fn spawn_relists(
     rx
 }
 
+/// Test hook (`ALBUMEN_TEST_NO_GROW=1`): a re-listed folder never counts
+/// as grown, so a test sees the unhide path alone bring a photo back
+/// (FRAGO 06:29Z (4)).
+fn test_no_grow() -> bool {
+    static NO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NO.get_or_init(|| std::env::var("ALBUMEN_TEST_NO_GROW").is_ok_and(|v| v == "1"))
+}
+
 /// Put a finished folder back (by index if the generation is the same,
 /// else by name; a folder no longer listed is dropped).
 fn apply_relist(f: &mut Fresh, done: RelistDone) {
@@ -2716,7 +2898,12 @@ fn apply_relist(f: &mut Fresh, done: RelistDone) {
     // A photo synced in: listed, not hidden by its own tombstone, and not
     // in the view (the view is from the last walk).
     let photos = std::mem::take(&mut ds.photos);
-    if !photos.is_empty() && !f.grew {
+    let failed_walks = WALK_FAILURES.load(std::sync::atomic::Ordering::SeqCst);
+    if failed_walks != f.grew_epoch {
+        f.grew_sent.clear();
+        f.grew_epoch = failed_walks;
+    }
+    if !photos.is_empty() && !f.grew && !test_no_grow() {
         let have: std::collections::HashSet<&str> =
             f.photos_in[i].iter().map(|&j| f.base.path(j)).collect();
         let why = photos.iter().find_map(|p| {
@@ -3143,6 +3330,7 @@ fn hide_status_json(server: &Server) -> serde_json::Value {
         "version": HIDE_VERSION.load(Relaxed),
         "generation": generation,
         "found": server.found.load(Relaxed),
+        "note_version": HIDE_NOTE_VERSION.load(Relaxed),
     })
 }
 
@@ -3153,6 +3341,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "paths": paths,
         "index_note": server.index_note.lock().unwrap().clone(),
         "hide_note": current_hide_note(&server.config.library),
+        "hide_note_version": HIDE_NOTE_VERSION.load(std::sync::atomic::Ordering::Relaxed),
         "hide_tombstone_reads": TOMB_READS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_recheck_reads": RECHECK_READS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_dirs_listed": DIRS_LISTED.load(std::sync::atomic::Ordering::Relaxed),
@@ -3174,6 +3363,8 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_keep_max_ms": KEEP_STAT_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
         "hide_worker_panics": WORKER_PANICS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_redispatched": REDISPATCHED.load(std::sync::atomic::Ordering::Relaxed),
+        "walk_failures": WALK_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
+        "walk_retries": WALK_RETRIES.load(std::sync::atomic::Ordering::Relaxed),
         "hide_exhausted": EXHAUSTED.load(std::sync::atomic::Ordering::Relaxed),
         "hide_grew": GREW.load(std::sync::atomic::Ordering::Relaxed),
         "hide_rewalk_causes": REWALK_CAUSES.lock().unwrap().clone(),

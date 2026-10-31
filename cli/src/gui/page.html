@@ -387,17 +387,19 @@ async function init(){
   $('lib-count').textContent=lib.total_images>0?'Sorting… '+n+' photos':'Reading the folder… '+n+' photos so far';try{await earlyTiles();}catch(e){}await new Promise(r=>setTimeout(r,200));lib=await j('/api/library');}
  $('lib').textContent='Folder: '+lib.library;
  $('lib-count').textContent=countText(lib.images.map(i=>i.path));
- try{const f=await j('/api/found');$('index-note').hidden=!f.index_note;$('index-note').textContent=f.index_note?'Updating the library index…':'';$('index-note').title=f.index_note||'';if(f.index_note)pollIndex();$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';window.__hv0=f.hide_version;}catch(e){}
+ try{const f=await j('/api/found');$('index-note').hidden=!f.index_note;$('index-note').textContent=f.index_note?'Updating the library index…':'';$('index-note').title=f.index_note||'';if(f.index_note)pollIndex();$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';window.__hv0=f.hide_version;window.__nv0=f.hide_note_version;}catch(e){}
  // The hide line follows the files: a hide file that breaks or is fixed shows on the next poll.
  // M7 (XO 04:41Z (2)): the poll reads /api/hide-status (a few numbers, no
  // paths): every 200 ms while a folder is being checked in the background
  // (pending>0), else every 10 s. Only when the hidden set's version or the
- // listing's generation moves is the grid fetched and redrawn in place. The
- // hide line (/api/found) is read on each idle tick and on a change.
- let hideVer=window.__hv0??null,hideGen=null,idleAt=0;
+ // listing's generation moves is the grid fetched and redrawn in place.
+ // FRAGO 06:29Z (2): the hide line (/api/found) is read only when the
+ // version, the generation or the note's own version moved, never on an
+ // idle tick (the status call re-checks the line in the background).
+ let hideVer=window.__hv0??null,hideGen=null,noteVer=window.__nv0??null;
  const hidePoll=async()=>{let wait=10000;try{const s=await j('/api/hide-status');window.__hidePolls=(window.__hidePolls||0)+1;
   const moved=hideVer===null||s.version!==hideVer||(hideGen!==null&&s.generation!==hideGen);
-  if(moved||performance.now()-idleAt>=10000){idleAt=performance.now();const f=await j('/api/found');$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';}
+  if(moved||s.note_version!==noteVer){const f=await j('/api/found');noteVer=f.hide_note_version;window.__foundReads=(window.__foundReads||0)+1;$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';}
   if(hideVer===null){hideVer=s.version;hideGen=s.generation;}else if(moved){const nl=await j('/api/library');if(nl.status!=='indexing'){hideVer=s.version;hideGen=s.generation;const P=$('photos'),y=P.scrollTop;lib=nl;$('lib-count').textContent=countText(lib.images.map(i=>i.path));draw();P.scrollTop=y;window.__hideRedraws=(window.__hideRedraws||0)+1;}}
   if(s.pending>0)wait=200;}catch(e){}setTimeout(hidePoll,wait);};
  setTimeout(hidePoll,200);
