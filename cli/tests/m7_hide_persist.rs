@@ -1342,6 +1342,209 @@ fn a_show_rewritten_in_place_to_hidden_during_a_pending_listing_applies_on_the_n
     }
     assert!(!listed(&addr).contains(&"a/IMG_0002.JPG".to_string()));
 }
+/// XO FRAGO 11:51Z (2): keep_shown's listing of a moved pending folder is
+/// taken before FRESH (request prestamp). A show tombstone rewritten in
+/// place to hidden while a request sits between that listing and the lock
+/// (ALBUMEN_TEST_PREKEEP_DELAY_MS) is never carried as a show past it: the
+/// next request withholds it (its stamp moved: listed again, fail closed),
+/// the other photos never blink, and the pre-taken listing was used.
+#[test]
+#[cfg_attr(
+    not(any(debug_assertions, feature = "test-hooks")),
+    ignore = "needs a debug build or --features test-hooks"
+)]
+fn a_show_rewritten_during_the_prekeep_gap_is_withheld_next_request() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let dir = library.path().join("a");
+    fs::create_dir_all(&dir).unwrap();
+    for n in 1..=3 {
+        let p = dir.join(format!("IMG_000{n}.JPG"));
+        fs::write(&p, format!("synthetic-m7-prekeep-{n}")).unwrap();
+        set_mtime(&p, old);
+    }
+    fs::write(
+        dir.join("IMG_0002.JPG.albumen-tombstone"),
+        br#"{"hidden":false,"reason":"unhide"}"#,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let (_gui, addr, _) = start_env(
+        library.path(),
+        work.path(),
+        index.path(),
+        home.path(),
+        &[
+            ("ALBUMEN_TEST_RELIST_GATE", "a"),
+            ("ALBUMEN_TEST_PREKEEP_DELAY_MS", "600"),
+        ],
+    );
+    ready_found(&addr);
+    let all = ["a/IMG_0001.JPG", "a/IMG_0002.JPG", "a/IMG_0003.JPG"];
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    let gate = library.path().join(".albumen-test-gate");
+    fs::write(&gate, b"").unwrap();
+    fs::write(dir.join("IMG_0004.JPG"), b"synthetic-m7-prekeep-4").unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let _ = listed(&addr);
+    assert_eq!(
+        found_page(&addr)["hide_pending_dirs"],
+        1,
+        "a was not pending"
+    );
+    // A request is between its pre-lock listing and the lock when a/2's
+    // show tombstone is rewritten in place to hidden.
+    let a2 = addr.clone();
+    let inflight = std::thread::spawn(move || listed(&a2));
+    std::thread::sleep(Duration::from_millis(250));
+    {
+        use std::io::Write;
+        let mut t = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(dir.join("IMG_0002.JPG.albumen-tombstone"))
+            .unwrap();
+        t.write_all(br#"{"hidden":true,"reason":"hide"}"#).unwrap();
+    }
+    let during = inflight.join().unwrap();
+    for p in ["a/IMG_0001.JPG", "a/IMG_0003.JPG"] {
+        assert!(
+            during.contains(&p.to_string()),
+            "{p} blinked out: {during:?}"
+        );
+    }
+    let next = listed(&addr);
+    let f = found_page(&addr);
+    println!(
+        "M7 PREKEEP race: during={during:?} next={next:?} used={} missed={} req_stale={}",
+        f["hide_prekeep_used"], f["hide_prekeep_missed"], f["hide_prestamp_req_stale"]
+    );
+    assert!(
+        !next.contains(&"a/IMG_0002.JPG".to_string()),
+        "the rewritten show was carried past the gap: {next:?}"
+    );
+    for p in ["a/IMG_0001.JPG", "a/IMG_0003.JPG"] {
+        assert!(next.contains(&p.to_string()), "{p} blinked out: {next:?}");
+    }
+    assert!(
+        f["hide_prekeep_used"].as_u64().unwrap_or(0) >= 1,
+        "the pre-lock listing was never used: {f}"
+    );
+    fs::remove_file(&gate).unwrap();
+    let t = Instant::now();
+    loop {
+        let now = listed(&addr);
+        assert!(!now.contains(&"a/IMG_0002.JPG".to_string()), "{now:?}");
+        if found_page(&addr)["hide_pending_dirs"] == 0
+            && now.contains(&"a/IMG_0004.JPG".to_string())
+        {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(15), "a never settled");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+/// XO 12:47Z: a re-walk that replaces the hide state while a request waits
+/// for blinking folders with the lock released: the request re-checks the
+/// generation when it takes the lock again and fails closed (withholds
+/// every photo of its view) instead of judging against the new state.
+#[test]
+fn a_generation_change_during_the_unlocked_blink_wait_fails_closed() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let dir = library.path().join("a");
+    fs::create_dir_all(&dir).unwrap();
+    for n in 1..=3 {
+        let p = dir.join(format!("IMG_000{n}.JPG"));
+        fs::write(&p, format!("synthetic-m7-retake-{n}")).unwrap();
+        set_mtime(&p, old);
+    }
+    fs::write(
+        dir.join("IMG_0002.JPG.albumen-tombstone"),
+        br#"{"hidden":false,"reason":"unhide"}"#,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let (_gui, addr, _) = start_env(
+        library.path(),
+        work.path(),
+        index.path(),
+        home.path(),
+        &[("ALBUMEN_TEST_RELIST_GATE", "a")],
+    );
+    ready_found(&addr);
+    let all = ["a/IMG_0001.JPG", "a/IMG_0002.JPG", "a/IMG_0003.JPG"];
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    std::thread::sleep(Duration::from_millis(2100));
+    assert_eq!(listed(&addr), all);
+    settled(&addr);
+    let before = found_page(&addr)["hide_req_retake_stale"]
+        .as_u64()
+        .unwrap_or(0);
+    // Folder a changes; its re-list is held at the gate, so the request
+    // waits the blink budget for it with FRESH released, and the hook
+    // replaces the generation inside that window.
+    let gate = library.path().join(".albumen-test-gate");
+    fs::write(&gate, b"").unwrap();
+    fs::write(dir.join("IMG_0004.JPG"), b"synthetic-m7-retake-4").unwrap();
+    // a/2's show is rewritten (still a show): its stamp moved, so it can't
+    // be kept from the old verdict and would blink: the request waits.
+    fs::write(
+        dir.join("IMG_0002.JPG.albumen-tombstone"),
+        br#"{"hidden":false,"reason":"unhide again"}"#,
+    )
+    .unwrap();
+    let bump = library.path().join(".albumen-test-bump-gen");
+    fs::write(&bump, b"").unwrap();
+    let during = listed(&addr);
+    let f = found_page(&addr);
+    println!(
+        "M7 RETAKE race: during={during:?} retake_stale={} bump_left={}",
+        f["hide_req_retake_stale"],
+        bump.exists()
+    );
+    assert!(!bump.exists(), "the request never waited unlocked");
+    assert!(
+        f["hide_req_retake_stale"].as_u64().unwrap_or(0) > before,
+        "the generation change was not counted: {f}"
+    );
+    // Fail closed without a blank grid: the answer is the last good grid
+    // (a/2's rewritten show is not judged against the new state).
+    assert_eq!(
+        during, all,
+        "a request judged against another generation's state (or blanked)"
+    );
+    let again = listed(&addr);
+    assert!(!again.is_empty(), "the grid went blank after the retake");
+    fs::remove_file(&gate).unwrap();
+    let t = Instant::now();
+    loop {
+        let now = listed(&addr);
+        if now.contains(&"a/IMG_0004.JPG".to_string())
+            && found_page(&addr)["hide_pending_dirs"] == 0
+        {
+            assert_eq!(now.len(), 4, "{now:?}");
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "no fresh view within 1 s: {now:?} {}",
+            found_page(&addr)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 /// XO 03:36Z (5): a re-list worker that panics is caught and logged; its
 /// folder's photos are hidden meanwhile (fail closed) and the folder is
 /// listed again, so it never stays pending.

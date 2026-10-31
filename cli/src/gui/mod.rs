@@ -2199,11 +2199,27 @@ fn hidden_for(
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
     let lib = &server.config.library;
     hide_diag::start();
-    let req_t0 = std::time::Instant::now();
     let req_io0 = TOMB_IO.load(std::sync::atomic::Ordering::Relaxed);
     let is_req = !APPLY_ONLY.get();
+    // XO 11:51Z (4)/(2): a request stamps every folder (and its carried and
+    // non-hiding tombstones) on the hide threads before taking FRESH, and
+    // lists the pending folders that moved; used under the lock only for
+    // the same generation (else stamped inline: fail closed).
+    let own_pre = is_req
+        && req_prestamp_on()
+        && PRESTAMP.with(|p| p.borrow().is_none())
+        && match prestamp_snapshot(lib) {
+            Some(p) => {
+                PRESTAMP.with(|c| *c.borrow_mut() = Some(p));
+                true
+            }
+            None => false,
+        };
+    let _pre_guard = PrestampGuard(own_pre);
+    hide_diag::mark("prestamp");
+    let req_t0 = std::time::Instant::now();
     let mut fresh = FRESH.lock().unwrap();
-    let hold = lock_hold::Hold::start();
+    let mut hold = lock_hold::Hold::start();
     let req_lock_us = req_t0.elapsed().as_micros() as u64;
     let mut req_keep_dirs = 0u64;
     hide_diag::mark("lock");
@@ -2310,7 +2326,7 @@ fn hidden_for(
         });
     }
     hide_diag::mark("init");
-    let f = fresh.as_mut().unwrap();
+    let mut f = fresh.as_mut().unwrap();
     if APPLY_ONLY.get()
         && PRESTAMP.with(|p| {
             p.borrow()
@@ -2325,8 +2341,22 @@ fn hidden_for(
         APPLY_AGAIN.store(true, std::sync::atomic::Ordering::SeqCst);
         return (Arc::clone(&f.hidden), f.version);
     }
+    if !APPLY_ONLY.get()
+        && PRESTAMP.with(|p| {
+            p.borrow()
+                .as_ref()
+                .is_some_and(|p| p.generation != f.generation)
+        })
+    {
+        PRESTAMP.with(|p| *p.borrow_mut() = None);
+        PRESTAMP_REQ_STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let v = Arc::clone(&f.base);
-    let checked_at = SystemTime::now();
+    // With pre-taken stamps, "same tick" is judged as of when they were
+    // taken (never later: a later time could trust a stamp that was racy).
+    let checked_at = PRESTAMP
+        .with(|p| p.borrow().as_ref().map(|p| p.taken_at))
+        .map_or_else(SystemTime::now, |t| t.min(SystemTime::now()));
     let primed = f.primed;
     // An unchanged folder: stamp only its non-hiding tombstones (inline,
     // cheap). Returns whether the hidden set may have changed.
@@ -2369,16 +2399,11 @@ fn hidden_for(
     changed |= drain_relists(f);
     let req_drain_us = drain_t0.elapsed().as_micros() as u64;
     hide_diag::mark("drain");
-    let sts: Vec<_> = f
-        .dirs
-        .iter()
-        .map(|d| {
-            let t = std::time::Instant::now();
-            let st = stamp_rel(lib, d, false);
-            dirst_t::one(t.elapsed(), d);
-            st
-        })
-        .collect();
+    // XO 12:47Z: folder stamps come from the prestamp (taken outside FRESH,
+    // in parallel); any folder it lacks is stat'ed here on up to
+    // `hide_threads()` threads at once (not one after another: Windows 10k
+    // dirst was 161 ms serial, one folder 72 ms). Every folder is stamped.
+    let sts: Vec<_> = dir_stamps(lib, &f.dirs);
     hide_diag::mark("dirst");
     dirst_t::pass(f.dirs.len());
     let mut jobs: Vec<RelistJob> = Vec::new();
@@ -2533,53 +2558,128 @@ fn hidden_for(
         // is not spent behind the others.
         jobs.sort_by_key(|j| !blinking.contains(&j.i));
         let rx = spawn_relists(lib.to_path_buf(), jobs, checked_at, f.generation);
-        // Once primed the request does not wait at all (XO 04:08Z): the
-        // per-photo carried show keeps what is on screen, and a coalescing
-        // background applier puts finished folders (and the rebuilt view)
-        // in place. Only the very first answer is done in full.
-        let waits = primed && !blinking.is_empty();
-        let deadline = primed.then(|| {
-            std::time::Instant::now()
-                + if !blinking.is_empty() {
-                    BLINK_BUDGET
-                } else {
-                    Default::default()
+        // XO 12:30Z (1): the wait for folders that would blink is spent
+        // with FRESH released (the re-lists' I/O and a panicked worker's
+        // full budget were counted as lock hold: 40 ms box, 301 ms Windows
+        // 10k). Results are collected here and applied once the lock is
+        // taken again, only for the same generation (else fail closed).
+        if primed && !blinking.is_empty() && req_wait_unlocked_on() {
+            let gen = f.generation;
+            let deadline = std::time::Instant::now() + BLINK_BUDGET;
+            drop(hold);
+            drop(fresh);
+            // Race test: a re-walk replaces the state while the lock is out.
+            #[cfg(any(debug_assertions, feature = "test-hooks"))]
+            if std::fs::remove_file(lib.join(".albumen-test-bump-gen")).is_ok() {
+                if let Some(x) = FRESH.lock().unwrap().as_mut() {
+                    x.generation = x.generation.wrapping_add(1_000_000);
                 }
-        });
-        loop {
-            let got = match deadline {
-                None => rx.recv().ok(),
-                Some(t) => rx
-                    .recv_timeout(t.saturating_duration_since(std::time::Instant::now()))
-                    .ok(),
-            };
-            match got {
-                Some(done) => {
-                    // Waiting is only for the folders that would blink:
-                    // once they are in, the rest finish in the background
-                    // (their shown photos stay under `keep`), XO 05:41Z (2).
-                    if done.generation == f.generation {
-                        blinking.remove(&done.i);
-                    }
-                    apply_relist(f, done);
-                    if waits && blinking.is_empty() {
-                        break;
-                    }
-                    // XO 08:36Z (2), D3: the budget bounds the whole wait,
-                    // applying included. Results that arrive inside it were
-                    // applied one after another past the deadline (380k/10k
-                    // first request after a sync: wait 103 ms against the
-                    // 40 ms budget); past it the rest go to the background
-                    // applier (their shown photos stay under `keep`).
-                    if deadline.is_some_and(|t| std::time::Instant::now() >= t) {
-                        break;
-                    }
-                }
-                None => break,
             }
+            let mut got = Vec::new();
+            let mut left = blinking.clone();
+            while !left.is_empty() {
+                let Ok(done) =
+                    rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                else {
+                    break;
+                };
+                if done.generation == gen {
+                    left.remove(&done.i);
+                }
+                got.push(done);
+            }
+            fresh = FRESH.lock().unwrap();
+            hold = lock_hold::Hold::start();
+            let same = fresh.as_ref().is_some_and(|x| x.generation == gen);
+            if !same {
+                // A re-walk replaced the state meanwhile: the results go
+                // to the shared queue (dropped there for the old
+                // generation) and this answer withholds every photo of
+                // the view it was asked for (fail closed; never a show
+                // judged against another generation's state).
+                RELISTS.lock().unwrap().push(rx);
+                REQ_RETAKE_STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                drop(hold);
+                drop(fresh);
+                // The last good grid stays: photos the last served view
+                // did not hold stay out; nothing new is shown on this
+                // answer. With no served view yet, everything is withheld.
+                let last = FILTERED
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|(w, _)| w.upgrade());
+                let shown: Option<std::collections::HashSet<&str>> = last
+                    .as_ref()
+                    .map(|l| (0..l.len() as u32).map(|i| l.path(i)).collect());
+                let all: std::collections::HashSet<String> = (0..v.len() as u32)
+                    .map(|i| v.path(i))
+                    .filter(|p| !shown.as_ref().is_some_and(|s| s.contains(p)))
+                    .map(str::to_string)
+                    .collect();
+                let ver = RETAKE_VERSION_BIT
+                    | REQ_RETAKE_STALE.load(std::sync::atomic::Ordering::Relaxed);
+                hide_diag::mark("wait");
+                return (Arc::new(all), ver);
+            }
+            f = fresh.as_mut().unwrap();
+            for done in got {
+                if done.generation == f.generation {
+                    blinking.remove(&done.i);
+                }
+                apply_relist(f, done);
+            }
+            // Folders not in by the deadline finish in the background.
+            RELISTS.lock().unwrap().push(rx);
+        } else {
+            // Once primed the request does not wait at all (XO 04:08Z): the
+            // per-photo carried show keeps what is on screen, and a coalescing
+            // background applier puts finished folders (and the rebuilt view)
+            // in place. Only the very first answer is done in full.
+            let waits = primed && !blinking.is_empty();
+            let deadline = primed.then(|| {
+                std::time::Instant::now()
+                    + if !blinking.is_empty() {
+                        BLINK_BUDGET
+                    } else {
+                        Default::default()
+                    }
+            });
+            loop {
+                let got = match deadline {
+                    None => rx.recv().ok(),
+                    Some(t) => rx
+                        .recv_timeout(t.saturating_duration_since(std::time::Instant::now()))
+                        .ok(),
+                };
+                match got {
+                    Some(done) => {
+                        // Waiting is only for the folders that would blink:
+                        // once they are in, the rest finish in the background
+                        // (their shown photos stay under `keep`), XO 05:41Z (2).
+                        if done.generation == f.generation {
+                            blinking.remove(&done.i);
+                        }
+                        apply_relist(f, done);
+                        if waits && blinking.is_empty() {
+                            break;
+                        }
+                        // XO 08:36Z (2), D3: the budget bounds the whole wait,
+                        // applying included. Results that arrive inside it were
+                        // applied one after another past the deadline (380k/10k
+                        // first request after a sync: wait 103 ms against the
+                        // 40 ms budget); past it the rest go to the background
+                        // applier (their shown photos stay under `keep`).
+                        if deadline.is_some_and(|t| std::time::Instant::now() >= t) {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            // Whatever is still running reports through the shared queue.
+            RELISTS.lock().unwrap().push(rx);
         }
-        // Whatever is still running reports through the shared queue.
-        RELISTS.lock().unwrap().push(rx);
     }
     hide_diag::mark("wait");
     PENDING_DIRS.store(
@@ -2637,8 +2737,15 @@ fn hidden_for(
     let mut removed: Vec<String> = Vec::new();
     let mut watch_changed = full;
     let mut errors_changed = full;
+    // XO 12:33Z (b): phase times inside the hard-set build, so a recurring
+    // 69 ms outlier (j-40k-ps1, hard_ms 69.0) names its phase.
+    let hard_shared = Arc::strong_count(&hard) > 1;
+    let mut n_dirs = 0usize;
+    let t_cow;
+    let t_dirs;
     {
         let hs = Arc::make_mut(&mut hard);
+        t_cow = built.elapsed();
         let hard_n = &mut f.hard_n;
         let mut swap =
             |old: &[String], new: &[String], added: &mut Vec<String>, removed: &mut Vec<String>| {
@@ -2668,6 +2775,7 @@ fn hidden_for(
                 continue;
             }
             f.cver[i] = ds.ver;
+            n_dirs += 1;
             let mut c = Contrib::default();
             for (rel, t) in &ds.tombs {
                 c.tombs.push(rel.clone());
@@ -2694,6 +2802,7 @@ fn hidden_for(
             swap(&old.hides, &c.hides, &mut added, &mut removed);
             f.contrib[i] = c;
         }
+        t_dirs = built.elapsed();
         if std::mem::take(&mut f.fam_dirty) {
             let new: Vec<String> = f
                 .family
@@ -2705,10 +2814,12 @@ fn hidden_for(
             errors_changed = true;
         }
     }
+    let t_fam = built.elapsed();
     if let Some(old) = &old_full {
         added = hard.iter().filter(|p| !old.contains(*p)).cloned().collect();
         removed = old.iter().filter(|p| !hard.contains(*p)).cloned().collect();
     }
+    let t_diff = built.elapsed();
     if errors_changed {
         let mut errors: Vec<String> = f
             .contrib
@@ -2720,6 +2831,7 @@ fn hidden_for(
         }
         set_hide_note(hide_note(&errors));
     }
+    let t_note = built.elapsed();
     if watch_changed {
         *HIDE_WATCH.lock().unwrap() = Some(std::sync::Arc::new(
             f.contrib
@@ -2844,11 +2956,18 @@ fn hidden_for(
     inline_t::record(inline_t::BUILD, &probe, || {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         format!(
-            "hard_ms={:.2} withheld_ms={:.2} served_ms={:.2} served_cloned={shared} served_n={} full={full}",
+            "hard_ms={:.2} withheld_ms={:.2} served_ms={:.2} served_cloned={shared} served_n={} full={full} \
+             hard_phases=cow:{:.2}(shared={hard_shared}),dirs:{:.2}(n={n_dirs}),fam:{:.2},diff:{:.2},note:{:.2},watch:{:.2}(changed={watch_changed})",
             ms(t_hard),
             ms(t_withheld - t_hard),
             ms(built.elapsed() - t_withheld),
-            f.hidden.len()
+            f.hidden.len(),
+            ms(t_cow),
+            ms(t_dirs - t_cow),
+            ms(t_fam - t_dirs),
+            ms(t_diff - t_fam),
+            ms(t_note - t_diff),
+            ms(t_hard - t_note),
         )
     });
     let out = (Arc::clone(&f.hidden), f.version);
@@ -3006,6 +3125,19 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
         }
     }
     let threads = hide_threads();
+    // XO 11:51Z (2): listings taken outside FRESH (request or applier
+    // prestamp), read here on the caller's thread (PRESTAMP is per thread).
+    let pre: Option<(SystemTime, Arc<std::collections::HashMap<String, PreScan>>)> =
+        PRESTAMP.with(|p| {
+            p.borrow()
+                .as_ref()
+                .filter(|p| p.generation == f.generation)
+                .map(|p| (p.taken_at, Arc::clone(&p.scans)))
+        });
+    enum Ent<'a> {
+        Live(Box<std::fs::DirEntry>),
+        Pre(&'a Option<(SystemTime, u64)>),
+    }
     // One listing of the folder instead of one stat per shown photo (the
     // stats cost up to 150 ms a request on NTFS, Windows CI 0e54af1): a
     // photo whose tombstone is in the listing gets the stat and trusted-read
@@ -3040,35 +3172,65 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
         // metadata taken only for a tombstone that was a trusted show (the
         // only case that can keep a photo; it still gets its own stamp),
         // and the photo stat only until the folder is known to blink.
-        let mut tombs: std::collections::HashMap<String, std::fs::DirEntry> = Default::default();
-        match std::fs::read_dir(lib.join(&j.dir)) {
-            Ok(rd) => {
-                for e in rd {
-                    let Ok(e) = e else { return all };
-                    let n = e.file_name();
-                    // Only a tombstone's name is copied: a folder of
-                    // thousands of photos costs no allocation per photo
-                    // (Windows: the suffix compared case-insensitively).
-                    let b = n.as_encoded_bytes();
-                    let sfx = TOMBSTONE_SUFFIX.as_bytes();
-                    let is_tomb = b.len() >= sfx.len() && {
-                        let tail = &b[b.len() - sfx.len()..];
-                        if cfg!(windows) {
-                            tail.eq_ignore_ascii_case(sfx)
-                        } else {
-                            tail == sfx
-                        }
-                    };
-                    if !is_tomb {
-                        continue;
-                    }
-                    let n = n.to_string_lossy();
-                    let stem = &n[..n.len() - TOMBSTONE_SUFFIX.len()];
-                    let stem = fold(stem);
-                    tombs.insert(stem, e);
-                }
+        let mut tombs: std::collections::HashMap<String, Ent> = Default::default();
+        // Used only for the same folder stamp (trusted as of the listing:
+        // no same-tick change can hide behind it) and the same carried
+        // shows; anything else lists here.
+        let scan = pre.as_ref().and_then(|(at, m)| {
+            let s = m.get(&j.dir)?;
+            let shows_now: std::collections::BTreeMap<&str, &Option<(SystemTime, u64)>> =
+                j.ds.tombs
+                    .iter()
+                    .filter(|(_, t)| t.trusted && t.verdict == Ok(false))
+                    .map(|(r, t)| (r.as_str(), &t.stamp))
+                    .collect();
+            let same = s.st == j.st
+                && (s.job || trusted_at(&s.st, *at))
+                && s.shows.len() == shows_now.len()
+                && s.shows
+                    .iter()
+                    .all(|(r, st)| shows_now.get(r.as_str()) == Some(&&Some(*st)));
+            if !same {
+                PREKEEP_MISSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            Err(_) => return all,
+            same.then_some(s)
+        });
+        if let Some(s) = scan {
+            PREKEEP_USED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Ok(m) = &s.tombs else { return all };
+            for (stem, st) in m {
+                tombs.insert(stem.clone(), Ent::Pre(st));
+            }
+        } else {
+            match std::fs::read_dir(lib.join(&j.dir)) {
+                Ok(rd) => {
+                    for e in rd {
+                        let Ok(e) = e else { return all };
+                        let n = e.file_name();
+                        // Only a tombstone's name is copied: a folder of
+                        // thousands of photos costs no allocation per photo
+                        // (Windows: the suffix compared case-insensitively).
+                        let b = n.as_encoded_bytes();
+                        let sfx = TOMBSTONE_SUFFIX.as_bytes();
+                        let is_tomb = b.len() >= sfx.len() && {
+                            let tail = &b[b.len() - sfx.len()..];
+                            if cfg!(windows) {
+                                tail.eq_ignore_ascii_case(sfx)
+                            } else {
+                                tail == sfx
+                            }
+                        };
+                        if !is_tomb {
+                            continue;
+                        }
+                        let n = n.to_string_lossy();
+                        let stem = &n[..n.len() - TOMBSTONE_SUFFIX.len()];
+                        let stem = fold(stem);
+                        tombs.insert(stem, Ent::Live(Box::new(e)));
+                    }
+                }
+                Err(_) => return all,
+            }
         }
         let mut set = off.clone();
         let mut blink = false;
@@ -3115,12 +3277,16 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
             // Listed, so present: its metadata came with the listing (an
             // entry whose metadata could not be read is not kept).
             let kept = j.ds.tombs.get(&rel).is_some_and(|t| {
-                t.trusted && t.verdict == Ok(false) && t.stamp.is_some() && {
-                    tomb_io();
-                    entry
-                        .metadata()
-                        .is_ok_and(|m| stamp_of(&path, &m) == t.stamp)
-                }
+                t.trusted
+                    && t.verdict == Ok(false)
+                    && t.stamp.is_some()
+                    && match entry {
+                        Ent::Pre(st) => **st == t.stamp,
+                        Ent::Live(e) => {
+                            tomb_io();
+                            e.metadata().is_ok_and(|m| stamp_of(&path, &m) == t.stamp)
+                        }
+                    }
             });
             if !kept {
                 // Only a photo on screen blinks out (Linux: the tombstone's
@@ -3323,7 +3489,72 @@ fn apply_landed() {
 /// belong to and each folder's and tombstone's stamp by relative path.
 struct Prestamp {
     generation: u64,
+    /// Wall time just before the stamps were taken: a pass that uses them
+    /// judges "same tick" against this, not the later lock time.
+    taken_at: SystemTime,
     stamps: std::collections::HashMap<String, Option<(SystemTime, u64)>>,
+    /// XO 11:51Z (2): pending folders whose stamp or carried shows moved,
+    /// listed outside FRESH for keep_shown (keyed by folder).
+    scans: Arc<std::collections::HashMap<String, PreScan>>,
+}
+
+/// One pending folder's tombstones, listed outside FRESH: valid under the
+/// lock only for the same generation, folder stamp and carried shows.
+struct PreScan {
+    st: Option<(SystemTime, u64)>,
+    shows: Vec<(String, (SystemTime, u64))>,
+    /// Folded photo name -> its tombstone's stamp if it was a carried show
+    /// (None: present, not a carried show or unreadable). Err: the folder
+    /// could not be listed (fail closed: all withheld).
+    tombs: Result<std::collections::HashMap<String, Option<(SystemTime, u64)>>, ()>,
+    /// Listed for a folder going pending this request (not yet pending).
+    /// Its listing is taken after its stamp, as the inline one would be,
+    /// so it is used without the trusted-stamp test: a same-tick change is
+    /// caught by the sent stamp's trust test on the next request (moved).
+    job: bool,
+}
+
+/// Request passes whose pre-taken stamps were for another generation and
+/// were dropped (stamped inline under the lock instead).
+static PRESTAMP_REQ_STALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Moved folders whose keep_shown used the pre-taken listing (`hide_prekeep`).
+static PREKEEP_USED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Moved folders whose pre-taken listing did not match under the lock and
+/// were listed inline instead.
+static PREKEEP_MISSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A file or folder stamp (None: unreadable, never trusted).
+type Stamp = Option<(SystemTime, u64)>;
+/// A folder's trusted shows: tombstone and its stamp.
+type Shows = Vec<(String, (SystemTime, u64))>;
+
+/// Requests whose blink wait (FRESH released) found another generation
+/// when the lock was taken again: answered with everything withheld.
+/// Marks a fail-closed retake answer's version (never cached or stored).
+const RETAKE_VERSION_BIT: u64 = 1 << 63;
+static REQ_RETAKE_STALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The blink wait releases FRESH (XO 12:30Z (1)); off with
+/// ALBUMEN_REQ_WAIT_UNLOCKED=0 (for an A/B).
+fn req_wait_unlocked_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ALBUMEN_REQ_WAIT_UNLOCKED").as_deref() != Ok("0"))
+}
+
+/// Requests stamp outside FRESH too (XO 11:51Z (4)); off with
+/// ALBUMEN_REQ_PRESTAMP=0 (for an A/B at 10k).
+fn req_prestamp_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ALBUMEN_REQ_PRESTAMP").as_deref() != Ok("0"))
+}
+
+/// Clears this thread's PRESTAMP when a request that set it returns.
+struct PrestampGuard(bool);
+impl Drop for PrestampGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            PRESTAMP.with(|p| *p.borrow_mut() = None);
+        }
+    }
 }
 
 thread_local! {
@@ -3346,10 +3577,27 @@ static APPLY_GAVE_UP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// with the lock released, on the hide threads. None before the first
 /// request built the state.
 fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
-    let (generation, rels) = {
+    type Pend = (
+        String,
+        Option<(SystemTime, u64)>,
+        Arc<Vec<(String, (SystemTime, u64))>>,
+    );
+    let (generation, rels, pend, cand) = {
         let fresh = FRESH.lock().unwrap();
         let f = fresh.as_ref()?;
         let mut rels: Vec<String> = f.dirs.clone();
+        let mut pend: Vec<Pend> = Vec::new();
+        // XO 12:30Z (1): folders not pending that may go pending in this
+        // request (stamp moved or untrusted): listed outside FRESH too, so
+        // keep_shown for a sync's first request does no I/O under the lock.
+        let mut cand: Vec<(String, Stamp, bool)> = Vec::new();
+        for (d, ds) in f.dirs.iter().zip(&f.state) {
+            if f.primed && ds.pending.is_some() {
+                pend.push((d.clone(), ds.sent_st, Arc::clone(&ds.sent_shows)));
+            } else if f.primed {
+                cand.push((d.clone(), ds.stamp, ds.trusted));
+            }
+        }
         for ds in &f.state {
             rels.extend(ds.sent_shows.iter().map(|(r, _)| r.clone()));
             rels.extend(
@@ -3359,18 +3607,147 @@ fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
                     .map(|(r, _)| r.clone()),
             );
         }
-        (f.generation, rels)
+        (f.generation, rels, pend, cand)
     };
     #[cfg(any(debug_assertions, feature = "test-hooks"))]
     if let Some(ms) = std::env::var_os("ALBUMEN_TEST_PRESTAMP_DELAY_MS") {
         let ms: u64 = ms.to_string_lossy().parse().unwrap_or(0);
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
+    let taken_at = SystemTime::now();
     let stamps = par_map(&rels, |r| mtime(&lib.join(r)), |_| None);
+    let stamps: std::collections::HashMap<String, Option<(SystemTime, u64)>> =
+        rels.into_iter().zip(stamps).collect();
+    // The same "moved" test hidden_for applies under the lock, on these
+    // stamps; each moved folder is listed here (fail closed: a listing
+    // error withholds the folder, a mismatch under the lock lists inline).
+    let moved: Vec<(String, Stamp, Shows)> = pend
+        .into_iter()
+        .filter_map(|(d, sent_st, shows)| {
+            let st = stamps.get(&d).copied().flatten();
+            let still: Vec<_> = shows
+                .iter()
+                .filter(|(rel, s)| stamps.get(rel).copied().flatten() == Some(*s))
+                .cloned()
+                .collect();
+            let moved =
+                still.len() != shows.len() || st != sent_st || !trusted_at(&sent_st, taken_at);
+            moved.then_some((d, st, still))
+        })
+        .collect();
+    let n_moved = moved.len();
+    let mut moved = moved;
+    // Folders whose stamp moved (or is untrusted): they go pending this
+    // request; their trusted shows are read under a short lock (no I/O).
+    let to_job: Vec<(String, Option<(SystemTime, u64)>)> = cand
+        .into_iter()
+        .filter_map(|(d, stamp, trusted)| {
+            let st = stamps.get(&d).copied().flatten();
+            (!(trusted && st.is_some() && st == stamp)).then_some((d, st))
+        })
+        .collect();
+    if !to_job.is_empty() {
+        let fresh = FRESH.lock().unwrap();
+        if let Some(f) = fresh.as_ref().filter(|f| f.generation == generation) {
+            let idx: std::collections::HashMap<&str, usize> = f
+                .dirs
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (d.as_str(), i))
+                .collect();
+            for (d, st) in to_job {
+                let Some(&i) = idx.get(d.as_str()) else {
+                    continue;
+                };
+                let shows: Vec<_> = f.state[i]
+                    .tombs
+                    .iter()
+                    .filter(|(_, t)| t.trusted && t.verdict == Ok(false))
+                    .filter_map(|(r, t)| Some((r.clone(), t.stamp?)))
+                    .collect();
+                moved.push((d, st, shows));
+            }
+        }
+    }
+    let lists = par_map(&moved, |(d, _, still)| pre_list(lib, d, still), |_| Err(()));
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Some(ms) = std::env::var_os("ALBUMEN_TEST_PREKEEP_DELAY_MS") {
+        let ms: u64 = ms.to_string_lossy().parse().unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    let scans = moved
+        .into_iter()
+        .zip(lists)
+        .enumerate()
+        .map(|(k, ((d, st, shows), tombs))| {
+            (
+                d,
+                PreScan {
+                    st,
+                    shows,
+                    tombs,
+                    job: k >= n_moved,
+                },
+            )
+        })
+        .collect();
     Some(Prestamp {
         generation,
-        stamps: rels.into_iter().zip(stamps).collect(),
+        taken_at,
+        stamps,
+        scans: Arc::new(scans),
     })
+}
+
+/// A pending folder's tombstones for keep_shown, listed outside FRESH: the
+/// stamp of each carried show's tombstone from the listing's metadata.
+fn pre_list(
+    lib: &Path,
+    dir: &str,
+    shows: &[(String, (SystemTime, u64))],
+) -> Result<std::collections::HashMap<String, Option<(SystemTime, u64)>>, ()> {
+    use albumen_ingest::hides::TOMBSTONE_SUFFIX;
+    let show: std::collections::HashSet<&str> = shows.iter().map(|(r, _)| r.as_str()).collect();
+    let mut out = std::collections::HashMap::new();
+    for e in std::fs::read_dir(lib.join(dir)).map_err(|_| ())? {
+        let e = e.map_err(|_| ())?;
+        let n = e.file_name();
+        let b = n.as_encoded_bytes();
+        let sfx = TOMBSTONE_SUFFIX.as_bytes();
+        let is_tomb = b.len() >= sfx.len() && {
+            let tail = &b[b.len() - sfx.len()..];
+            if cfg!(windows) {
+                tail.eq_ignore_ascii_case(sfx)
+            } else {
+                tail == sfx
+            }
+        };
+        if !is_tomb {
+            continue;
+        }
+        let n = n.to_string_lossy();
+        let rel = if dir.is_empty() {
+            n.to_string()
+        } else {
+            format!("{dir}/{n}")
+        };
+        let stem = &n[..n.len() - TOMBSTONE_SUFFIX.len()];
+        let stem = if cfg!(windows) {
+            stem.to_lowercase()
+        } else {
+            stem.to_string()
+        };
+        let st = if show.contains(rel.as_str()) {
+            tomb_io();
+            e.metadata()
+                .ok()
+                .and_then(|m| stamp_of(&lib.join(&rel), &m))
+        } else {
+            None
+        };
+        out.insert(stem, st);
+    }
+    Ok(out)
 }
 
 /// Test hook: every applier pass counts as stale (drives the retry cap).
@@ -3398,6 +3775,47 @@ fn stamp_rel(lib: &Path, rel: &str, count: bool) -> Option<(SystemTime, u64)> {
         tomb_io();
     }
     mtime(&lib.join(rel))
+}
+
+/// Every folder's stamp: the prestamp's where it has one, the rest stat'ed
+/// in parallel (scoped threads, in order, a panic fails closed to None).
+fn dir_stamps(lib: &Path, dirs: &[String]) -> Vec<Option<(SystemTime, u64)>> {
+    let pre: Vec<Option<Option<(SystemTime, u64)>>> = PRESTAMP.with(|p| {
+        let p = p.borrow();
+        dirs.iter()
+            .map(|d| p.as_ref().and_then(|p| p.stamps.get(d).copied()))
+            .collect()
+    });
+    let miss: Vec<usize> = (0..dirs.len()).filter(|&i| pre[i].is_none()).collect();
+    let one = |i: &usize| {
+        let t = std::time::Instant::now();
+        let st = std::panic::catch_unwind(|| mtime(&lib.join(&dirs[*i]))).unwrap_or_else(|_| {
+            STAMP_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        });
+        dirst_t::one(t.elapsed(), &dirs[*i]);
+        st
+    };
+    let got: Vec<Option<(SystemTime, u64)>> = if miss.len() < 2 {
+        miss.iter().map(one).collect()
+    } else {
+        let n = hide_threads().min(miss.len()).max(1);
+        let per = miss.len().div_ceil(n);
+        std::thread::scope(|sc| {
+            let hs: Vec<_> = miss
+                .chunks(per)
+                .map(|c| sc.spawn(move || c.iter().map(one).collect::<Vec<_>>()))
+                .collect();
+            hs.into_iter()
+                .zip(miss.chunks(per))
+                .flat_map(|(h, c)| h.join().unwrap_or_else(|_| vec![None; c.len()]))
+                .collect()
+        })
+    };
+    let mut got = got.into_iter();
+    pre.into_iter()
+        .map(|p| p.unwrap_or_else(|| got.next().flatten()))
+        .collect()
 }
 
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3829,11 +4247,16 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
         });
     }
     let out = Arc::new(out);
-    let mut lv = server.library.lock().unwrap();
-    if lv.as_ref().is_some_and(|c| Arc::ptr_eq(c, &v)) {
-        *lv = Some(Arc::clone(&out));
+    // A fail-closed answer (generation changed during the unlocked blink
+    // wait: everything withheld) is served once, never kept as the base
+    // view: withheld photos come back without a re-walk.
+    if version & RETAKE_VERSION_BIT == 0 {
+        let mut lv = server.library.lock().unwrap();
+        if lv.as_ref().is_some_and(|c| Arc::ptr_eq(c, &v)) {
+            *lv = Some(Arc::clone(&out));
+        }
+        *FILTERED.lock().unwrap() = Some((Arc::downgrade(&out), version));
     }
-    *FILTERED.lock().unwrap() = Some((Arc::downgrade(&out), version));
     hide_diag::finish("copy");
     out
 }
@@ -4287,6 +4710,18 @@ fn found_json(server: &Server) -> serde_json::Value {
     out["hide_found_note"] = found_note_t::json();
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
+    out["hide_req_retake_stale"] = REQ_RETAKE_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_prestamp_req_stale"] = PRESTAMP_REQ_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_prekeep_used"] = PREKEEP_USED
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_prekeep_missed"] = PREKEEP_MISSED
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
     out["hide_apply_stale"] = APPLY_STALE
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
