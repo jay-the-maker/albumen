@@ -2387,8 +2387,11 @@ fn m7_recheck_and_img_diagnostics() {
         );
         // XO 14:00Z: show whether the request prestamp reused cached stamps.
         println!(
-            "M7 RECHECK_PRESTAMP files={files} tombstones={written} stats={} reused={} req_incr={} req_full={}",
-            f["hide_prestamp_stats"], f["hide_prestamp_reused"], f["hide_found_notify"]["req_incr"], f["hide_found_notify"]["req_full"]
+            "M7 RECHECK_PRESTAMP files={files} tombstones={written} stats={} reused={} folder_stats={} \
+             calls={} prestamp_us_per_call={:.1} req_incr={} req_full={}",
+            f["hide_prestamp_stats"], f["hide_prestamp_reused"], f["hide_prestamp_folder_stats"],
+            f["hide_prestamp_calls"],
+            f["hide_prestamp_us"].as_f64().unwrap_or(0.0) / f["hide_prestamp_calls"].as_f64().unwrap_or(1.0).max(1.0), f["hide_found_notify"]["req_incr"], f["hide_found_notify"]["req_full"]
         );
         println!(
             "M7 RECHECK_SYNC_REQ files={files} tombstones={written} samples={} lock_wait_max_ms={:.2} \
@@ -2940,4 +2943,139 @@ fn dropped_notifications_still_put_a_corrupted_tombstone_in_the_note_within_one_
             "a full stamp ran: {polled}"
         );
     }
+}
+/// PL 14:31Z NO-GO (2) / 14:36Z (3): the watcher is blinded (every event
+/// discarded silently: no drop hook, no loss reported, as a NAS/SMB or
+/// synced folder that never sends it), then a hide lands. It must still
+/// hide the photo within 1 s and the photo must never show again
+/// (h_shown=0): every request stats the followed folders and files live
+/// whatever the watcher said; the cache is an accelerator only. Each case
+/// has the CI mutant `gui-trust-cache` (no live stats, no bounded-age
+/// re-verify), which must fail it.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn silent_miss(case: &str) {
+    const HIDE: &[u8] = br#"{"hidden":true,"reason":"hide"}"#;
+    const SHOW: &[u8] = br#"{"hidden":false,"reason":"unhide"}"#;
+    let target = "d01/IMG_0003.JPG";
+    let tomb = format!("{target}.albumen-tombstone");
+    let pre_hidden: &[&str] = if case == "remote_unhide" {
+        &[target]
+    } else {
+        &[]
+    };
+    let env: &[(&str, &str)] = if case == "coarse_same_tick" {
+        &[
+            ("ALBUMEN_TEST_FS_MAGIC", "0xef53"),
+            ("ALBUMEN_TEST_COARSE_CTIME", "1"),
+        ]
+    } else {
+        &[]
+    };
+    let (l, all) = open_small(4, pre_hidden, env);
+    let _ = &l.gui;
+    if case == "show_rewritten_to_hide" {
+        fs::write(l.path().join(&tomb), SHOW).unwrap();
+    }
+    // Past the trust window, so every stamp is cached and trusted.
+    std::thread::sleep(Duration::from_millis(2100));
+    for _ in 0..3 {
+        listed(&l.addr);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let want_before = !pre_hidden.contains(&target);
+    assert_eq!(l.set().contains(target), want_before, "{case}: before");
+    let w0 = found_page(&l.addr)["hide_found_notify"].clone();
+    fs::write(l.path().join(".albumen-test-notify-blind"), b"").unwrap();
+    // Let the flag's own event be drained (and discarded) first.
+    listed(&l.addr);
+    match case {
+        "new_tombstone" => fs::write(l.path().join(&tomb), HIDE).unwrap(),
+        // In place: the same file truncated and written (no rename), so
+        // the folder's stamp need not move.
+        "show_rewritten_to_hide" => {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(l.path().join(&tomb))
+                .unwrap();
+            std::io::Write::write_all(&mut f, HIDE).unwrap();
+        }
+        // In the folder's own (2 s) tick: listed just now, written now.
+        "coarse_same_tick" => {
+            listed(&l.addr);
+            fs::write(l.path().join(&tomb), HIDE).unwrap();
+        }
+        "remote_unhide" => {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(l.path().join(&tomb))
+                .unwrap();
+            std::io::Write::write_all(&mut f, SHOW).unwrap();
+        }
+        _ => unreachable!(),
+    }
+    let shown_after = case == "remote_unhide";
+    let ms = l.until(
+        5,
+        &format!("{case}: never changed after the silent miss"),
+        |s| s.contains(target) == shown_after,
+    );
+    let mut h_shown = 0;
+    for _ in 0..20 {
+        if l.set().contains(target) != shown_after {
+            h_shown += 1;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let f = found_page(&l.addr);
+    let w1 = f["hide_found_notify"].clone();
+    let g = |w: &serde_json::Value, k: &str| w[k].as_u64().unwrap_or(0);
+    println!(
+        "M7 SILENT_MISS case={case} ms={ms:.1} h_shown={h_shown} blinded={} lost={}->{} reverified={} \
+         prestamp_stats={} folder_stats={}",
+        g(&w1, "blinded"),
+        g(&w0, "lost"),
+        g(&w1, "lost"),
+        f["hide_reverified"],
+        f["hide_prestamp_stats"],
+        f["hide_prestamp_folder_stats"]
+    );
+    assert!(ms <= 1000.0, "{case}: took {ms:.1} ms (bar 1 s)");
+    assert_eq!(h_shown, 0, "{case}: the photo flipped back");
+    if cfg!(any(target_os = "linux", windows)) {
+        assert!(
+            g(&w1, "blinded") > g(&w0, "blinded"),
+            "nothing was blinded: {w1}"
+        );
+        assert_eq!(g(&w1, "lost"), g(&w0, "lost"), "a loss was reported: {w1}");
+    }
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    if !shown_after {
+        want.remove(target);
+    }
+    assert_eq!(l.set(), want, "{case}: final set");
+}
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_silent_miss_new_tombstone() {
+    silent_miss("new_tombstone");
+}
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_silent_miss_show_rewritten_in_place_to_hide() {
+    silent_miss("show_rewritten_to_hide");
+}
+#[cfg(all(unix, any(debug_assertions, feature = "test-hooks")))]
+#[test]
+fn m7_silent_miss_same_tick_on_a_coarse_stamp() {
+    silent_miss("coarse_same_tick");
+}
+/// PL 14:36Z (1) (A3): a remote unhide (rewritten in place, watcher
+/// blinded) shows within 1 s: confirmed-hidden tombstones are re-verified
+/// at a bounded age.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_silent_miss_remote_unhide_shows_within_1s() {
+    silent_miss("remote_unhide");
 }

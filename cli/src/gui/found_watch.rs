@@ -17,6 +17,8 @@ pub static FULL: AtomicU64 = AtomicU64::new(0);
 pub static LOST: AtomicU64 = AtomicU64::new(0);
 pub static UNAVAILABLE: AtomicU64 = AtomicU64::new(0);
 pub static NEW_DIRS: AtomicU64 = AtomicU64::new(0);
+/// Events discarded silently by the blind test hook.
+pub static BLINDED: AtomicU64 = AtomicU64::new(0);
 pub static EVENTS: AtomicU64 = AtomicU64::new(0);
 
 /// Why each loss was reported (XO 14:14Z: show whether a full stamp
@@ -75,6 +77,7 @@ pub fn json() -> serde_json::Value {
         "take_us": TAKE_NS.load(Relaxed) / 1000,
         "watches": WATCHES.load(Relaxed),
         "stops": STOPS.load(Relaxed),
+        "blinded": BLINDED.load(Relaxed),
     })
 }
 
@@ -92,6 +95,19 @@ fn drop_hook(lib: &Path) -> bool {
 }
 #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
 fn drop_hook(_: &Path) -> bool {
+    false
+}
+
+/// Test hook (PL 14:31Z): while `<library>/.albumen-test-notify-blind`
+/// exists, every event drained is discarded silently: no loss is reported,
+/// as a network or synced folder that never sends the event. Hiding must
+/// not depend on the event.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn blind_hook(lib: &Path) -> bool {
+    lib.join(".albumen-test-notify-blind").exists()
+}
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+fn blind_hook(_: &Path) -> bool {
     false
 }
 
@@ -185,6 +201,11 @@ fn take_inner(lib: &Path, dirs: &HashSet<&str>, who: usize) -> Option<HashSet<St
     }
     let mut g = W.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|s| s.lib != lib) {
+        // PL 14:31Z (3): another library: the old library's watcher (handle,
+        // buffer, watches) is stopped before the new one starts.
+        if g.take().is_some() {
+            STOPS.fetch_add(1, Relaxed);
+        }
         // Nothing before the watch was seen: both consumers stamp all.
         let mut st = State {
             lib: lib.to_path_buf(),
@@ -208,7 +229,13 @@ fn take_inner(lib: &Path, dirs: &HashSet<&str>, who: usize) -> Option<HashSet<St
     // A folder watched only from now: its earlier changes were never seen.
     let new = w.ensure(lib, dirs);
     WATCHES.store(w.count(), Relaxed);
-    let got = w.drain();
+    let mut got = w.drain();
+    if blind_hook(lib) {
+        if let Some(p) = got.as_mut() {
+            BLINDED.fetch_add(p.len() as u64, Relaxed);
+            p.clear();
+        }
+    }
     let dropped = drop_hook(lib);
     if dropped {
         why(W_DROP);

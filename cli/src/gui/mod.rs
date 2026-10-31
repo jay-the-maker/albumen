@@ -1390,7 +1390,16 @@ struct TombState {
     stamp: Option<(SystemTime, u64)>,
     trusted: bool,
     verdict: Result<bool, String>,
+    /// When the stamp was last stat'ed and found unchanged (or read). A
+    /// confirmed-hidden tombstone is stat'ed again once this is older than
+    /// HID_REVERIFY (PL 14:36Z (1): a remote unhide shows within 1 s).
+    seen: std::time::Instant,
 }
+
+/// PL 14:36Z (1): the age past which a confirmed-hidden tombstone is
+/// stat'ed again even in an unchanged folder (with the page's 200 ms poll
+/// an in-place unhide is seen within about 1 s).
+const HID_REVERIFY: std::time::Duration = std::time::Duration::from_millis(500);
 
 struct FamilyState {
     stamp: Vec<Option<(SystemTime, u64)>>,
@@ -1513,6 +1522,7 @@ fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
             trusted: trusted_at(&stamp, checked_at),
             stamp,
             verdict: Err(format!("{rel}: {err}; hiding it")),
+            seen: std::time::Instant::now(),
         };
     }
     #[cfg(windows)]
@@ -1523,6 +1533,7 @@ fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
                 trusted: trusted_at(&stamp, checked_at),
                 stamp,
                 verdict: verdict.map_err(|err| format!("{rel}: {err}; hiding it")),
+                seen: std::time::Instant::now(),
             };
         }
     }
@@ -1532,6 +1543,7 @@ fn read_tomb_quiet(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
     TombState {
         trusted: trusted_at(&stamp, checked_at),
         stamp,
+        seen: std::time::Instant::now(),
         verdict,
     }
 }
@@ -2427,6 +2439,21 @@ fn hidden_for(
                 // folder (even in its first tick): only an unhide or a note
                 // change could follow, and those wait for a folder change.
                 if t.verdict == Ok(true) {
+                    // PL 14:36Z (1): bounded age. Past HID_REVERIFY it is
+                    // stat'ed again (from the prestamp, off the lock) and
+                    // read again if its stamp moved or is not trusted.
+                    if t.seen.elapsed() < HID_REVERIFY || trust_cache_mutant() {
+                        continue;
+                    }
+                    let st = stamp_rel(lib, rel, true);
+                    if st.is_some() && st == t.stamp && trusted_at(&st, checked_at) {
+                        t.seen = std::time::Instant::now();
+                        HID_REVERIFIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    let new = read_tomb(lib, rel, checked_at);
+                    changed |= new.verdict != t.verdict;
+                    *t = new;
                     continue;
                 }
                 if t.trusted && t.stamp.is_some() && stamp_rel(lib, rel, true) == t.stamp {
@@ -2506,6 +2533,7 @@ fn hidden_for(
                             stamp: Some(*stamp),
                             trusted: true,
                             verdict: Ok(false),
+                            seen: std::time::Instant::now(),
                         },
                     );
                 }
@@ -3655,6 +3683,7 @@ fn prestamp_stamps(
     n_dirs: usize,
     taken_at: SystemTime,
 ) -> std::collections::HashMap<String, Option<(SystemTime, u64)>> {
+    let t0 = std::time::Instant::now();
     type Cache = std::collections::HashMap<String, Option<(SystemTime, u64)>>;
     static RUN: Mutex<Option<(std::path::PathBuf, Cache)>> = Mutex::new(None);
     let mut run = RUN.lock().unwrap_or_else(|e| e.into_inner());
@@ -3713,6 +3742,17 @@ fn prestamp_stamps(
             false
         })
         .collect();
+    // PL 14:31Z / XO 14:35Z: the cache is an accelerator only. Every
+    // followed folder and every followed file (a shown photo, a sent show
+    // or a tombstone not confirmed hiding; confirmed-hidden tombstones are
+    // not followed here) is stat'ed on every request whatever the watcher
+    // said, so a silently missed event (NAS/SMB/synced folders) cannot keep
+    // a new hide, or a show rewritten in place to a hide, unseen. A folder
+    // whose stamp moved has its entries stat'ed again below (a no-op while
+    // everything is live; what remains if the live stats are cut).
+    let mutant = trust_cache_mutant();
+    let n_live = if mutant { 0 } else { n_dirs.min(rels.len()) };
+    let todo: Vec<bool> = todo.into_iter().map(|t| t || !mutant).collect();
     let todo: Vec<bool> = match &dirty {
         // A folder's stamp moves when an entry in it changes.
         Some(d) if !d.is_empty() => {
@@ -3739,9 +3779,35 @@ fn prestamp_stamps(
     if dirty.is_none() {
         cache.clear();
     }
+    // Folders (live-stat'ed above) whose stamp differs from the cached one.
+    let mut moved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let live: std::collections::HashSet<&str> = rels[..n_live].iter().map(String::as_str).collect();
     for (r, st) in picked.iter().zip(got) {
+        if dirty.is_some() && live.contains(r.as_str()) && cache.get(*r) != Some(&st) {
+            moved.insert((*r).clone());
+        }
         cache.insert((*r).clone(), st);
     }
+    let again: Vec<&String> = rels[n_dirs.min(rels.len())..]
+        .iter()
+        .zip(&todo[n_dirs.min(rels.len())..])
+        .filter(|(r, t)| !**t && moved.contains(&parent(r)))
+        .map(|(r, _)| r)
+        .collect();
+    if !again.is_empty() {
+        PRESTAMP_STATS.fetch_add(again.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        PRESTAMP_REUSED.fetch_sub(again.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        let got = par_map(&again, |r| mtime(&lib.join(r)), |_| None);
+        for (r, st) in again.iter().zip(got) {
+            cache.insert((*r).clone(), st);
+        }
+    }
+    PRESTAMP_FOLDER_STATS.fetch_add(n_live as u64, std::sync::atomic::Ordering::Relaxed);
+    PRESTAMP_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PRESTAMP_NS.fetch_add(
+        t0.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     rels.into_iter()
         .map(|r| {
             let st = cache.get(&r).copied().flatten();
@@ -3749,6 +3815,29 @@ fn prestamp_stamps(
         })
         .collect()
 }
+
+/// CI mutant `gui-trust-cache`: skip the live folder stats and trust the
+/// notification-driven cache alone (must make the silent-miss test fail).
+fn trust_cache_mutant() -> bool {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    {
+        std::env::var("ALBUMEN_TEST_MUTATE").is_ok_and(|v| v == "gui-trust-cache")
+    }
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+    {
+        false
+    }
+}
+
+/// Confirmed-hidden tombstones re-verified unchanged (bounded age).
+static HID_REVERIFIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Request prestamps run and their total time.
+static PRESTAMP_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRESTAMP_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Followed folders stat'ed live by the request prestamp.
+static PRESTAMP_FOLDER_STATS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Paths the request prestamp stat'ed / reused from its cache.
 static PRESTAMP_STATS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3784,6 +3873,20 @@ fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
                     .filter(|(_, t)| t.verdict != Ok(true) && t.trusted && t.stamp.is_some())
                     .map(|(r, _)| r.clone()),
             );
+            // PL 14:36Z (1): confirmed-hidden tombstones due a re-verify
+            // are stat'ed here too, off the lock, in parallel.
+            if !trust_cache_mutant() {
+                rels.extend(
+                    ds.tombs
+                        .iter()
+                        .filter(|(_, t)| {
+                            t.verdict == Ok(true)
+                                && t.stamp.is_some()
+                                && t.seen.elapsed() >= HID_REVERIFY
+                        })
+                        .map(|(r, _)| r.clone()),
+                );
+            }
         }
         (f.generation, rels, pend, cand, f.dirs.len())
     };
@@ -4888,6 +4991,17 @@ fn found_json(server: &Server) -> serde_json::Value {
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
     out["hide_req_retake_stale"] = REQ_RETAKE_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_reverified"] = HID_REVERIFIED
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_prestamp_calls"] = PRESTAMP_CALLS
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_prestamp_us"] =
+        (PRESTAMP_NS.load(std::sync::atomic::Ordering::Relaxed) / 1000).into();
+    out["hide_prestamp_folder_stats"] = PRESTAMP_FOLDER_STATS
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["hide_prestamp_stats"] = PRESTAMP_STATS
