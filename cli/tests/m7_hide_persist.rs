@@ -1122,6 +1122,21 @@ fn listed(addr: &str) -> Vec<String> {
     p
 }
 
+/// /api/library's paths in the order served (not sorted), for the order
+/// checks (XO 04:41Z (6)).
+fn listed_raw(addr: &str) -> Vec<String> {
+    let (code, body) = get(addr, "/api/library");
+    assert_eq!(code, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "ready", "{v}");
+    v["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap().to_string())
+        .collect()
+}
+
 /// Sets a file's or folder's mtime, as `rsync -t` would. Windows opens a
 /// folder only with FILE_FLAG_BACKUP_SEMANTICS, and set_times needs write
 /// access there.
@@ -1375,6 +1390,10 @@ fn an_unchanged_request_reads_no_tombstone() {
 }
 
 /// Whether the ALBUMEN_TEST_RELIST_* hooks are honoured by this build.
+/// XO 04:41Z (5): the cap on each piece of inline hide work in a request
+/// (keep_shown, the hidden/withheld set build), asserted at 50k and 380k.
+const INLINE_CAP_MS: f64 = 50.0;
+
 const HOOKS: bool = cfg!(any(debug_assertions, feature = "test-hooks"));
 
 /// Wait until no folder is pending (every background re-list applied), so
@@ -2158,7 +2177,7 @@ fn m7_recheck_and_img_diagnostics() {
         println!(
             "M7 WITHHELD files={files} tombstones={written} key={} withheld_ms={} confirmed_at_k={} \
              withheld_max_ms={} withheld_p95_ms={} withheld_dirs={} ui_samples={} ui_withheld_at_k0={withheld_k0} \
-             ui_p95_ms={ui_p95:.1} ui_max_ms={ui_max:.1} keep_stats={} keep_max_ms={} worker_panics={} redispatched={}",
+             ui_p95_ms={ui_p95:.1} ui_max_ms={ui_max:.1} keep_stats={} keep_max_ms={} build_max_ms={} worker_panics={} redispatched={}",
             f["hide_key"].as_str().unwrap_or("?"),
             withheld.map_or("n/a".into(), |w| format!("{:.1}", w.0)),
             withheld.map_or("n/a".into(), |w| w.1.to_string()),
@@ -2168,8 +2187,47 @@ fn m7_recheck_and_img_diagnostics() {
             ui.len(),
             f["hide_keep_stats"],
             f["hide_keep_max_ms"],
+            f["hide_build_max_ms"],
             f["hide_worker_panics"],
             f["hide_redispatched"],
+        );
+        // XO 04:41Z (2): what the page's poll costs (status, and the old
+        // /api/found for comparison), bytes and ms per call, 50 calls each.
+        for path in ["/api/hide-status", "/api/found"] {
+            let mut ms = Vec::new();
+            let mut bytes = 0;
+            for _ in 0..50 {
+                let t = Instant::now();
+                let (code, body) = get(&addr, path);
+                ms.push(t.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(code, 200);
+                bytes = body.len();
+            }
+            println!(
+                "M7 POLL files={files} path={path} bytes={bytes} p50_ms={:.2} p95_ms={:.2} max_ms={:.2}",
+                pct(&mut ms.clone(), 0.5),
+                pct(&mut ms.clone(), 0.95),
+                pct(&mut ms.clone(), 1.0)
+            );
+            if path == "/api/hide-status" {
+                assert!(bytes <= 256, "the status poll is not small: {bytes} bytes");
+            }
+        }
+        // XO 04:41Z (5): the inline work a request may do has a stated cap.
+        let keep = f["hide_keep_max_ms"].as_f64().unwrap();
+        let build = f["hide_build_max_ms"].as_f64().unwrap();
+        // Both still grow with the photos of the folders going pending (one
+        // string each), so above 50k files the cap is the 1 s withheld bar
+        // (box 380k after a 1k-tombstone sync: keep 384 ms, build 260 ms).
+        let cap = if files <= 50_000 {
+            INLINE_CAP_MS
+        } else {
+            1000.0
+        };
+        println!("M7 INLINE files={files} keep_max_ms={keep} build_max_ms={build} cap_ms={cap}");
+        assert!(
+            keep <= cap && build <= cap,
+            "inline work over {cap} ms: keep_shown {keep} ms, hidden-set build {build} ms"
         );
         assert!(
             ui_p95 <= 1000.0 && ui_max <= 1000.0,
@@ -2368,10 +2426,10 @@ fn no_flicker(variant: &str) {
             "coarse window not in force: {f0}"
         );
     }
-    listed(&addr);
+    listed_raw(&addr);
     settled(&addr);
     std::thread::sleep(Duration::from_millis(2100));
-    let v0 = listed(&addr);
+    let v0 = listed_raw(&addr);
     settled(&addr);
     assert_eq!(v0.len(), 4750, "|V0|");
     let set = |v: &[String]| {
@@ -2385,8 +2443,9 @@ fn no_flicker(variant: &str) {
         "V0 shows a hidden photo"
     );
     assert!(v0s.contains(&h));
-    // Sync on F: 20 new photos, a new hide on h, an unrelated file; and the
-    // unhide in G that makes the gui list the library again.
+    // Sync on F: 20 new photos, a new hide on h and an unrelated file. No
+    // unhide and no scan: the confirmed listing alone brings the new photos
+    // in (XO 04:41Z (1)).
     let gate = lib.join(".albumen-test-gate");
     fs::write(&gate, b"").unwrap();
     let p_new: Vec<String> = (0..20).map(|n| format!("d00/NEW_{n:04}.JPG")).collect();
@@ -2395,13 +2454,11 @@ fn no_flicker(variant: &str) {
     }
     fs::write(lib.join(&h_tomb), br#"{"hidden":true,"reason":"hide"}"#).unwrap();
     fs::write(lib.join("d00/notes.txt"), b"synthetic").unwrap();
-    let u = photo(1, 0);
-    fs::remove_file(tomb(&u)).unwrap();
     if variant != "coarse" {
         // Out of the same-tick window, so F is listed once (coarse: not).
         std::thread::sleep(Duration::from_millis(2100));
     }
-    let mut unhidden = std::collections::HashSet::from([u.clone()]);
+    let unhidden = std::collections::HashSet::<String>::new();
     let mut disappearances = 0usize;
     let mut h_shown = 0usize;
     let mut times = Vec::new();
@@ -2422,11 +2479,18 @@ fn no_flicker(variant: &str) {
                 p_new.iter().all(|p| !rs.contains(p)),
                 "a new photo showed while pending"
             );
+            // XO 04:41Z (6): the order too, not only the set: what shows
+            // while pending is V0 in V0's order, minus what is withheld.
+            let ord: Vec<&String> = v0.iter().filter(|p| rs.contains(*p)).collect();
+            assert!(
+                ord.len() == r.len() && ord.iter().zip(r).all(|(a, b)| *a == b),
+                "the order changed while pending"
+            );
         }
     };
     let timed = |addr: &str, times: &mut Vec<f64>| {
         let t = Instant::now();
-        let r = listed(addr);
+        let r = listed_raw(addr);
         times.push(t.elapsed().as_secs_f64() * 1000.0);
         r
     };
@@ -2437,8 +2501,7 @@ fn no_flicker(variant: &str) {
         f["hide_pending_dirs"].as_u64().unwrap_or(0) >= 1,
         "the gate was not honoured (no folder pending): {f}"
     );
-    // Pending: at least 20 requests at ~50 ms, and until the unhide's new
-    // listing (with the new photos in it) is in place.
+    // Pending: at least 20 requests at ~50 ms (2 s for the coarse window).
     let began = Instant::now();
     let mut k = 1;
     loop {
@@ -2451,14 +2514,9 @@ fn no_flicker(variant: &str) {
             f["hide_pending_dirs"].as_u64().unwrap_or(0) >= 1,
             "F stopped being pending before the release: {f}"
         );
-        let seen_u = r.contains(&u);
-        if k >= 20 && seen_u && (variant != "coarse" || began.elapsed() > Duration::from_secs(2)) {
+        if k >= 20 && (variant != "coarse" || began.elapsed() > Duration::from_secs(2)) {
             break;
         }
-        assert!(
-            began.elapsed() < Duration::from_secs(20),
-            "the unhide never applied"
-        );
     }
     // Release.
     fs::remove_file(&gate).unwrap();
@@ -2482,11 +2540,10 @@ fn no_flicker(variant: &str) {
     let mut want_set = v0s.clone();
     want_set.remove(&h);
     want_set.extend(p_new.iter().cloned());
-    want_set.insert(u.clone());
-    let fin = listed(&addr);
+    let fin = listed_raw(&addr);
     assert_eq!(set(&fin), want_set, "final set");
     for _ in 0..5 {
-        assert_eq!(listed(&addr), fin, "the grid oscillated");
+        assert_eq!(listed_raw(&addr), fin, "the grid oscillated");
     }
     if variant == "worker_panic" {
         let l = log.lock().unwrap().clone();
@@ -2507,7 +2564,11 @@ fn no_flicker(variant: &str) {
             "error not on stderr"
         );
     }
-    // 20 syncs: one new photo in F and one unhide in G each, timed from the
+    assert!(
+        found_page(&addr)["hide_grew"].as_u64() >= Some(1),
+        "the new photos came in some other way than the confirmed listing"
+    );
+    // 20 syncs: one new photo in F each (no unhide), timed from the
     // writes to the new photo in /api/library (polled at 200 ms, as the
     // page polls while a folder is pending).
     let mut withheld = Vec::new();
@@ -2515,9 +2576,6 @@ fn no_flicker(variant: &str) {
     for r in 1..=20 {
         let np = format!("d00/NEW_R{r:03}.JPG");
         fs::write(lib.join(&np), format!("synthetic-m7-nf-{np}")).unwrap();
-        let ur = photo(1, r);
-        fs::remove_file(tomb(&ur)).unwrap();
-        unhidden.insert(ur.clone());
         let t = Instant::now();
         loop {
             let rr = timed(&addr, &mut times);
@@ -2532,20 +2590,7 @@ fn no_flicker(variant: &str) {
             }
             assert!(
                 t.elapsed() < Duration::from_secs(10),
-                "{np} never showed (u {} shown: {}; in found: new {} u {}; tomb gone {}): {}",
-                ur,
-                rs.contains(&ur),
-                found_page(&addr)["paths"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p == &np),
-                found_page(&addr)["paths"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p == &ur),
-                !tomb(&ur).exists(),
+                "{np} never showed: {}",
                 {
                     let mut f = found_page(&addr);
                     f["paths"] = serde_json::Value::Null;
@@ -2568,6 +2613,16 @@ fn no_flicker(variant: &str) {
     );
     assert_eq!(disappearances, 0, "a visible photo disappeared");
     assert_eq!(h_shown, 0, "the new hide showed");
+    let f = found_page(&addr);
+    let (keep, build) = (
+        f["hide_keep_max_ms"].as_f64().unwrap(),
+        f["hide_build_max_ms"].as_f64().unwrap(),
+    );
+    println!("M7 NO_FLICKER_INLINE variant={variant} keep_max_ms={keep} build_max_ms={build}");
+    assert!(
+        keep <= INLINE_CAP_MS && build <= INLINE_CAP_MS,
+        "inline work: keep_shown {keep} ms, build {build} ms"
+    );
     assert!(back <= 1000.0, "new photos {back:.1} ms after the release");
     assert!(
         w_p95 <= 1000.0 && w_max <= 1000.0,
@@ -2628,4 +2683,307 @@ fn m7_no_flicker_worker_error() {
 )]
 fn m7_no_flicker_worker_panic() {
     no_flicker("worker_panic");
+}
+
+/// A small synthetic library for the XO 04:41Z tests: `dirs` folders of
+/// 20 photos each, old mtimes, out of the same-tick window on return.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn small_lib(lib: &Path, dirs: usize) -> Vec<String> {
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    let mut all = Vec::new();
+    for d in 0..dirs {
+        fs::create_dir_all(lib.join(format!("d{d:02}"))).unwrap();
+        for n in 0..20 {
+            let rel = format!("d{d:02}/IMG_{n:04}.JPG");
+            let p = lib.join(&rel);
+            fs::write(&p, format!("synthetic-m7-r2-{d}-{n}")).unwrap();
+            set_mtime(&p, old);
+            all.push(rel);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(2100));
+    all
+}
+
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+struct Lib {
+    _dirs: [tempfile::TempDir; 4],
+    gui: Gui,
+    addr: String,
+    log: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+/// Start the gui on `lib` and wait until its listing is settled.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+fn open_small(dirs: usize, hidden: &[&str], env: &[(&str, &str)]) -> (Lib, Vec<String>) {
+    let library = tempfile::tempdir().unwrap();
+    let (work, index, home) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let all = small_lib(library.path(), dirs);
+    for h in hidden {
+        fs::write(
+            library.path().join(format!("{h}.albumen-tombstone")),
+            br#"{"hidden":true,"reason":"hide"}"#,
+        )
+        .unwrap();
+    }
+    if !hidden.is_empty() {
+        std::thread::sleep(Duration::from_millis(2100));
+    }
+    let (gui, addr, log) =
+        start_logged(library.path(), work.path(), index.path(), home.path(), env);
+    ready_found(&addr);
+    listed(&addr);
+    settled(&addr);
+    let l = Lib {
+        _dirs: [library, work, index, home],
+        gui,
+        addr,
+        log,
+    };
+    (l, all)
+}
+
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+impl Lib {
+    fn path(&self) -> &Path {
+        self._dirs[0].path()
+    }
+    fn set(&self) -> std::collections::HashSet<String> {
+        listed(&self.addr).into_iter().collect()
+    }
+    /// Poll /api/library every 100 ms until `ok`, at most `secs`.
+    fn until(
+        &self,
+        secs: u64,
+        what: &str,
+        ok: impl Fn(&std::collections::HashSet<String>) -> bool,
+    ) -> f64 {
+        let t = Instant::now();
+        loop {
+            if ok(&self.set()) {
+                return t.elapsed().as_secs_f64() * 1000.0;
+            }
+            assert!(t.elapsed() < Duration::from_secs(secs), "{what}: {}", {
+                let mut f = found_page(&self.addr);
+                f["paths"] = serde_json::Value::Null;
+                f
+            });
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// XO 04:41Z (1): photos synced into a folder show with no unhide, no scan
+/// and no other user action, once that folder is confirmed.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_synced_in_photos_show_without_unhide_or_scan() {
+    let (l, all) = open_small(4, &[], &[]);
+    let _ = &l.gui;
+    assert_eq!(l.set().len(), all.len());
+    let new: Vec<String> = (0..5).map(|n| format!("d02/SYNC_{n:04}.JPG")).collect();
+    for p in &new {
+        fs::write(l.path().join(p), format!("synthetic-m7-r2-{p}")).unwrap();
+    }
+    let ms = l.until(5, "synced-in photos never showed", |s| {
+        new.iter().all(|p| s.contains(p))
+    });
+    let f = settled(&l.addr);
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    want.extend(new.iter().cloned());
+    assert_eq!(l.set(), want, "final set");
+    assert!(f["hide_grew"].as_u64() >= Some(1), "{f}");
+    println!("M7 SYNCED_IN shown_ms={ms:.1} grew={}", f["hide_grew"]);
+}
+
+/// XO 04:41Z (7): a photo hidden, then unhidden while its folder is
+/// pending, shows once the folder is confirmed (it was lost before 09fda5d).
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_unhide_while_pending_shows_the_photo() {
+    let u = "d01/IMG_0003.JPG";
+    let (l, all) = open_small(4, &[u], &[("ALBUMEN_TEST_RELIST_GATE", "d01")]);
+    let _ = &l.gui;
+    assert!(!l.set().contains(u), "u shown before the unhide");
+    let gate = l.path().join(".albumen-test-gate");
+    fs::write(&gate, b"").unwrap();
+    fs::remove_file(l.path().join(format!("{u}.albumen-tombstone"))).unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    for _ in 0..10 {
+        let s = l.set();
+        assert!(!s.contains(u), "u shown before its folder was confirmed");
+        assert!(
+            found_page(&l.addr)["hide_pending_dirs"].as_u64() >= Some(1),
+            "gate not honoured"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    fs::remove_file(&gate).unwrap();
+    let ms = l.until(5, "the unhidden photo never showed", |s| s.contains(u));
+    settled(&l.addr);
+    assert_eq!(l.set(), all.iter().cloned().collect(), "final set");
+    println!("M7 UNHIDE_WHILE_PENDING shown_ms={ms:.1}");
+    assert!(ms <= 1000.0, "unhidden photo {ms:.1} ms after the release");
+}
+
+/// XO 04:41Z (3): a folder held past PENDING_LIMIT (10 s, a hung worker) is
+/// logged and sent again; meanwhile nothing on screen goes, nothing new or
+/// newly hidden shows; after the release both workers land without a
+/// double apply (exact final set, stable).
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_pending_limit_sends_a_hung_folder_again() {
+    let (l, all) = open_small(4, &[], &[("ALBUMEN_TEST_RELIST_GATE", "d00")]);
+    let _ = &l.gui;
+    let v0 = l.set();
+    let gate = l.path().join(".albumen-test-gate");
+    fs::write(&gate, b"").unwrap();
+    let h = "d00/IMG_0005.JPG";
+    fs::write(
+        l.path().join(format!("{h}.albumen-tombstone")),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    let new = "d00/HUNG_0000.JPG";
+    fs::write(l.path().join(new), b"synthetic-m7-r2-hung").unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let t = Instant::now();
+    let mut lost = 0;
+    while t.elapsed() < Duration::from_secs(12) {
+        let s = l.set();
+        lost += v0.iter().filter(|p| *p != h && !s.contains(*p)).count();
+        assert!(!s.contains(h), "the new hide showed");
+        assert!(!s.contains(new), "a new photo showed while pending");
+        assert!(
+            found_page(&l.addr)["hide_pending_dirs"].as_u64() >= Some(1),
+            "gate not honoured"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(lost, 0, "a visible photo disappeared");
+    let f = found_page(&l.addr);
+    assert!(f["hide_redispatched"].as_u64() >= Some(1), "{f}");
+    assert!(
+        l.log
+            .lock()
+            .unwrap()
+            .contains("hide: d00 still pending after"),
+        "no PENDING_LIMIT log line"
+    );
+    fs::remove_file(&gate).unwrap();
+    let ms = l.until(5, "the new photo never showed after the release", |s| {
+        s.contains(new)
+    });
+    settled(&l.addr);
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    want.remove(h);
+    want.insert(new.to_string());
+    let fin = listed_raw(&l.addr);
+    assert_eq!(
+        fin.iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>(),
+        want,
+        "final set"
+    );
+    assert_eq!(fin.len(), want.len(), "a photo listed twice");
+    for _ in 0..5 {
+        assert_eq!(listed_raw(&l.addr), fin, "the grid oscillated");
+    }
+    println!(
+        "M7 PENDING_LIMIT redispatched={} release_to_new_ms={ms:.1}",
+        f["hide_redispatched"]
+    );
+}
+
+/// XO 04:41Z (3)/(4): a listing that panics on every try (3) fails closed
+/// for anything new or newly hidden, keeps the photos on screen (per-photo
+/// keep rule, no flicker), and is sent again after a backoff.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_exhausted_panics_keep_shown_photos_and_back_off() {
+    let (l, all) = open_small(
+        4,
+        &[],
+        &[
+            ("ALBUMEN_TEST_RELIST_GATE", "d00"),
+            ("ALBUMEN_TEST_RELIST_PANIC", "d00"),
+            ("ALBUMEN_TEST_RELIST_PANIC_AFTER_GATE", "1"),
+            ("ALBUMEN_TEST_RELIST_PANIC_TIMES", "3"),
+        ],
+    );
+    let _ = &l.gui;
+    let v0 = l.set();
+    let gate = l.path().join(".albumen-test-gate");
+    fs::write(&gate, b"").unwrap();
+    let h = "d00/IMG_0007.JPG";
+    fs::write(
+        l.path().join(format!("{h}.albumen-tombstone")),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    let new = "d00/PANIC_0000.JPG";
+    fs::write(l.path().join(new), b"synthetic-m7-r2-panic").unwrap();
+    std::thread::sleep(Duration::from_millis(2100));
+    let s = l.set();
+    assert!(!s.contains(h) && !s.contains(new));
+    fs::remove_file(&gate).unwrap();
+    // Until the three panics are in: nothing on screen goes.
+    let t = Instant::now();
+    let mut lost = 0;
+    loop {
+        let s = l.set();
+        lost += v0.iter().filter(|p| *p != h && !s.contains(*p)).count();
+        assert!(!s.contains(h), "the new hide showed");
+        if found_page(&l.addr)["hide_exhausted"].as_u64() >= Some(1) {
+            assert!(!s.contains(new), "a new photo showed from a failed listing");
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(5), "never exhausted");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // During the backoff: still kept, still fail closed.
+    let mut shown_new_at = None;
+    let t = Instant::now();
+    while shown_new_at.is_none() {
+        let s = l.set();
+        lost += v0.iter().filter(|p| *p != h && !s.contains(*p)).count();
+        assert!(!s.contains(h), "the new hide showed");
+        if s.contains(new) {
+            shown_new_at = Some(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        assert!(t.elapsed() < Duration::from_secs(10), "never listed again");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(lost, 0, "a visible photo disappeared");
+    let back = shown_new_at.unwrap();
+    assert!(
+        back >= 900.0,
+        "sent again before the 1 s backoff ({back:.1} ms)"
+    );
+    settled(&l.addr);
+    let log = l.log.lock().unwrap().clone();
+    assert!(log.contains("listing d00 kept panicking"), "{log}");
+    assert!(
+        log.contains("listing d00 again after 1 failed tries"),
+        "{log}"
+    );
+    assert_eq!(
+        log.matches("hide: worker panicked; retrying d00").count(),
+        3,
+        "{log}"
+    );
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    want.remove(h);
+    want.insert(new.to_string());
+    assert_eq!(l.set(), want, "final set");
+    let f = found_page(&l.addr);
+    println!(
+        "M7 EXHAUSTED panics={} exhausted={} relisted_after_ms={back:.1}",
+        f["hide_worker_panics"], f["hide_exhausted"]
+    );
 }

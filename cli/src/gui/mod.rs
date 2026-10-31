@@ -609,6 +609,14 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             let body = serde_json::json!({ "offset": offset, "entries": rows }).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
+        ("GET", "/api/hide-status") => {
+            // XO 04:41Z (2): the page's poll. A few numbers, no paths, no
+            // file reads: folders pending, the hidden set's version and the
+            // listing's generation. The page fetches /api/library only
+            // when the version or generation changes.
+            let body = hide_status_json(server).to_string();
+            http::respond(&mut stream, 200, "application/json", body.as_bytes())
+        }
         ("GET", "/api/found") => {
             // While a first walk runs: the photos found so far, in the order
             // found (append-only, so tiles already shown never move).
@@ -935,6 +943,9 @@ struct Fresh {
     hard: Arc<std::collections::HashSet<String>>,
     /// Withheld photos that were in `hard` (or `hard_w`) before.
     hard_w: std::collections::HashSet<String>,
+    /// A confirmed listing holds a photo the view lacks: list the library
+    /// again (XO 04:41Z (1)).
+    grew: bool,
     /// The previous generation's view, kept until this generation's first
     /// check has decided which photos of a pending folder were on screen.
     prev: Option<Prev>,
@@ -965,6 +976,15 @@ struct DirState {
     /// stay shown; the folder's other photos are withheld (XO 03:36Z (1)).
     keep: std::collections::HashSet<String>,
     tombs: std::collections::BTreeMap<String, TombState>,
+    /// The photo files the last listing saw (taken by [`apply_relist`] to
+    /// spot photos synced in that the view does not have yet).
+    photos: Vec<String>,
+    /// Listings in a row that kept panicking, and when the folder is sent
+    /// again (backoff; its shown photos stay under `keep` meanwhile).
+    fails: u32,
+    retry_at: Option<std::time::Instant>,
+    /// Set on the result of a listing that kept panicking.
+    failed: bool,
 }
 
 struct TombState {
@@ -1646,6 +1666,7 @@ fn hidden_for(
             withheld: Default::default(),
             hard,
             hard_w,
+            grew: false,
             prev,
         });
     }
@@ -1692,17 +1713,30 @@ fn hidden_for(
     let mut jobs: Vec<RelistJob> = Vec::new();
     for (i, ((d, ds), st)) in f.dirs.iter().zip(f.state.iter_mut()).zip(sts).enumerate() {
         if let Some(since) = ds.pending {
-            // XO 03:36Z (5): a folder never stays pending silently. A worker
-            // that died or hangs is logged and the folder sent again (its
-            // photos stay withheld meanwhile).
-            if since.elapsed() < PENDING_LIMIT {
-                continue;
+            match ds.retry_at {
+                // A listing that kept panicking: sent again after its
+                // backoff (XO 04:41Z (4)); shown photos stay under `keep`.
+                Some(t) if std::time::Instant::now() < t => continue,
+                Some(_) => {
+                    eprintln!(
+                        "albumen gui: hide: listing {d} again after {} failed tries",
+                        ds.fails
+                    );
+                }
+                None => {
+                    // XO 03:36Z (5): a folder never stays pending silently. A
+                    // worker that died or hangs is logged and the folder sent
+                    // again (its photos stay withheld meanwhile).
+                    if since.elapsed() < PENDING_LIMIT {
+                        continue;
+                    }
+                    eprintln!(
+                        "albumen gui: hide: {d} still pending after {:?}; listing it again",
+                        since.elapsed()
+                    );
+                    REDISPATCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
-            eprintln!(
-                "albumen gui: hide: {d} still pending after {:?}; listing it again",
-                since.elapsed()
-            );
-            REDISPATCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if primed && ds.trusted && st.is_some() && st == ds.stamp {
             changed |= cheap(ds);
@@ -1710,7 +1744,9 @@ fn hidden_for(
             // A worker applying its results starts no re-list; the next
             // request does.
         } else {
+            let fails = ds.fails;
             let taken = std::mem::take(ds);
+            ds.fails = fails;
             ds.pending = Some(std::time::Instant::now());
             jobs.push(RelistJob {
                 i,
@@ -1801,6 +1837,7 @@ fn hidden_for(
     if !changed {
         return (Arc::clone(&f.hidden), f.version);
     }
+    let built = std::time::Instant::now();
     let mut hidden = std::collections::HashSet::new();
     let mut errors = Vec::new();
     let mut tombs = Vec::new();
@@ -1875,7 +1912,14 @@ fn hidden_for(
     f.withheld = withheld;
     f.hidden = Arc::new(all);
     HIDE_VERSION.store(f.version, std::sync::atomic::Ordering::Relaxed);
+    let us = built.elapsed().as_micros() as u64;
+    BUILD_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
+    BUILD_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
     let out = (Arc::clone(&f.hidden), f.version);
+    let grew = std::mem::take(&mut f.grew);
+    if grew {
+        GREW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     if released {
         let mut lv = server.library.lock().unwrap();
         if lv.as_ref().is_some_and(|c| c.generation == f.generation) {
@@ -1883,7 +1927,7 @@ fn hidden_for(
         }
     }
     drop(fresh);
-    if unhid {
+    if unhid || grew {
         if let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
             refresh_thumbs(&s);
         }
@@ -1933,6 +1977,16 @@ static KEEP_STATS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// Worker panics caught, and folders sent again after `PENDING_LIMIT`.
 static WORKER_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static REDISPATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Listings that kept panicking (all tries), and re-walks started because a
+/// confirmed folder held a photo synced in.
+static EXHAUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GREW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Time to build the hidden and withheld sets (the last and longest).
+static BUILD_LAST_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BUILD_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The longest backoff before a folder whose listing kept panicking is
+/// listed again.
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 /// A folder pending this long is logged and listed again (XO 03:36Z (5)).
 const PENDING_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// A worker applies what it has finished at least this often, so a
@@ -1941,7 +1995,7 @@ const APPLY_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// For each folder about to go pending: the photos the previous view showed
 /// whose own tombstone is absent, or unchanged since a trusted read that
-/// said show. One stat per shown photo, on up to 8 threads. A stat that
+/// said show. One listing per folder (and a stat per tombstone present), on up to 8 threads. A stat that
 /// fails other than "not found" withholds the photo (fail closed).
 /// Also says whether any shown photo is withheld (it would blink out).
 fn keep_shown(
@@ -1980,11 +2034,49 @@ fn keep_shown(
         })
         .collect();
     let threads = hide_threads();
+    // One listing of the folder instead of one stat per shown photo (the
+    // stats cost up to 150 ms a request on NTFS, Windows CI 0e54af1): a
+    // photo whose tombstone name is not in the listing is kept; one whose
+    // tombstone is there gets the stat and trusted-read check. A folder
+    // that cannot be listed keeps nothing (fail closed).
+    let fold = |n: &str| -> String {
+        if cfg!(windows) {
+            n.to_lowercase()
+        } else {
+            n.to_string()
+        }
+    };
     let check = |j: &RelistJob, photos: &Vec<String>| -> std::collections::HashSet<String> {
+        if photos.is_empty() {
+            return Default::default();
+        }
+        KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let names: std::collections::HashSet<String> = match std::fs::read_dir(lib.join(&j.dir)) {
+            Ok(rd) => {
+                let mut names = std::collections::HashSet::new();
+                for e in rd {
+                    match e {
+                        Ok(e) => {
+                            let n = e.file_name().to_string_lossy().into_owned();
+                            if fold(&n).ends_with(&fold(TOMBSTONE_SUFFIX)) {
+                                names.insert(fold(&n));
+                            }
+                        }
+                        Err(_) => return Default::default(),
+                    }
+                }
+                names
+            }
+            Err(_) => return Default::default(),
+        };
         photos
             .iter()
             .filter(|p| {
                 let rel = format!("{p}{TOMBSTONE_SUFFIX}");
+                let name = rel.rsplit_once('/').map_or(rel.as_str(), |(_, n)| n);
+                if !names.contains(&fold(name)) {
+                    return true;
+                }
                 let path = lib.join(&rel);
                 KEEP_STATS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match std::fs::symlink_metadata(&path) {
@@ -2001,11 +2093,10 @@ fn keep_shown(
             .cloned()
             .collect()
     };
-    let total: usize = shown.iter().map(Vec::len).sum();
     let blinks = |out: &[std::collections::HashSet<String>]| {
         out.iter().zip(&shown).any(|(k, s)| k.len() < s.len())
     };
-    if threads == 1 || total < 256 {
+    if threads == 1 || jobs.len() < 4 {
         let out: Vec<_> = jobs.iter().zip(&shown).map(|(j, s)| check(j, s)).collect();
         let b = blinks(&out);
         return (out, b);
@@ -2067,9 +2158,14 @@ fn relist_hooks(lib: &Path, dir: &str) {
     if ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
-    static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    // `ALBUMEN_TEST_RELIST_PANIC_TIMES=<n>` (default 1): panic that often.
+    static PANICKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let times = std::env::var("ALBUMEN_TEST_RELIST_PANIC_TIMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1u64);
     if std::env::var("ALBUMEN_TEST_RELIST_PANIC").is_ok_and(|d| d == dir)
-        && !PANICKED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        && PANICKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < times
     {
         panic!("ALBUMEN_TEST_RELIST_PANIC {dir}");
     }
@@ -2187,11 +2283,11 @@ fn spawn_relists(
                 }
                 let ds = out.unwrap_or_else(|| {
                     eprintln!(
-                        "albumen gui: hide: listing {} kept panicking; hiding its photos and listing it again",
+                        "albumen gui: hide: listing {} kept panicking; keeping its shown photos, withholding the rest and listing it again later",
                         j.dir
                     );
                     DirState {
-                        unlisted: true,
+                        failed: true,
                         ..Default::default()
                     }
                 });
@@ -2234,9 +2330,37 @@ fn apply_relist(f: &mut Fresh, done: RelistDone) {
     } else {
         f.dirs.iter().position(|d| *d == done.dir)
     };
-    let Some(slot) = i.and_then(|i| f.state.get_mut(i)) else {
+    let Some(i) = i.filter(|&i| i < f.state.len()) else {
         return;
     };
+    let slot = &mut f.state[i];
+    if done.ds.failed {
+        // XO 04:41Z (4): still pending (fail closed for anything new or
+        // changed), its shown photos kept per photo, and sent again after
+        // a backoff of 1, 2, 4 .. 60 s.
+        slot.fails = slot.fails.saturating_add(1);
+        let wait = std::time::Duration::from_secs(1 << (slot.fails - 1).min(6)).min(RETRY_MAX);
+        slot.retry_at = Some(std::time::Instant::now() + wait);
+        slot.pending.get_or_insert_with(std::time::Instant::now);
+        EXHAUSTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    let mut ds = done.ds;
+    // A photo synced in: listed, not hidden by its own tombstone, and not
+    // in the view (the view is from the last walk).
+    let photos = std::mem::take(&mut ds.photos);
+    if !photos.is_empty() && !f.grew {
+        let have: std::collections::HashSet<&str> =
+            f.photos_in[i].iter().map(|&j| f.base.path(j)).collect();
+        f.grew = photos.iter().any(|p| {
+            !have.contains(p.as_str())
+                && ds
+                    .tombs
+                    .get(&format!("{p}{}", albumen_ingest::hides::TOMBSTONE_SUFFIX))
+                    .is_none_or(|t| t.verdict == Ok(false))
+        });
+    }
+    let slot = &mut f.state[i];
     if let Some(since) = slot.pending {
         let us = since.elapsed().as_micros() as u64;
         WITHHELD_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2247,7 +2371,7 @@ fn apply_relist(f: &mut Fresh, done: RelistDone) {
             w.push(us);
         }
     }
-    *slot = done.ds;
+    *slot = ds;
     slot.pending = None;
 }
 
@@ -2290,16 +2414,20 @@ fn relist_dir(
         Ok(rd) => {
             changed |= ds.unlisted;
             ds.unlisted = false;
+            ds.photos.clear();
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(TOMBSTONE_SUFFIX) || name == TOMBSTONE_SUFFIX {
-                    continue;
-                }
                 let rel = if d.is_empty() {
-                    name
+                    name.clone()
                 } else {
                     format!("{d}/{name}")
                 };
+                if !name.ends_with(TOMBSTONE_SUFFIX) || name == TOMBSTONE_SUFFIX {
+                    if is_photo(&rel) {
+                        ds.photos.push(rel);
+                    }
+                    continue;
+                }
                 let keep = old.remove(&rel).filter(|t| {
                     (t.trusted || t.verdict == Ok(true)) && t.stamp.is_some() && {
                         if key_kind() == KeyKind::Portable {
@@ -2469,6 +2597,22 @@ fn withheld_p95_ms() -> f64 {
     w[((w.len() * 95).div_ceil(100)).saturating_sub(1)] as f64 / 1000.0
 }
 
+fn hide_status_json(server: &Server) -> serde_json::Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    let generation = server
+        .library
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or(0, |v| v.generation);
+    serde_json::json!({
+        "pending": PENDING_DIRS.load(Relaxed),
+        "version": HIDE_VERSION.load(Relaxed),
+        "generation": generation,
+        "found": server.found.load(Relaxed),
+    })
+}
+
 fn found_json(server: &Server) -> serde_json::Value {
     let paths = server.found_paths.lock().unwrap().clone();
     serde_json::json!({
@@ -2497,6 +2641,10 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_keep_max_ms": KEEP_STAT_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
         "hide_worker_panics": WORKER_PANICS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_redispatched": REDISPATCHED.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_exhausted": EXHAUSTED.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_grew": GREW.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_build_last_ms": BUILD_LAST_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
+        "hide_build_max_ms": BUILD_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
     })
 }
 

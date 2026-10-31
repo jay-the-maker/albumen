@@ -320,3 +320,35 @@ max is. Windows is unverified until CI runs.
 Gaps: the UI still refetches the full library on a version change (380k);
 PENDING_LIMIT re-dispatch has no dedicated test; deny-write is not
 verified on Windows; GUI DOM harness open.
+
+## XO 04:41Z (branch m7-r2, on 0e54af1)
+
+Box numbers are Linux on the shared box, not CI evidence.
+
+1. Synced-in photos: before this change a new photo reached the view only by a
+   re-walk, which only an unhide or a scan started. A confirmed listing that holds
+   a photo not in the base view (and not hidden by its own tombstone) now starts
+   the same re-walk (`hide_grew`). Test `m7_synced_in_photos_show_without_unhide_or_scan`
+   (box: shown in 202 ms).
+2. Poll: `GET /api/hide-status` returns `{pending, version, generation, found}`
+   (54-57 bytes) and clones nothing. The page polls it every 200 ms while folders
+   are pending and every 10 s otherwise, and refetches `/api/library` only when
+   the version or generation changes. Box 380k, 0 tombstones: p50 0.07 ms,
+   p95 0.37 ms; after a 1k-tombstone sync p50 7.9 ms, p95 24 ms, max 26 ms
+   (`/api/found` at the same point: p50 36 ms, p95 111 ms, 53 KB).
+3. Tests `m7_pending_limit_sends_a_hung_folder_again` and
+   `m7_exhausted_panics_keep_shown_photos_and_back_off`.
+4. An exhausted listing no longer marks the folder unlisted: it stays pending
+   with its per-photo keep set and is listed again after 1, 2, 4 ... 60 s.
+5. `keep_shown` lists each folder once instead of one stat per shown photo
+   (Windows CI on 0e54af1: keep_max 21/101/148 ms at 50k and 0/1k/10k
+   tombstones). Keep and set-build times are asserted <= 50 ms up to 50k files
+   and <= 1 s above that. They still grow with the photos of the folders going pending:
+   box 380k after a 1k-tombstone sync, keep 244 ms and build 172 ms.
+6. `no_flicker` checks the order while pending (`listed_raw`; `listed` sorts).
+7. Test `m7_unhide_while_pending_shows_the_photo`.
+
+Gaps: there is no diff endpoint (a change refetches the whole library), and a
+new folder outside a known one is not seen until a re-walk. At 380k after a
+1k-tombstone sync the box measured a server withheld max of 1271 ms (one run)
+against the 1 s bar.
