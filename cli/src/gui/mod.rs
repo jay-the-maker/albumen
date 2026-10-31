@@ -788,7 +788,9 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
                     if !v.ready {
                         v.found.store(found, std::sync::atomic::Ordering::Relaxed);
                     }
+                    let t_resp = t0.elapsed();
                     let r = v.respond(&mut stream, page);
+                    lib_req_record(t_lock, t_view, t_resp, t0.elapsed());
                     hide_diag::line(&format!(
                         "lib_req gen={} walks={walks} lock_ms={:.2} view_ms={:.2} total_ms={:.2}",
                         v.generation,
@@ -2274,9 +2276,11 @@ fn hidden_for(
     if !jobs.is_empty() && primed {
         // Which photos of each folder about to go pending stay on screen:
         // one stat of each shown photo's own tombstone, on up to 8 threads.
-        let t = std::time::Instant::now();
+        let probe = inline_t::start();
+        let t = probe.t;
         req_keep_dirs = jobs.len() as u64;
         let (keeps, b) = keep_shown(lib, f, &jobs);
+        let keep_done = t.elapsed();
         for ((j, keep), b) in jobs.iter().zip(keeps).zip(b) {
             f.state[j.i].keep = Arc::new(keep);
             if b {
@@ -2286,6 +2290,15 @@ fn hidden_for(
         let us = t.elapsed().as_micros() as u64;
         KEEP_STAT_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
         KEEP_STAT_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
+        inline_t::record(inline_t::KEEP, &probe, || {
+            format!(
+                "dirs={} keep_shown_ms={:.2} store_ms={:.2} {}",
+                jobs.len(),
+                keep_done.as_secs_f64() * 1e3,
+                (t.elapsed() - keep_done).as_secs_f64() * 1e3,
+                KEEP_DETAIL.lock().unwrap()
+            )
+        });
     }
     hide_diag::mark("keep");
     // The previous view has served once this generation has been checked.
@@ -2382,7 +2395,8 @@ fn hidden_for(
     if !changed {
         return (Arc::clone(&f.hidden), f.version);
     }
-    let built = std::time::Instant::now();
+    let probe = inline_t::start();
+    let built = probe.t;
     // The hard-hidden set, kept up to date per changed folder: a folder
     // whose state version is unchanged since the last build is skipped, so
     // a request with one changed folder does not walk every tombstone.
@@ -2492,6 +2506,7 @@ fn hidden_for(
                 .collect(),
         ));
     }
+    let t_hard = built.elapsed();
     let hidden: &std::collections::HashSet<String> = &hard;
     // An unhide needs the photo back, which the view no longer holds: list
     // again in the background (hides only ever narrow the view here). A
@@ -2585,6 +2600,8 @@ fn hidden_for(
     } else {
         touched.extend(added.iter().cloned());
     }
+    let t_withheld = built.elapsed();
+    let shared = Arc::strong_count(&f.hidden) > 1;
     let mut delta = false;
     {
         let all = Arc::make_mut(&mut f.hidden);
@@ -2602,6 +2619,16 @@ fn hidden_for(
     let us = built.elapsed().as_micros() as u64;
     BUILD_LAST_US.store(us, std::sync::atomic::Ordering::Relaxed);
     BUILD_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
+    inline_t::record(inline_t::BUILD, &probe, || {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        format!(
+            "hard_ms={:.2} withheld_ms={:.2} served_ms={:.2} served_cloned={shared} served_n={} full={full}",
+            ms(t_hard),
+            ms(t_withheld - t_hard),
+            ms(built.elapsed() - t_withheld),
+            f.hidden.len()
+        )
+    });
     let out = (Arc::clone(&f.hidden), f.version);
     let grew = std::mem::take(&mut f.grew);
     if grew {
@@ -2708,8 +2735,12 @@ const APPLY_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 /// fails other than "not found" withholds the photo (fail closed).
 /// Also says, per folder, whether a shown photo is withheld (it would blink
 /// out).
+/// How the last keep_shown spent its time (for `inline_t`).
+static KEEP_DETAIL: Mutex<String> = Mutex::new(String::new());
+
 fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<bool>) {
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
+    let t_keep = std::time::Instant::now();
     // Photos of each folder that were off screen (the reference hidden set,
     // grouped by folder): they stay withheld. Walks the hidden set, which
     // follows the tombstones, never the photos of the folder.
@@ -2855,24 +2886,58 @@ fn keep_shown(lib: &Path, f: &Fresh, jobs: &[RelistJob]) -> (Vec<Withhold>, Vec<
         }
         (Withhold { all: false, set }, blink)
     };
+    let grouped = t_keep.elapsed();
     let run = |n: usize| check(&jobs[n], &sets[n]);
     if threads == 1 || jobs.len() < 4 {
-        return (0..jobs.len()).map(run).unzip();
+        let r = (0..jobs.len()).map(run).unzip();
+        *KEEP_DETAIL.lock().unwrap() = format!(
+            "group_ms={:.2} threads=1 checks_ms={:.2}",
+            grouped.as_secs_f64() * 1e3,
+            (t_keep.elapsed() - grouped).as_secs_f64() * 1e3
+        );
+        return r;
     }
     let out: Vec<Mutex<Option<(Withhold, bool)>>> =
         (0..jobs.len()).map(|_| Mutex::new(None)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
+    // Per worker: (start delay after the spawn, wall, CPU) in us.
+    let workers: Mutex<Vec<(u64, u64, u64)>> = Mutex::new(Vec::new());
     std::thread::scope(|sc| {
         for _ in 0..threads {
-            sc.spawn(|| loop {
-                let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n >= jobs.len() {
-                    return;
+            let spawned = std::time::Instant::now();
+            let (next, out, workers, run) = (&next, &out, &workers, &run);
+            sc.spawn(move || {
+                let delay = spawned.elapsed().as_micros() as u64;
+                let t = std::time::Instant::now();
+                let cpu = inline_t::cpu_us();
+                loop {
+                    let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n >= jobs.len() {
+                        break;
+                    }
+                    *out[n].lock().unwrap() = Some(run(n));
                 }
-                *out[n].lock().unwrap() = Some(run(n));
+                workers.lock().unwrap().push((
+                    delay,
+                    t.elapsed().as_micros() as u64,
+                    inline_t::cpu_us().saturating_sub(cpu),
+                ));
             });
         }
     });
+    {
+        let w = workers.into_inner().unwrap();
+        let mx = |f: fn(&(u64, u64, u64)) -> u64| w.iter().map(f).max().unwrap_or(0) as f64 / 1e3;
+        *KEEP_DETAIL.lock().unwrap() = format!(
+            "group_ms={:.2} threads={threads} checks_ms={:.2} worker_start_delay_max_ms={:.2} \
+             worker_wall_max_ms={:.2} worker_cpu_max_ms={:.2}",
+            grouped.as_secs_f64() * 1e3,
+            (t_keep.elapsed() - grouped).as_secs_f64() * 1e3,
+            mx(|x| x.0),
+            mx(|x| x.1),
+            mx(|x| x.2)
+        );
+    }
     let out: Vec<(Withhold, bool)> = out
         .into_iter()
         .map(|m| m.into_inner().unwrap().unwrap_or_default())
@@ -3470,6 +3535,173 @@ fn gather_runs(buf: &[u8], ends: &[u32], runs: &[(usize, usize)]) -> (Vec<u8>, V
 /// ALBUMEN_HIDE_DIAG_FILE set, each filtered request appends one line of
 /// phase times (ms since the request's hide work began) to that file. Off
 /// (one cached env lookup) otherwise. For the 380k profile (XO 05:41Z).
+/// FRAGO 10:22Z (4): the per-step timer of the last /api/library request
+/// (ms): the server's library lock, each hide-check phase (from
+/// `hide_diag`, as deltas), the view filter, the response write and the
+/// handler total. The test subtracts the handler total from its own
+/// round trip, so time outside the handler (accept, connect, scheduling)
+/// is shown too.
+static LIB_REQ_LAST: Mutex<String> = Mutex::new(String::new());
+
+fn lib_req_record(
+    lock: std::time::Duration,
+    view: std::time::Duration,
+    resp: std::time::Duration,
+    total: std::time::Duration,
+) {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let mut s = format!("srv_lock={:.2}", ms(lock));
+    let mut prev = 0.0;
+    let mut hide = 0.0;
+    for (k, t) in hide_diag::take_last() {
+        s.push_str(&format!(" {k}={:.2}", t - prev));
+        prev = t;
+        hide = t;
+    }
+    s.push_str(&format!(
+        " view_other={:.2} respond={:.2} total={:.2}",
+        (ms(view) - ms(lock) - hide).max(0.0),
+        ms(total) - ms(resp),
+        ms(total)
+    ));
+    *LIB_REQ_LAST.lock().unwrap() = s;
+}
+
+/// FRAGO 10:22Z (2): what an inline step (keep_shown, the hidden-set build)
+/// spent its wall time on, kept for the slowest of each: the calling
+/// thread's own CPU time and involuntary context switches (Linux) over the
+/// step, its sub-phases, and (keep_shown) the worker threads' start delay
+/// and CPU. Wall much larger than CPU with involuntary switches means the
+/// thread was runnable but not running (preempted), not doing work.
+mod inline_t {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    pub struct Probe {
+        pub t: Instant,
+        cpu: u64,
+        ivcsw: (i64, i64),
+        rq: i64,
+    }
+    /// This thread's run-queue wait in ns from
+    /// /proc/thread-self/schedstat field 2 (Linux, print-only); -1 when
+    /// unavailable (no procfs or schedstats).
+    fn rq_ns() -> i64 {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(t) = std::fs::read_to_string("/proc/thread-self/schedstat") {
+                if let Some(v) = t.split_whitespace().nth(1).and_then(|v| v.parse().ok()) {
+                    return v;
+                }
+            }
+            -1
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            -1
+        }
+    }
+    /// This thread's CPU time (us).
+    pub fn cpu_us() -> u64 {
+        #[cfg(unix)]
+        {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: a valid out pointer to a timespec.
+            if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 {
+                return ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1000;
+            }
+            0
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::FILETIME;
+            use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+            let z = || FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
+            let (mut c, mut e, mut k, mut u) = (z(), z(), z(), z());
+            // SAFETY: the pseudo-handle of this thread and valid out pointers.
+            if unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } != 0 {
+                let t = |f: FILETIME| (f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64;
+                return (t(k) + t(u)) / 10;
+            }
+            0
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            0
+        }
+    }
+    /// This thread's (involuntary, voluntary) context switches (Linux; -1
+    /// elsewhere). Voluntary: it blocked (I/O, a lock, a sleep).
+    fn ivcsw() -> (i64, i64) {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: zeroed rusage is a valid out value.
+            let mut r: libc::rusage = unsafe { std::mem::zeroed() };
+            // SAFETY: a valid out pointer.
+            if unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut r) } == 0 {
+                return (r.ru_nivcsw as i64, r.ru_nvcsw as i64);
+            }
+            (-1, -1)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            (-1, -1)
+        }
+    }
+    pub fn start() -> Probe {
+        Probe {
+            t: Instant::now(),
+            cpu: cpu_us(),
+            ivcsw: ivcsw(),
+            rq: rq_ns(),
+        }
+    }
+    pub const KEEP: usize = 0;
+    pub const BUILD: usize = 1;
+    static SLOWEST: Mutex<[(u64, String); 2]> =
+        Mutex::new([(0, String::new()), (0, String::new())]);
+    /// Records the step if it is the slowest so far; `extra` is only built
+    /// then.
+    pub fn record(which: usize, p: &Probe, extra: impl FnOnce() -> String) {
+        let wall = p.t.elapsed().as_micros() as u64;
+        let mut s = SLOWEST.lock().unwrap();
+        if wall < s[which].0 {
+            return;
+        }
+        let cpu = cpu_us().saturating_sub(p.cpu);
+        let rq = rq_ns();
+        let rq = if rq < 0 || p.rq < 0 {
+            "na".to_string()
+        } else {
+            format!("{:.2}", (rq - p.rq) as f64 / 1e6)
+        };
+        let (iv, v) = ivcsw();
+        let (iv, v) = if iv < 0 || p.ivcsw.0 < 0 {
+            (-1, -1)
+        } else {
+            (iv - p.ivcsw.0, v - p.ivcsw.1)
+        };
+        s[which] = (
+            wall,
+            format!(
+                "wall_ms={:.2} cpu_ms={:.2} runq_delay_ms={rq} ivcsw={iv} vcsw={v} {}",
+                wall as f64 / 1e3,
+                cpu as f64 / 1e3,
+                extra()
+            ),
+        );
+    }
+    pub fn json() -> serde_json::Value {
+        let s = SLOWEST.lock().unwrap();
+        serde_json::json!({ "keep": s[KEEP].1, "build": s[BUILD].1 })
+    }
+}
+
 mod hide_diag {
     use std::cell::RefCell;
     use std::time::Instant;
@@ -3480,19 +3712,25 @@ mod hide_diag {
         F.get_or_init(|| std::env::var_os("ALBUMEN_HIDE_DIAG_FILE").map(Into::into))
             .as_ref()
     }
+    // FRAGO 10:22Z (4): the marks are always taken (a few pushes a
+    // request), so every /api/library request's phases can be reported
+    // (`take_last`); the diag file stays opt-in.
+    thread_local!(static LAST: RefCell<Vec<(&'static str, f64)>> = const { RefCell::new(Vec::new()) });
     pub fn start() {
-        if file().is_some() {
-            MARKS.with(|m| *m.borrow_mut() = Some((Instant::now(), Vec::new())));
-        }
+        MARKS.with(|m| *m.borrow_mut() = Some((Instant::now(), Vec::new())));
+        LAST.with(|l| l.borrow_mut().clear());
     }
     pub fn mark(what: &'static str) {
-        if file().is_some() {
-            MARKS.with(|m| {
-                if let Some((t, v)) = m.borrow_mut().as_mut() {
-                    v.push((what, t.elapsed().as_secs_f64() * 1000.0));
-                }
-            });
-        }
+        MARKS.with(|m| {
+            if let Some((t, v)) = m.borrow_mut().as_mut() {
+                v.push((what, t.elapsed().as_secs_f64() * 1000.0));
+            }
+        });
+    }
+    /// The phases (ms since `start`, cumulative) of this thread's last
+    /// finished hide check.
+    pub fn take_last() -> Vec<(&'static str, f64)> {
+        LAST.with(|l| std::mem::take(&mut *l.borrow_mut()))
     }
     pub fn line(l: &str) {
         let Some(path) = file() else { return };
@@ -3506,11 +3744,12 @@ mod hide_diag {
         }
     }
     pub fn finish(what: &'static str) {
-        let Some(path) = file() else { return };
         mark(what);
         let Some((_, v)) = MARKS.with(|m| m.borrow_mut().take()) else {
             return;
         };
+        LAST.with(|l| *l.borrow_mut() = v.clone());
+        let Some(path) = file() else { return };
         let mut line = String::from("hide_diag");
         for (k, ms) in v {
             line.push_str(&format!(" {k}={ms:.2}"));
@@ -3670,6 +3909,8 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_rewalk_causes": REWALK_CAUSES.lock().unwrap().clone(),
         "hide_build_last_ms": BUILD_LAST_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
         "hide_build_max_ms": BUILD_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
+        "hide_inline": inline_t::json(),
+        "lib_req_last": LIB_REQ_LAST.lock().unwrap().clone(),
     })
 }
 
