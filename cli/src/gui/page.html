@@ -387,7 +387,8 @@ async function init(){
   $('lib-count').textContent=lib.total_images>0?'Sorting… '+n+' photos':'Reading the folder… '+n+' photos so far';try{await earlyTiles();}catch(e){}await new Promise(r=>setTimeout(r,200));lib=await j('/api/library');}
  $('lib').textContent='Folder: '+lib.library;
  $('lib-count').textContent=countText(lib.images.map(i=>i.path));
- try{const f=await j('/api/found');$('index-note').hidden=!f.index_note;$('index-note').textContent=f.index_note?'Updating the library index…':'';$('index-note').title=f.index_note||'';if(f.index_note)pollIndex();$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';window.__hv0=f.hide_version;window.__nv0=f.hide_note_version;}catch(e){}
+ // XO 11:02Z (B option 2): the first hide-line read no longer holds up first paint; it fills in when it lands (the poll below reads it too).
+ j('/api/found').then(f=>{$('index-note').hidden=!f.index_note;$('index-note').textContent=f.index_note?'Updating the library index…':'';$('index-note').title=f.index_note||'';if(f.index_note)pollIndex();$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';if(hideVer===null){hideVer=f.hide_version;noteVer=f.hide_note_version;}}).catch(()=>{});
  // The hide line follows the files: a hide file that breaks or is fixed shows on the next poll.
  // M7 (XO 04:41Z (2)): the poll reads /api/hide-status (a few numbers, no
  // paths): every 200 ms while a folder is being checked in the background
@@ -396,7 +397,7 @@ async function init(){
  // FRAGO 06:29Z (2): the hide line (/api/found) is read only when the
  // version, the generation or the note's own version moved, never on an
  // idle tick (the status call re-checks the line in the background).
- let hideVer=window.__hv0??null,hideGen=null,noteVer=window.__nv0??null;
+ let hideVer=null,hideGen=null,noteVer=null;
  const hidePoll=async()=>{let wait=10000;try{const s=await j('/api/hide-status');window.__hidePolls=(window.__hidePolls||0)+1;
   const moved=hideVer===null||s.version!==hideVer||(hideGen!==null&&s.generation!==hideGen);
   if(moved||s.note_version!==noteVer){const f=await j('/api/found');noteVer=f.hide_note_version;window.__foundReads=(window.__foundReads||0)+1;$('hide-note').hidden=!f.hide_note;$('hide-note').textContent=f.hide_note||'';}
