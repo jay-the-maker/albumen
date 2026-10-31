@@ -5656,4 +5656,61 @@ mod tests {
         }
         assert!(!PAGE.contains("lib.images.length+' photos'"));
     }
+
+    /// XO FRAGO 10:44Z (F): what the always-on /api/library step timers
+    /// (92f33bd) cost per request: `hide_diag` start, eight marks, finish,
+    /// and `lib_req_record` (format + the LIB_REQ_LAST lock), on vs off,
+    /// with and without a second thread reading LIB_REQ_LAST the way
+    /// /api/found does. Diagnostic: `cargo test --release -p albumen --bin
+    /// albumen step_timer_overhead -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, prints only"]
+    fn step_timer_overhead() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        const N: u32 = 200_000;
+        let one = |on: bool| {
+            let t = Instant::now();
+            if on {
+                hide_diag::start();
+                for k in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+                    hide_diag::mark(k);
+                }
+                hide_diag::finish("done");
+                lib_req_record(
+                    Duration::from_micros(3),
+                    Duration::from_micros(40),
+                    Duration::from_micros(5),
+                    Duration::from_micros(60),
+                );
+            }
+            std::hint::black_box(t.elapsed())
+        };
+        let run = |on: bool| {
+            let mut v: Vec<u64> = (0..N).map(|_| one(on).as_nanos() as u64).collect();
+            v.sort_unstable();
+            (v[v.len() / 2], v[v.len() * 99 / 100], *v.last().unwrap())
+        };
+        for contended in [false, true] {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let reader = contended.then(|| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::black_box(LIB_REQ_LAST.lock().unwrap().clone());
+                    }
+                })
+            });
+            let off = run(false);
+            let on = run(true);
+            stop.store(true, Ordering::Relaxed);
+            if let Some(r) = reader {
+                r.join().unwrap();
+            }
+            println!(
+                "M7 STEP_TIMER_OVERHEAD contended_reader={contended} n={N} off_ns p50={} p99={} max={} on_ns p50={} p99={} max={}",
+                off.0, off.1, off.2, on.0, on.1, on.2
+            );
+        }
+    }
 }
