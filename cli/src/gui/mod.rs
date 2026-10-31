@@ -271,8 +271,8 @@ impl LibraryView {
         w.write_all(b"]}")
     }
 
-    /// Send the answer: Content-Length from a counting pass, then stream.
-    fn respond(&self, stream: &mut TcpStream, page: Option<(usize, usize)>) -> std::io::Result<()> {
+    /// Count the full answer's length once (off the request path).
+    fn count_full_len(&self) {
         struct Count(usize);
         impl Write for Count {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
@@ -283,29 +283,41 @@ impl LibraryView {
                 Ok(())
             }
         }
-        let count = || -> std::io::Result<usize> {
+        if self.ready && self.full_len.get().is_none() {
             let mut c = Count(0);
-            self.write_json(&mut c, page)?;
-            Ok(c.0)
-        };
-        // A ready listing never changes, so its full length is counted once.
-        let len = match (page, self.ready, self.full_len.get()) {
-            (None, true, Some(&n)) => n,
-            (None, true, None) => {
-                let n = count()?;
-                let _ = self.full_len.set(n);
-                n
+            if self.write_json(&mut c, None).is_ok() {
+                let _ = self.full_len.set(c.0);
             }
-            _ => count()?,
+        }
+    }
+
+    /// Send the answer: Content-Length known (cached) and streamed, or
+    /// built once into a buffer.
+    fn respond(&self, stream: &mut TcpStream, page: Option<(usize, usize)>) -> std::io::Result<()> {
+        // D2 (08:09Z): the first answer for a view (and every page) is
+        // built once into a buffer and sent, not counted in one pass and
+        // written in a second: the counting pass was ~half of the first
+        // request after each re-walk (per-request timing, lib_req lines).
+        let header = |stream: &mut TcpStream, len: usize| {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+                len
+            )
         };
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-            len
-        )?;
-        let mut w = std::io::BufWriter::with_capacity(1 << 16, &mut *stream);
-        self.write_json(&mut w, page)?;
-        w.flush()
+        if let (None, true, Some(&n)) = (page, self.ready, self.full_len.get()) {
+            header(stream, n)?;
+            let mut w = std::io::BufWriter::with_capacity(1 << 16, &mut *stream);
+            self.write_json(&mut w, page)?;
+            return w.flush();
+        }
+        let mut buf = Vec::with_capacity(self.full_len.get().copied().unwrap_or(1 << 16));
+        self.write_json(&mut buf, page)?;
+        if page.is_none() && self.ready {
+            let _ = self.full_len.set(buf.len());
+        }
+        header(stream, buf.len())?;
+        stream.write_all(&buf)
     }
 }
 
@@ -389,15 +401,20 @@ fn walk_panic_hook() {
     }
 }
 
+/// Walks under way now (for the per-request timing, D2).
+static WALKS_RUNNING: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 fn refresh_thumbs_try(server: &Arc<Server>, attempt: u32) {
     use std::sync::atomic::Ordering;
     let gen = server.thumb_gen.fetch_add(1, Ordering::SeqCst) + 1;
     let s = Arc::clone(server);
     std::thread::spawn(move || {
+        WALKS_RUNNING.fetch_add(1, Ordering::SeqCst);
         let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             walk_panic_hook();
             walk_once(&s, gen);
         }));
+        WALKS_RUNNING.fetch_sub(1, Ordering::SeqCst);
         if walked.is_err() {
             // A new photo's walk is not lost: logged, counted and started
             // again after 1, 2, 4 s; past that the next re-list that sees
@@ -512,7 +529,22 @@ fn publish_library(
         }
     };
     let full = LibraryView::build(s, gen, files, cached, &mut |early| put(early));
+    // D2 (08:09Z): the full answer's length is counted here, on the walk
+    // thread, so the first request after a re-walk streams at once (the
+    // count was ~5 ms of that request at 5,000 photos, lib_req lines).
+    let ready = full.ready;
     put(full);
+    // D2 (08:09Z): and the hide filter for it is applied here too (what the
+    // first request after the re-walk did inline), so that request finds the
+    // filtered view in place. Same function the request calls; a request
+    // arriving first simply does it itself. Not for the startup walk: its
+    // first answer is checked in full on the request (and says so).
+    if ready && gen > 1 {
+        let cur = s.library.lock().unwrap().clone();
+        if let Some(v) = cur.filter(|v| v.generation == gen) {
+            current_view(s, v).count_full_len();
+        }
+    }
 }
 
 pub fn run(args: GuiArgs) -> Result<(), IngestError> {
@@ -698,7 +730,12 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             // Served from the last background walk, never walked here. Until
             // its first page exists the answer is an empty "indexing" one;
             // the page polls until "status" is "ready".
+            // D2: per-request timing (ALBUMEN_HIDE_DIAG_FILE): what each
+            // listing request waited on.
+            let t0 = std::time::Instant::now();
+            let walks = WALKS_RUNNING.load(std::sync::atomic::Ordering::Relaxed);
             let cur = server.library.lock().unwrap().clone();
+            let t_lock = t0.elapsed();
             if http::query_param(&req.target, "refresh").is_some() {
                 refresh_thumbs(server);
             }
@@ -711,12 +748,21 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             let found = server.found.load(std::sync::atomic::Ordering::Relaxed);
             // M7: hides made since the listing apply on this request.
             let cur = cur.map(|v| current_view(server, v));
+            let t_view = t0.elapsed();
             match cur {
                 Some(v) => {
                     if !v.ready {
                         v.found.store(found, std::sync::atomic::Ordering::Relaxed);
                     }
-                    v.respond(&mut stream, page)
+                    let r = v.respond(&mut stream, page);
+                    hide_diag::line(&format!(
+                        "lib_req gen={} walks={walks} lock_ms={:.2} view_ms={:.2} total_ms={:.2}",
+                        v.generation,
+                        t_lock.as_secs_f64() * 1e3,
+                        (t_view - t_lock).as_secs_f64() * 1e3,
+                        t0.elapsed().as_secs_f64() * 1e3
+                    ));
+                    r
                 }
                 None => LibraryView {
                     library: server.config.library.display().to_string(),
@@ -3209,6 +3255,17 @@ mod hide_diag {
                     v.push((what, t.elapsed().as_secs_f64() * 1000.0));
                 }
             });
+        }
+    }
+    pub fn line(l: &str) {
+        let Some(path) = file() else { return };
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{l}");
         }
     }
     pub fn finish(what: &'static str) {
