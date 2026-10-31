@@ -830,11 +830,23 @@ static HIDE_WATCH: Mutex<Option<Vec<String>>> = Mutex::new(None);
 /// exists, else what the first walk found so far.
 fn current_hide_note(library: &Path) -> Option<String> {
     let watch = HIDE_WATCH.lock().unwrap().clone();
+    let serve: Vec<String> = SERVE_NOTES.lock().unwrap().values().cloned().collect();
     if let Some(watch) = watch {
-        let hidden = albumen_ingest::hides::hidden_paths(library, &watch, None);
+        let mut hidden = albumen_ingest::hides::hidden_paths(library, &watch, None);
+        for e in &serve {
+            let tomb = e.split(':').next().unwrap_or(e);
+            if !hidden.errors.iter().any(|h| h.starts_with(tomb)) {
+                hidden.errors.push(e.clone());
+            }
+        }
         *HIDE_NOTE.lock().unwrap() = hide_note(&hidden.errors);
+        return HIDE_NOTE.lock().unwrap().clone();
     }
-    HIDE_NOTE.lock().unwrap().clone()
+    HIDE_NOTE
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(|| hide_note(&serve))
 }
 
 /// `paths` minus what the hide files (receiver tombstones, the family log)
@@ -873,6 +885,15 @@ struct Fresh {
 }
 
 static FRESH: Mutex<Option<Fresh>> = Mutex::new(None);
+
+/// An entry modified this close to a check may change again in the same
+/// mtime tick (coarse filesystem clocks), so it is re-checked next request.
+const RECENT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Hide files `/img` or `/video` could not read (fail closed), by the path
+/// they hide, until a later request reads them; shown in the quiet line.
+static SERVE_NOTES: Mutex<std::collections::BTreeMap<String, String>> =
+    Mutex::new(std::collections::BTreeMap::new());
 
 fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok()
@@ -933,10 +954,18 @@ fn hidden_for(server: &Server, v: &LibraryView) -> Arc<std::collections::HashSet
         });
     }
     let f = fresh.as_mut().unwrap();
+    // Stamped BEFORE the re-read, so a hide written during it differs from
+    // the saved stamp next time. Anything modified within RECENT of now
+    // (the same mtime tick) is not trusted: the stamp is not saved and the
+    // next request re-reads.
+    let checked_at = SystemTime::now();
     let now = stamp(lib, &f.dirs);
     if !f.stamp.is_empty() && now == f.stamp {
         return Arc::clone(&f.hidden);
     }
+    let recent = now
+        .iter()
+        .any(|t| t.is_none_or(|t| checked_at.duration_since(t).map_or(true, |d| d < RECENT)));
     let mut all: Vec<String> = (0..v.len() as u32).map(|i| v.path(i).to_string()).collect();
     let mut unlisted = std::collections::HashSet::new();
     let mut tombs = Vec::new();
@@ -977,7 +1006,7 @@ fn hidden_for(server: &Server, v: &LibraryView) -> Arc<std::collections::HashSet
     // An unhide needs the photo back, which the view no longer holds: list
     // again in the background (hides only ever narrow the view here).
     let unhid = f.hidden.iter().any(|p| !hidden.contains(p));
-    f.stamp = stamp(lib, &f.dirs);
+    f.stamp = if recent { Vec::new() } else { now };
     f.hidden = Arc::new(hidden);
     let out = Arc::clone(&f.hidden);
     drop(fresh);
@@ -1057,11 +1086,18 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
 /// tombstone (read now, fail closed) or the current hide state of the
 /// listing. Before a listing is ready only the tombstone is checked.
 fn hidden_now(server: &Server, rel: &str) -> bool {
-    if !matches!(
-        albumen_ingest::hides::receiver_hidden(&server.config.library, rel),
-        Ok(false)
-    ) {
-        return true;
+    match albumen_ingest::hides::receiver_hidden(&server.config.library, rel) {
+        Ok(h) => {
+            SERVE_NOTES.lock().unwrap().remove(rel);
+            if h {
+                return true;
+            }
+        }
+        Err(err) => {
+            eprintln!("albumen gui: hide: {err}");
+            SERVE_NOTES.lock().unwrap().insert(rel.to_string(), err);
+            return true;
+        }
     }
     let cur = server.library.lock().unwrap().clone();
     match cur {
