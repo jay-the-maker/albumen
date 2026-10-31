@@ -1624,6 +1624,12 @@ static SERVE_NOTES: Mutex<std::collections::BTreeMap<String, String>> =
 /// (see [`content_key`]). No key: no stamp, so the entry is never trusted
 /// and is read again (fail closed, and counted, never a silent fallback).
 fn mtime(p: &Path) -> Option<(SystemTime, u64)> {
+    #[cfg(windows)]
+    if key_kind() == KeyKind::ChangeTime {
+        if let Some(st) = byname::stamp(p) {
+            return Some(st);
+        }
+    }
     let m = std::fs::symlink_metadata(p).ok()?;
     stamp_of(p, &m)
 }
@@ -1831,6 +1837,123 @@ fn coarse_ctime_override() -> bool {
 #[cfg(not(unix))]
 fn ctime_key(_: &std::fs::Metadata) -> Option<u64> {
     None
+}
+
+/// XO 11:02Z (B option 1): a stamp by name, no handle, on Windows 11 24H2 /
+/// Server 2025 and later: `GetFileInformationByName(FileStatBasicByNameInfo)`
+/// gives the same LastWriteTime and ChangeTime the handle path reads (its
+/// own entry, every tombstone still stamped). It is looked up at run time
+/// (kernelbase.dll); missing, or failing for a path (an older filesystem
+/// filter, a reparse point, a zero ChangeTime), the caller takes the
+/// handle path as before. Counts in `/api/found` `hide_stat_byname`.
+/// `ALBUMEN_TEST_STAT_BYNAME=off` (test hooks) forces the handle path.
+mod byname {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static USED: AtomicU64 = AtomicU64::new(0);
+    pub static FELL_BACK: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(windows)]
+    type GetByName = unsafe extern "system" fn(*const u16, i32, *mut core::ffi::c_void, u32) -> i32;
+
+    /// FILE_STAT_BASIC_INFORMATION (winbase.h).
+    #[cfg(windows)]
+    #[repr(C)]
+    #[derive(Default)]
+    struct StatBasic {
+        file_id: i64,
+        creation_time: i64,
+        last_access_time: i64,
+        last_write_time: i64,
+        change_time: i64,
+        allocation_size: i64,
+        end_of_file: i64,
+        file_attributes: u32,
+        reparse_tag: u32,
+        number_of_links: u32,
+        device_type: u32,
+        device_characteristics: u32,
+        reserved: u32,
+        volume_serial_number: i64,
+        file_id_128: [u8; 16],
+    }
+
+    #[cfg(windows)]
+    fn func() -> Option<GetByName> {
+        static F: std::sync::OnceLock<Option<GetByName>> = std::sync::OnceLock::new();
+        *F.get_or_init(|| {
+            #[cfg(any(debug_assertions, feature = "test-hooks"))]
+            if std::env::var("ALBUMEN_TEST_STAT_BYNAME").is_ok_and(|v| v == "off") {
+                return None;
+            }
+            use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+            let name: Vec<u16> = "kernelbase.dll\0".encode_utf16().collect();
+            // SAFETY: a NUL-terminated module name; kernelbase is always loaded.
+            let m = unsafe { GetModuleHandleW(name.as_ptr()) };
+            if m.is_null() {
+                return None;
+            }
+            // SAFETY: a NUL-terminated export name on a loaded module.
+            let f = unsafe { GetProcAddress(m, c"GetFileInformationByName".as_ptr().cast()) }?;
+            // SAFETY: the documented signature of GetFileInformationByName.
+            Some(unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, GetByName>(f)
+            })
+        })
+    }
+
+    pub fn available() -> bool {
+        #[cfg(windows)]
+        return func().is_some();
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// The stamp by name, or None (the caller uses the handle path).
+    #[cfg(windows)]
+    pub fn stamp(p: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+        use std::os::windows::ffi::OsStrExt;
+        const FILE_STAT_BASIC_BY_NAME_INFO: i32 = 3;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let f = func()?;
+        let w: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut b = StatBasic::default();
+        // SAFETY: a NUL-terminated wide path and a buffer of the size passed.
+        let ok = unsafe {
+            f(
+                w.as_ptr(),
+                FILE_STAT_BASIC_BY_NAME_INFO,
+                (&mut b as *mut StatBasic).cast(),
+                std::mem::size_of::<StatBasic>() as u32,
+            )
+        } != 0;
+        if !ok
+            || b.change_time <= 0
+            || b.last_write_time <= 0
+            || b.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            FELL_BACK.fetch_add(1, Relaxed);
+            return None;
+        }
+        // FILETIME ticks (100 ns since 1601) to SystemTime, as std does.
+        const EPOCH_DIFF: i64 = 116_444_736_000_000_000;
+        let t = b.last_write_time - EPOCH_DIFF;
+        let when = if t >= 0 {
+            std::time::UNIX_EPOCH + std::time::Duration::from_nanos(t as u64 * 100)
+        } else {
+            std::time::UNIX_EPOCH - std::time::Duration::from_nanos((-t) as u64 * 100)
+        };
+        USED.fetch_add(1, Relaxed);
+        super::CHANGETIME_KEYS.fetch_add(1, Relaxed);
+        Some((when, b.change_time as u64))
+    }
+
+    pub fn json() -> serde_json::Value {
+        serde_json::json!({
+            "available": available(),
+            "used": USED.load(Relaxed),
+            "fell_back": FELL_BACK.load(Relaxed),
+        })
+    }
 }
 
 /// The NTFS/ReFS ChangeTime (100 ns ticks), from a handle opened for
@@ -4071,6 +4194,7 @@ fn found_json(server: &Server) -> serde_json::Value {
     });
     out["hide_found_note"] = found_note_t::json();
     out["hide_dirst"] = dirst_t::json();
+    out["hide_stat_byname"] = byname::json();
     out["hide_apply_stale"] = APPLY_STALE
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
@@ -4708,6 +4832,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         let open = times(&p);
         let (st_open, v_open) = stamp_and_read_windows(&p).unwrap();
+        let bn_open = byname::stamp(&p);
         drop(w);
         let after = times(&p);
         let (st_after, v_after) = stamp_and_read_windows(&p).unwrap();
@@ -4718,6 +4843,22 @@ mod tests {
             open.0 == before.0,
             open.1 == before.1,
         );
+        // XO 11:02Z (B option 1): the by-name stamp (when the OS has it)
+        // equals the handle path's after close and moves on from before.
+        if byname::available() {
+            let bn_after = byname::stamp(&p);
+            println!(
+                "M7 NTFS_BYNAME available=true before_handle={st_before:?} open_byname={bn_open:?} \
+                 open_handle={st_open:?} after_byname={bn_after:?} after_handle={st_after:?}"
+            );
+            assert_eq!(
+                bn_after, st_after,
+                "by-name stamp differs from the handle's"
+            );
+            assert_ne!(bn_after, st_before, "by-name stamp never moved");
+        } else {
+            println!("M7 NTFS_BYNAME available=false (handle path only)");
+        }
         // The new bytes are read at once, writer open or not.
         assert_eq!(v_open, Ok(true), "the open writer's bytes were not seen");
         assert_eq!(v_after, Ok(true));

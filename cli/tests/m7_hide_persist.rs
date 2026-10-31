@@ -1846,6 +1846,21 @@ fn a_show_tombstone_rewritten_to_hidden_held_open_hides_on_the_next_request() {
         );
     }
     assert!(listed(&addr).iter().any(|p| p == "IMG_0001.JPG"));
+    byname_covered(&addr, "A8_OPEN");
+}
+/// XO 11:02Z (B option 1): on Windows with GetFileInformationByName the
+/// stamps above were taken by name (used > 0), so this A8 test covers that
+/// path; elsewhere (or on an older Windows) it prints available=false and
+/// covers the handle / stat path only.
+fn byname_covered(addr: &str, what: &str) {
+    let b = found_page(addr)["hide_stat_byname"].clone();
+    println!("M7 {what} stat_byname={b}");
+    if b["available"] == true {
+        assert!(
+            b["used"].as_u64() > Some(0),
+            "{what}: by-name stat available but never used: {b}"
+        );
+    }
 }
 /// Product Lead 0905Z D2: the same in a listed folder, the in-place
 /// corruption written through a handle that stays OPEN across the poll
