@@ -67,6 +67,12 @@ fn receiver_tombstones(library: &Path, paths: &[String], out: &mut Hidden) {
     }
 }
 
+/// [`read_tombstone`] for callers that cache per-tombstone state (the gui's
+/// incremental re-check). Err in plain words; callers fail closed.
+pub fn read_receiver_tombstone(path: &Path) -> Result<bool, String> {
+    read_tombstone(path)
+}
+
 /// Whether a receiver tombstone file says hidden. Err (in plain words) when
 /// it cannot be read or parsed; callers fail closed and hide the photo.
 fn read_tombstone(path: &Path) -> Result<bool, String> {

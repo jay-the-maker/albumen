@@ -1,7 +1,15 @@
 # M7 hide refresh: known limits and follow-ups
 
-The GUI re-reads hide files (tombstones) only when a stamp of the listed
-folders changes. Each stamped entry is its mtime plus a change key:
+The GUI keeps hide state per listed folder and per tombstone. Each request
+stamps every listed folder; only a folder whose stamp changed (or was
+stamped within 2 s of its mtime) is listed again, and in it only new or
+changed tombstones are read. In an unchanged folder, only tombstones that
+do not hide right now (`"hidden": false`, or unreadable) are stamped and
+re-read on change; a tombstone that hides is not touched. A request where
+nothing changed reads no tombstone (test
+`an_unchanged_request_reads_no_tombstone`, counter `hide_tombstone_reads`
+in `/api/found`) and serves the already filtered view. Each stamped entry
+is its mtime plus a change key:
 
 - Unix: the ctime (`MetadataExt::ctime`/`ctime_nsec`), which no user call
   can set back, so `rsync -t`/`-a` restoring a folder's old mtime is seen.
@@ -23,10 +31,22 @@ Per request (`/api/library` once the listing is ready, `/img`, `/video`):
 - A new or changed tombstone beside a listed photo, in a folder that holds
   listed photos, and family-log hides: the photo drops out of
   `/api/library` and `/img`/`/video` return 404 on the next request.
-- `/img` and `/video` also read the photo's own tombstone on every request
+- `/img` and `/video` read the photo's own tombstone on every request
   (`receiver_hidden`), so they 404 even before the listing is ready and for
   folders the stamp does not cover. An unreadable one is 404 and named in
-  the quiet line.
+  the quiet line. Outside a family library that, plus a folder that can't
+  be listed, is the whole check (no per-listing work); a family library
+  also asks the cached per-listing state.
+
+Until the folder changes (a rename-replace in it, as albumen's own hide
+and unhide do) or the next listing:
+
+- **In-place rewrite of a tombstone that hides.** Rewriting a
+  `"hidden": true` tombstone in place (same folder entry, no rename) to
+  unhide, or to unreadable bytes, is not read on the next request: hiding
+  ones are not re-stamped in an unchanged folder. Fail-safe direction (the
+  photo stays hidden). `/api/found`'s quiet line still re-reads every
+  watched tombstone per poll, so a broken one is named there at once.
 
 Until the next listing:
 
@@ -56,14 +76,43 @@ Until the next listing:
    `rsync -a` of a tombstone (new, and same-size rewrite) into a running
    GUI's library and checks the next `/api/library`; run the same step on
    the PC run against a real library copy.
-3. **Hashing cost off Unix, not yet measured.** Each stamp check (every
-   `/api/library`, `/img`, `/video` request once ready) reads every
-   watched tombstone in full, up to 16 KiB each: about tombstones x
-   (size) bytes per request, e.g. 10k tombstones of ~60 B is ~0.6 MB, plus
-   one `read_dir` per listed folder. *Follow-up:* the Windows job prints
-   `M7 RECHECK_DIAG` at 50k files with 0, 1k and 10k tombstones; measure
-   there before trusting it at 380k.
-4. **Windows is covered by CI only** (`m7 hide tests (windows-2025)` in
+3. **Re-check cost (measured, box, 100 samples per level, p95 ms).**
+   `m7_recheck_and_img_diagnostics`, `/api/library?offset=0&limit=1` with
+   a folder touched before each request; before = b1b9363, after = the
+   incremental cache.
+
+   | files | tombstones | before unix | after unix | before forced non-unix | after forced non-unix |
+   |---|---|---|---|---|---|
+   | 50k | 0 | 22.4 | 17.3 | 30.5 | 24.0 |
+   | 50k | 1k | 30.0 | 9.3 | 43.8 | 32.3 |
+   | 50k | 10k | 86.3 | 27.8 | 127.5 | 71.4 |
+   | 380k | 0 | 154.6 | 2.7 | 238.4 | 107.3 |
+   | 380k | 1k | 140.2 | 97.7 | 229.3 | 185.1 |
+   | 380k | 10k | 194.1 | 114.5 | 324.3 | 240.6 |
+
+   After, unix p50: 11.9 / 7.9 / 22.4 (50k), 2.4 / 2.5 / 2.9 (380k).
+   Steady state on Unix is ~2-3 ms at 380k. The p95s above 10 ms are the
+   2 s same-tick window: the diagnostic writes the tombstones (every
+   folder) right before sampling, so for 2 s every folder is listed again
+   per request (and at 50k the whole level fits in that window). With the
+   window cut to 50 ms (local experiment, not committed) Unix p95 is
+   0.8 / 1.1 / 1.0 (50k) and 2.8 / 3.1 / 4.1 (380k). *Proposal (not
+   applied):* a shorter same-tick window where the filesystem's ctime
+   resolution is known fine (ext4/xfs/btrfs/tmpfs), 2 s elsewhere.
+   Off Unix the folder key lists every folder per request (~24 ms at 50k,
+   ~107 ms at 380k with no tombstones): the bar is not met there.
+   *Proposal (not applied):* key folders and tombstones on the Windows
+   ChangeTime (`GetFileInformationByHandleEx(FileBasicInfo)` via
+   windows-sys), which no user call sets back, instead of listing and
+   hashing; not compiled here (no Windows target on the box).
+   Windows CI before (50k, p95): 91 / 205 / 1256 ms; after: not yet run.
+4. **`/img` cost (measured, same runs, p95 ms).** Before unix 0.6 / 1.8 /
+   14.2 (50k) and 0.6 / 1.7 / 12.5 (380k); before forced non-unix 13.5 /
+   20.0 / 65.3 (50k) and 96.2 / 101.9 / 163.6 (380k). After, both keys,
+   all levels: 0.2-0.6 (outside a family library `/img` reads only the
+   photo's own tombstone and lists its folder). Windows CI before: 45 /
+   114 / 959 ms; after: not yet run.
+5. **Windows is covered by CI only** (`m7 hide tests (windows-2025)` in
    `.github/workflows/m6-shared-index.yml`). The non-unix key was checked
    on Linux by forcing that cfg path locally; it has not run on Windows
    here.

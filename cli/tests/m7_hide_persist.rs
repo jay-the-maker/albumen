@@ -1289,6 +1289,76 @@ fn a_same_size_tombstone_swap_with_old_mtimes_restored_still_applies() {
     assert_eq!(get(&addr, "/img?p=sub/IMG_0003.JPG").0, 404);
 }
 
+#[test]
+fn an_unchanged_request_reads_no_tombstone() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let sub = library.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    for name in [
+        "sub/IMG_0001.JPG",
+        "sub/IMG_0002.JPG",
+        "sub/IMG_0003.JPG",
+        "IMG_0004.JPG",
+    ] {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-reads-{name}"),
+        )
+        .unwrap();
+    }
+    let hiding = sub.join("IMG_0002.JPG.albumen-tombstone");
+    let showing = sub.join("IMG_0003.JPG.albumen-tombstone");
+    fs::write(&hiding, br#"{"hidden":true,"reason":"hide"}"#).unwrap();
+    fs::write(&showing, br#"{"hidden":false,"reason":"hide"}"#).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    for p in [
+        hiding.as_path(),
+        showing.as_path(),
+        sub.as_path(),
+        library.path(),
+    ] {
+        set_mtime(p, old);
+    }
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    assert_eq!(
+        listed(&addr),
+        ["IMG_0004.JPG", "sub/IMG_0001.JPG", "sub/IMG_0003.JPG"]
+    );
+    let reads = |addr: &str| found_page(addr)["hide_tombstone_reads"].as_u64().unwrap();
+    let before = reads(&addr);
+    assert!(before >= 2, "counter never moved: {before}");
+    for _ in 0..3 {
+        assert_eq!(
+            listed(&addr),
+            ["IMG_0004.JPG", "sub/IMG_0001.JPG", "sub/IMG_0003.JPG"]
+        );
+        get(&addr, "/img?p=sub/IMG_0001.JPG");
+        assert_eq!(get(&addr, "/img?p=sub/IMG_0002.JPG").0, 404);
+    }
+    let after = reads(&addr);
+    println!(
+        "M7 tombstone reads over 3 unchanged listings + 6 /img: {}",
+        after - before
+    );
+    // Off Unix the change key of a non-hiding tombstone is a content hash,
+    // which the counter counts (one per request); on Unix it is a ctime stat.
+    if cfg!(unix) {
+        assert_eq!(after, before, "an unchanged request read tombstones");
+    }
+    // The counter is live: a new hide is read and applies on the next request.
+    fs::write(
+        sub.join("IMG_0001.JPG.albumen-tombstone"),
+        br#"{"hidden":true,"reason":"hide"}"#,
+    )
+    .unwrap();
+    assert_eq!(listed(&addr), ["IMG_0004.JPG", "sub/IMG_0003.JPG"]);
+    assert!(reads(&addr) > after);
+}
+
 fn pct(v: &mut [f64], p: f64) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[((v.len() as f64 * p).ceil() as usize).clamp(1, v.len()) - 1]

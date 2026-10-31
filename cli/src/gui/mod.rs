@@ -872,19 +872,79 @@ fn without_hidden(library: &Path, mut paths: Vec<String>) -> Vec<String> {
     paths
 }
 
-/// M7: hide state as of the last request, for one ready listing. Keyed by
-/// the stat of every directory holding a listed photo (a new tombstone
-/// changes its directory), every watched tombstone (a rewrite in place) and
-/// the family log directories (a new entry), so nothing is re-read until a
-/// file changes. Reads only; nothing in the library is written.
+/// M7: hide state as of the last request, for one ready listing, kept per
+/// directory and per tombstone so a request re-reads only what changed
+/// (XO 02:04Z). Reads only; nothing in the library is written.
 struct Fresh {
     generation: u64,
+    /// Every directory holding a listed photo, and the listed photos in it.
     dirs: Vec<String>,
-    stamp: Vec<Option<(SystemTime, u64)>>,
+    photos_in: Vec<Vec<u32>>,
+    /// The unfiltered view `photos_in` indexes (later views of the same
+    /// generation are filtered copies with fewer entries).
+    base: Arc<LibraryView>,
+    state: Vec<DirState>,
+    /// Family log stamps and what the family log hid as of them.
+    family: Option<FamilyState>,
+    primed: bool,
+    /// Bumped whenever `hidden` changes, so a view already filtered for it
+    /// is served as is.
+    version: u64,
     hidden: Arc<std::collections::HashSet<String>>,
 }
 
+#[derive(Default)]
+struct DirState {
+    stamp: Option<(SystemTime, u64)>,
+    /// False when the stamp was taken within [`RECENT`] of its mtime (the
+    /// same tick) or could not be taken: the folder is listed again.
+    trusted: bool,
+    /// The folder could not be listed: its photos are hidden (fail closed).
+    unlisted: bool,
+    tombs: std::collections::BTreeMap<String, TombState>,
+}
+
+struct TombState {
+    stamp: Option<(SystemTime, u64)>,
+    trusted: bool,
+    verdict: Result<bool, String>,
+}
+
+struct FamilyState {
+    stamp: Vec<Option<(SystemTime, u64)>>,
+    trusted: bool,
+    paths: Vec<String>,
+    errors: Vec<String>,
+}
+
 static FRESH: Mutex<Option<Fresh>> = Mutex::new(None);
+
+/// Tombstone files the request-path hide check has read (or hashed, off
+/// Unix) since start; shown in `/api/found` as `hide_tombstone_reads` so a
+/// test can prove an unchanged request reads none.
+static TOMB_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn trusted_at(st: &Option<(SystemTime, u64)>, checked_at: SystemTime) -> bool {
+    st.is_some_and(|(t, _)| checked_at.duration_since(t).is_ok_and(|d| d >= RECENT))
+}
+
+/// Stamp, then read, one tombstone (stamped BEFORE the read, so a rewrite
+/// during it differs next time).
+fn read_tomb(lib: &Path, rel: &str, checked_at: SystemTime) -> TombState {
+    let path = lib.join(rel);
+    TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stamp = mtime(&path);
+    let verdict = albumen_ingest::hides::read_receiver_tombstone(&path)
+        .map_err(|err| format!("{rel}: {err}; hiding it"));
+    if let Err(e) = &verdict {
+        eprintln!("albumen gui: hide: {}", e.replace('\n', ": "));
+    }
+    TombState {
+        trusted: trusted_at(&stamp, checked_at),
+        stamp,
+        verdict,
+    }
+}
 
 /// An entry modified this close to a check may change again in the same
 /// mtime tick (coarse filesystem clocks), so it is re-checked next request.
@@ -981,101 +1041,190 @@ fn family_logs(library: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn stamp(library: &Path, dirs: &[String]) -> Vec<Option<(SystemTime, u64)>> {
-    let mut st: Vec<Option<(SystemTime, u64)>> =
-        dirs.iter().map(|d| mtime(&library.join(d))).collect();
-    for f in family_logs(library) {
-        st.push(mtime(&f));
-    }
-    for t in HIDE_WATCH.lock().unwrap().clone().unwrap_or_default() {
-        st.push(mtime(&library.join(t)));
-    }
-    st
-}
-
-/// The listed paths hidden right now. Re-evaluated with
-/// [`albumen_ingest::hides::hidden_paths`] whenever the stamp changed:
-/// tombstones are found by listing each photo directory again, the family
-/// log is re-read. Fails closed: a directory that can't be listed hides its
-/// photos, and hide errors keep their photos hidden and set the quiet line.
-fn hidden_for(server: &Server, v: &LibraryView) -> Arc<std::collections::HashSet<String>> {
+/// The listed paths hidden right now, and the hide-state version.
+///
+/// Incremental (XO 02:04Z): each request stats every photo directory (off
+/// Unix: lists it, for the entry count and tombstone names and sizes). A
+/// directory whose stamp changed, or that was stamped in the same tick, is
+/// listed again and only its new or changed tombstones are read. In an
+/// unchanged directory only tombstones that do NOT hide right now
+/// (`"hidden": false`, or unreadable) are stamped (Unix: ctime; elsewhere a
+/// content hash) and re-read on change, so a hide (false -> true, also a
+/// same-size swap with mtimes set back) applies on the next request. A
+/// tombstone that hides is re-read when its directory changes (a rename
+/// replace, as albumen's own hide and unhide do) or at the next listing;
+/// an in-place rewrite to unhide waits for that (docs/m7-hide-limits.md).
+/// Fails closed: a directory that can't be listed hides its photos, and an
+/// unreadable tombstone hides its photo and sets the quiet line.
+fn hidden_for(
+    server: &Server,
+    v: &Arc<LibraryView>,
+) -> (Arc<std::collections::HashSet<String>>, u64) {
     use albumen_ingest::hides::TOMBSTONE_SUFFIX;
     let lib = &server.config.library;
     let mut fresh = FRESH.lock().unwrap();
     if fresh.as_ref().is_none_or(|f| f.generation != v.generation) {
-        let mut dirs: Vec<String> = (0..v.len() as u32)
-            .map(|i| {
-                v.path(i)
-                    .rsplit_once('/')
-                    .map_or("", |(d, _)| d)
-                    .to_string()
-            })
-            .collect();
-        dirs.sort();
-        dirs.dedup();
+        let mut by_dir: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+        for i in 0..v.len() as u32 {
+            let d = v.path(i).rsplit_once('/').map_or("", |(d, _)| d);
+            by_dir.entry(d.to_string()).or_default().push(i);
+        }
+        let version = fresh.as_ref().map_or(0, |f| f.version + 1);
+        let n = by_dir.len();
+        let (dirs, photos_in) = by_dir.into_iter().unzip();
         *fresh = Some(Fresh {
             generation: v.generation,
             dirs,
-            stamp: Vec::new(),
+            photos_in,
+            base: Arc::clone(v),
+            state: (0..n).map(|_| DirState::default()).collect(),
+            family: None,
+            primed: false,
+            version,
             hidden: Default::default(),
         });
     }
     let f = fresh.as_mut().unwrap();
-    // Stamped BEFORE the re-read, so a hide written during it differs from
-    // the saved stamp next time. Anything modified within RECENT of now
-    // (the same mtime tick) is not trusted: the stamp is not saved and the
-    // next request re-reads.
+    let v = Arc::clone(&f.base);
     let checked_at = SystemTime::now();
-    let now = stamp(lib, &f.dirs);
-    if !f.stamp.is_empty() && now == f.stamp {
-        return Arc::clone(&f.hidden);
-    }
-    let recent = now
-        .iter()
-        .any(|t| t.is_none_or(|(t, _)| checked_at.duration_since(t).map_or(true, |d| d < RECENT)));
-    let mut all: Vec<String> = (0..v.len() as u32).map(|i| v.path(i).to_string()).collect();
-    let mut unlisted = std::collections::HashSet::new();
-    let mut tombs = Vec::new();
-    for d in &f.dirs {
+    let mut changed = !f.primed;
+    for (d, ds) in f.dirs.iter().zip(f.state.iter_mut()) {
+        let st = mtime(&lib.join(d));
+        if f.primed && ds.trusted && st.is_some() && st == ds.stamp {
+            for (rel, t) in ds.tombs.iter_mut() {
+                // A tombstone that hides is not re-read in an unchanged
+                // folder (even in its first tick): only an unhide or a note
+                // change could follow, and those wait for a folder change.
+                if t.verdict == Ok(true) {
+                    continue;
+                }
+                if t.trusted && t.stamp.is_some() && mtime(&lib.join(rel)) == t.stamp {
+                    if !cfg!(unix) {
+                        // mtime() hashed the bytes off Unix.
+                        TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    continue;
+                }
+                let new = read_tomb(lib, rel, checked_at);
+                changed |= new.verdict != t.verdict;
+                *t = new;
+            }
+            continue;
+        }
+        // Listed again (stamp taken before the listing). The hidden set
+        // is rebuilt only if a tombstone came, went or reads differently.
+        ds.trusted = trusted_at(&st, checked_at);
+        ds.stamp = st;
+        let mut old = std::mem::take(&mut ds.tombs);
         match std::fs::read_dir(lib.join(d)) {
             Ok(rd) => {
+                changed |= ds.unlisted;
+                ds.unlisted = false;
                 for e in rd.flatten() {
                     let name = e.file_name().to_string_lossy().into_owned();
-                    if name.ends_with(TOMBSTONE_SUFFIX) {
-                        tombs.push(if d.is_empty() {
-                            name
-                        } else {
-                            format!("{d}/{name}")
-                        });
+                    if !name.ends_with(TOMBSTONE_SUFFIX) || name == TOMBSTONE_SUFFIX {
+                        continue;
                     }
+                    let rel = if d.is_empty() {
+                        name
+                    } else {
+                        format!("{d}/{name}")
+                    };
+                    let keep = old.remove(&rel).filter(|t| {
+                        (t.trusted || t.verdict == Ok(true)) && t.stamp.is_some() && {
+                            if !cfg!(unix) {
+                                TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            mtime(&lib.join(&rel)) == t.stamp
+                        }
+                    });
+                    let t = match keep {
+                        Some(t) => t,
+                        None => {
+                            let t = read_tomb(lib, &rel, checked_at);
+                            changed = true;
+                            t
+                        }
+                    };
+                    ds.tombs.insert(rel, t);
                 }
             }
             Err(err) => {
                 eprintln!("albumen gui: hide: can't list {d} ({err}); hiding its photos");
-                unlisted.insert(d.clone());
+                if !ds.unlisted {
+                    changed = true;
+                }
+                ds.unlisted = true;
+                ds.trusted = false;
+            }
+        }
+        changed |= !old.is_empty();
+    }
+    if lib.join("genesis.json").is_file() {
+        let st: Vec<_> = family_logs(lib).iter().map(|p| mtime(p)).collect();
+        let fresh_family = f
+            .family
+            .as_ref()
+            .is_some_and(|fam| fam.trusted && fam.stamp == st);
+        if !fresh_family {
+            let paths: Vec<String> = (0..v.len() as u32).map(|i| v.path(i).to_string()).collect();
+            let h = albumen_ingest::hides::hidden_paths(lib, &paths, None);
+            for err in &h.errors {
+                eprintln!("albumen gui: hide: {}", err.replace('\n', ": "));
+            }
+            let trusted = st.iter().all(|s| trusted_at(s, checked_at));
+            f.family = Some(FamilyState {
+                stamp: st,
+                trusted,
+                paths: h.paths.into_iter().collect(),
+                errors: h.errors,
+            });
+            changed = true;
+        }
+    } else if f.family.take().is_some() {
+        changed = true;
+    }
+    f.primed = true;
+    if !changed {
+        return (Arc::clone(&f.hidden), f.version);
+    }
+    let mut hidden = std::collections::HashSet::new();
+    let mut errors = Vec::new();
+    let mut tombs = Vec::new();
+    for (ds, photos) in f.state.iter().zip(&f.photos_in) {
+        if ds.unlisted {
+            hidden.extend(photos.iter().map(|&i| v.path(i).to_string()));
+        }
+        for (rel, t) in &ds.tombs {
+            tombs.push(rel.clone());
+            let hides = match &t.verdict {
+                Ok(h) => *h,
+                Err(e) => {
+                    errors.push(e.clone());
+                    true
+                }
+            };
+            if hides {
+                if let Some(o) = rel.strip_suffix(TOMBSTONE_SUFFIX) {
+                    hidden.insert(o.to_string());
+                }
             }
         }
     }
-    all.extend(tombs.iter().cloned());
-    let h = albumen_ingest::hides::hidden_paths(lib, &all, None);
-    for err in &h.errors {
-        eprintln!("albumen gui: hide: {}", err.replace('\n', ": "));
+    if let Some(fam) = &f.family {
+        hidden.extend(fam.paths.iter().cloned());
+        errors.extend(fam.errors.iter().cloned());
     }
-    *HIDE_NOTE.lock().unwrap() = hide_note(&h.errors);
+    *HIDE_NOTE.lock().unwrap() = hide_note(&errors);
     *HIDE_WATCH.lock().unwrap() = Some(tombs);
-    let mut hidden: std::collections::HashSet<String> = h.paths.into_iter().collect();
-    for i in 0..v.len() as u32 {
-        let p = v.path(i);
-        if unlisted.contains(p.rsplit_once('/').map_or("", |(d, _)| d)) {
-            hidden.insert(p.to_string());
-        }
-    }
     // An unhide needs the photo back, which the view no longer holds: list
     // again in the background (hides only ever narrow the view here).
     let unhid = f.hidden.iter().any(|p| !hidden.contains(p));
-    f.stamp = if recent { Vec::new() } else { now };
+    if unhid || hidden != *f.hidden {
+        f.version += 1;
+    }
     f.hidden = Arc::new(hidden);
-    let out = Arc::clone(&f.hidden);
+    let out = (Arc::clone(&f.hidden), f.version);
     drop(fresh);
     if unhid {
         if let Some(s) = SERVER.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
@@ -1095,8 +1244,17 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
     if !v.ready {
         return v;
     }
-    let hidden = hidden_for(server, &v);
+    let (hidden, version) = hidden_for(server, &v);
+    {
+        let filtered = FILTERED.lock().unwrap();
+        if filtered.as_ref().is_some_and(|(w, ver)| {
+            *ver == version && w.upgrade().is_some_and(|f| Arc::ptr_eq(&f, &v))
+        }) {
+            return v;
+        }
+    }
     if !(0..v.len() as u32).any(|i| hidden.contains(v.path(i))) {
+        *FILTERED.lock().unwrap() = Some((Arc::downgrade(&v), version));
         return v;
     }
     let mut out = LibraryView {
@@ -1146,8 +1304,13 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
     if lv.as_ref().is_some_and(|c| Arc::ptr_eq(c, &v)) {
         *lv = Some(Arc::clone(&out));
     }
+    *FILTERED.lock().unwrap() = Some((Arc::downgrade(&out), version));
     out
 }
+
+/// The view already filtered for a hide-state version: served as is, with
+/// no per-photo lookup, until the version changes.
+static FILTERED: Mutex<Option<(std::sync::Weak<LibraryView>, u64)>> = Mutex::new(None);
 
 /// Whether `rel` is hidden right now, for `/img` and `/video`: its own
 /// tombstone (read now, fail closed) or the current hide state of the
@@ -1166,9 +1329,17 @@ fn hidden_now(server: &Server, rel: &str) -> bool {
             return true;
         }
     }
+    // Outside a family library only `rel`'s own tombstone (read above) or
+    // a folder that can't be listed can hide it, so the per-listing state
+    // is not needed. A family library asks the full (cached) state.
+    let lib = &server.config.library;
+    if !lib.join("genesis.json").is_file() {
+        let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+        return std::fs::read_dir(lib.join(dir)).is_err();
+    }
     let cur = server.library.lock().unwrap().clone();
     match cur {
-        Some(v) if v.ready => hidden_for(server, &v).contains(rel),
+        Some(v) if v.ready => hidden_for(server, &v).0.contains(rel),
         _ => false,
     }
 }
@@ -1198,6 +1369,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "paths": paths,
         "index_note": server.index_note.lock().unwrap().clone(),
         "hide_note": current_hide_note(&server.config.library),
+        "hide_tombstone_reads": TOMB_READS.load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 

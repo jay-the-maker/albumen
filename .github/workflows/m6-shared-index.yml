@@ -105,7 +105,7 @@ jobs:
           # so they are filtered out here and run in their own steps: 17 + 2 = 19.
           cargo test --release --locked -p albumen --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 17 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
+          grep -Eq '^test result: ok\. 18 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
             || { echo "::error::m7_hide_persist did not run exactly 17 tests green (2 filtered out)"; exit 1; }
 
       - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (print-only)
@@ -119,7 +119,7 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
@@ -198,7 +198,7 @@ jobs:
           # so they are filtered out here and run in their own steps: 17 + 2 = 19.
           cargo test --release --locked -p albumen --test m7_hide_persist -- \
             --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
-          grep -Eq '^test result: ok\. 17 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
+          grep -Eq '^test result: ok\. 18 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
             || { echo "::error::m7_hide_persist did not run exactly 17 tests green (2 filtered out) on Windows"; exit 1; }
 
       - name: M7 re-check and /img diagnostics at 50,000 files (print-only)
@@ -213,7 +213,7 @@ jobs:
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
             cargo test --release --locked -p albumen --test m7_hide_persist \
             m7_recheck_and_img_diagnostics -- --exact --nocapture 2>&1 | tee m7-recheck.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out' m7-recheck.log \
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out' m7-recheck.log \
             || { echo "::error::m7_recheck_and_img_diagnostics did not run exactly 1 test green"; exit 1; }
           n=$(grep -Ec '^M7 RECHECK_DIAG files=' m7-recheck.log || true)
           [ "$n" -ge 3 ] || { echo "::error::expected >= 3 M7 RECHECK_DIAG lines (one per tombstone level), got $n"; exit 1; }
