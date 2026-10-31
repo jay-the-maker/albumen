@@ -465,6 +465,26 @@ jobs:
             echo "M7 MUTATION gui-trust-cache test=$t outcome=FAILED_AS_REQUIRED"
           done
 
+      - name: M7 arm-on-caller mutant (Windows) (a4f1eb0 io_error fix; merge-blocking)
+        # a4f1eb0 starts every ReadDirectoryChangesW on one process-lifetime
+        # thread. ALBUMEN_TEST_MUTATE=gui-arm-on-caller starts it on the
+        # connection thread again; that thread's exit cancels the read, every
+        # poll reports an io_error loss, and each silent-miss test must fail.
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          if ALBUMEN_TEST_MUTATE=gui-arm-on-caller cargo test --release --locked -p albumen --features test-hooks --test m7_hide_persist \
+            m7_silent_miss -- --nocapture --test-threads=1 > m7-arm-mutant.log 2>&1; then
+            echo "::error::mutant gui-arm-on-caller survived on Windows"; exit 1
+          fi
+          grep -Eq '^test result: FAILED\. 0 passed; 3 failed; 0 ignored; 0 measured; 47 filtered out' m7-arm-mutant.log \
+            || { echo "::error::mutant gui-arm-on-caller did not fail exactly the 3 silent-miss tests on Windows"; tail -50 m7-arm-mutant.log; exit 1; }
+          n=$(grep -Ec 'a loss was reported: .*"io_error":[1-9]' m7-arm-mutant.log || true)
+          [ "$n" -eq 3 ] || { echo "::error::expected 3 io_error loss failures under gui-arm-on-caller, got $n"; exit 1; }
+          for t in $(grep -oE '^test m7_silent_miss[a-z0-9_]* \.\.\. FAILED' m7-arm-mutant.log | cut -d' ' -f2); do
+            echo "M7 MUTATION gui-arm-on-caller test=$t outcome=FAILED_AS_REQUIRED"
+          done
+
       - name: M6 paused writer, vanish and mutation tests on Windows (XO 12:47Z; exact counts)
         # The Linux m6 job runs these; m7-windows did not. index_shared has 14
         # tests per OS (one cfg(windows), one cfg(unix)), so --exact leaves
