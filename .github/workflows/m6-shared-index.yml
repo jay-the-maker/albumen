@@ -120,7 +120,7 @@ jobs:
             an_untrusted_real_tombstone_reread_cost_is_measured -- --exact --nocapture 2>&1 | tee m7-untrusted.log
           grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-untrusted.log \
             || { echo "::error::the untrusted re-read test did not run exactly 1 test green"; exit 1; }
-          grep -E 'M7 UNTRUSTED_REREADS tombstones=256 ' m7-untrusted.log \
+          grep -E 'M7 UNTRUSTED_REREADS key=ctime measured=yes tombstones=256 requests=10 reads=2560 ' m7-untrusted.log \
             || { echo "::error::no M7 UNTRUSTED_REREADS line"; exit 1; }
 
       - name: M7 no-flicker acceptance (ctime, coarse 2 s window, worker error, worker panic; merge-blocking)
@@ -303,7 +303,7 @@ jobs:
             an_untrusted_real_tombstone_reread_cost_is_measured -- --exact --nocapture 2>&1 | tee m7-untrusted.log
           grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m7-untrusted.log \
             || { echo "::error::the untrusted re-read test did not run exactly 1 test green"; exit 1; }
-          grep -E 'M7 UNTRUSTED_REREADS tombstones=256 ' m7-untrusted.log \
+          grep -E 'M7 UNTRUSTED_REREADS key=[a-z_]+ measured=(yes|no) tombstones=256 ' m7-untrusted.log \
             || { echo "::error::no M7 UNTRUSTED_REREADS line"; exit 1; }
 
       - name: M7 no-flicker acceptance (changetime, coarse 2 s window, worker error, worker panic; merge-blocking)

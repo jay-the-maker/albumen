@@ -2361,17 +2361,38 @@ fn an_untrusted_real_tombstone_reread_cost_is_measured() {
     }
     let ms = t.elapsed().as_secs_f64() * 1000.0 / 10.0;
     let r1 = reads();
+    let reads = r1 - r0;
+    let key = found_page(&addr)["hide_key"]
+        .as_str()
+        .unwrap_or("?")
+        .to_string();
+    // Product Lead 0943Z D2: on Windows the key is ChangeTime, which a
+    // future mtime cannot future-date, so the tombstones may be trusted
+    // and 0 re-reads there measures nothing. It is printed as
+    // measured=no, never as a pass.
+    let measured = cfg!(unix);
     println!(
-        "M7 UNTRUSTED_REREADS tombstones={N} requests=10 reads={} reads_per_request={:.1} \
-         per_request_ms={ms:.2} max_request_ms={worst:.2}",
-        r1 - r0,
-        (r1 - r0) as f64 / 10.0
+        "M7 UNTRUSTED_REREADS key={key} measured={} tombstones={N} requests=10 reads={reads} \
+         reads_per_request={:.1} per_request_ms={ms:.2} max_request_ms={worst:.2}",
+        if measured { "yes" } else { "no" },
+        reads as f64 / 10.0
     );
-    // The hidden one is not re-read: at most the N untrusted shows each request.
-    assert!(
-        r1 - r0 <= 10 * N as u64,
-        "the hidden tombstone was re-read too"
-    );
+    if measured {
+        // Exactly one re-read per untrusted SHOW per request: a lower bound
+        // (they ARE re-read) and, with each show read once, an exact 0 for
+        // the hidden one.
+        assert_eq!(
+            reads,
+            10 * N as u64,
+            "expected each of the {N} untrusted shows re-read once per request and \
+             the hidden tombstone not at all"
+        );
+    } else {
+        assert!(
+            reads <= 10 * N as u64,
+            "the hidden tombstone was re-read too"
+        );
+    }
 }
 
 /// Product Lead 0912Z D2 (A8 for an open writer): in a listed folder (70
