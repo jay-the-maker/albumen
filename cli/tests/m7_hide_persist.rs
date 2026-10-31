@@ -2202,11 +2202,12 @@ fn m7_recheck_and_img_diagnostics() {
             f["hide_redispatched"],
         );
         // XO 04:41Z (2): what the page's poll costs (status, and the old
-        // /api/found for comparison), bytes and ms per call, 50 calls each.
+        // /api/found, which the page calls on its open path), bytes and ms
+        // per call, 100 calls each (Product Lead 07:03Z: >= 100 samples).
         for path in ["/api/hide-status", "/api/found"] {
             let mut ms = Vec::new();
             let mut bytes = 0;
-            for _ in 0..50 {
+            for _ in 0..100 {
                 let t = Instant::now();
                 let (code, body) = get(&addr, path);
                 ms.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -2214,7 +2215,8 @@ fn m7_recheck_and_img_diagnostics() {
                 bytes = body.len();
             }
             println!(
-                "M7 POLL files={files} path={path} bytes={bytes} p50_ms={:.2} p95_ms={:.2} max_ms={:.2}",
+                "M7 POLL files={files} tombstones={written} samples={} path={path} bytes={bytes} p50_ms={:.2} p95_ms={:.2} max_ms={:.2}",
+                ms.len(),
                 pct(&mut ms.clone(), 0.5),
                 pct(&mut ms.clone(), 0.95),
                 pct(&mut ms.clone(), 1.0)
