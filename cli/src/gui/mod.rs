@@ -1087,6 +1087,39 @@ fn current_hide_note(library: &Path) -> Option<String> {
         .or_else(|| hide_note(&serve))
 }
 
+/// XO 10:55Z (B, Windows `dirst`): the slowest single folder stamp in the
+/// request path's serial folder-stamp pass, which folder it was, and the
+/// folder count of the pass, so a 78 ms `dirst` shows whether one folder's
+/// stat stalled or every stat was slow.
+mod dirst_t {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::sync::Mutex;
+    static ONE_MAX_US: AtomicU64 = AtomicU64::new(0);
+    static ONE_MAX_DIR: Mutex<String> = Mutex::new(String::new());
+    static DIRS: AtomicU64 = AtomicU64::new(0);
+    static OVER_10MS: AtomicU64 = AtomicU64::new(0);
+    pub fn one(d: std::time::Duration, dir: &str) {
+        let us = d.as_micros() as u64;
+        if us > 10_000 {
+            OVER_10MS.fetch_add(1, Relaxed);
+        }
+        if ONE_MAX_US.fetch_max(us, Relaxed) < us {
+            *ONE_MAX_DIR.lock().unwrap() = dir.to_string();
+        }
+    }
+    pub fn pass(n: usize) {
+        DIRS.store(n as u64, Relaxed);
+    }
+    pub fn json() -> serde_json::Value {
+        serde_json::json!({
+            "one_max_ms": ONE_MAX_US.load(Relaxed) as f64 / 1000.0,
+            "one_max_dir": ONE_MAX_DIR.lock().unwrap().clone(),
+            "stats_over_10ms": OVER_10MS.load(Relaxed),
+            "dirs_last_pass": DIRS.load(Relaxed),
+        })
+    }
+}
+
 /// XO FRAGO 10:42Z: where /api/found's hide line spends its time (the
 /// per-tombstone handle stamps vs the rest), last and max, so the Windows
 /// /api/found POLL line can print it beside `hide_lock_hold`.
@@ -2204,8 +2237,18 @@ fn hidden_for(
     changed |= drain_relists(f);
     let req_drain_us = drain_t0.elapsed().as_micros() as u64;
     hide_diag::mark("drain");
-    let sts: Vec<_> = f.dirs.iter().map(|d| stamp_rel(lib, d, false)).collect();
+    let sts: Vec<_> = f
+        .dirs
+        .iter()
+        .map(|d| {
+            let t = std::time::Instant::now();
+            let st = stamp_rel(lib, d, false);
+            dirst_t::one(t.elapsed(), d);
+            st
+        })
+        .collect();
     hide_diag::mark("dirst");
+    dirst_t::pass(f.dirs.len());
     let mut jobs: Vec<RelistJob> = Vec::new();
     // Pending folders that changed after they were handed over: their
     // carried show is checked again below.
@@ -4027,6 +4070,7 @@ fn found_json(server: &Server) -> serde_json::Value {
         "lib_req_last": LIB_REQ_LAST.lock().unwrap().clone(),
     });
     out["hide_found_note"] = found_note_t::json();
+    out["hide_dirst"] = dirst_t::json();
     out["hide_apply_stale"] = APPLY_STALE
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();

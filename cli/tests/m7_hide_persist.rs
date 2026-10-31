@@ -2089,8 +2089,8 @@ fn m7_recheck_and_img_diagnostics() {
             let extra = if path == "/api/found" {
                 let f = found_page(&addr);
                 format!(
-                    " found_note={} hide_lock_hold={}",
-                    f["hide_found_note"], f["hide_lock_hold"]
+                    " found_note={} hide_lock_hold={} dirst={}",
+                    f["hide_found_note"], f["hide_lock_hold"], f["hide_dirst"]
                 )
             } else {
                 String::new()
