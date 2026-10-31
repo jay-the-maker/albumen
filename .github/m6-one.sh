@@ -62,7 +62,11 @@ echo "M6 $tag FREEZE_TICKER max_gap_ms=$gap wall_vs_uptime_skew_ms=$skew"
 # A freeze voids timing only: if the test failed and did not get past its
 # correctness asserts (no "M6 <tag> CORRECTNESS_OK"), that is a real FAIL.
 froze=0
-if grep -q "M6 $tag INVALID" "$log" || awk -v g="$gap" -v s="$skew" 'BEGIN{exit !(g>1000 || s>1000)}'; then
+if [ "$tag" = X2 ]; then
+  # Strict bars (XO 00:18Z): X2 is never INVALID. The ticker is a
+  # diagnostic only; any read-bar breach is a FAIL, never a rerun.
+  echo "M6 X2 STRICT_BARS no INVALID exclusion (ticker diagnostic only: max_gap_ms=$gap skew_ms=$skew)"
+elif grep -q "M6 $tag INVALID" "$log" || awk -v g="$gap" -v s="$skew" 'BEGIN{exit !(g>1000 || s>1000)}'; then
   froze=1
 fi
 if [ "$froze" -eq 1 ] && [ "$rc" -ne 0 ] && ! grep -q "M6 $tag CORRECTNESS_OK" "$log"; then
