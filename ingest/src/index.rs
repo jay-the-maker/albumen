@@ -690,38 +690,222 @@ pub fn check_saved_file(file: &Path) -> Result<u64, String> {
 }
 
 fn check_one(file: &Path) -> Result<u64, String> {
-    let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
-    let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
-    let mut lines = text.split('\n');
-    let _format = lines.next();
-    let root = lines
-        .next()
-        .and_then(|line| line.strip_prefix("root\t"))
-        .ok_or("no root line")?;
+    use std::io::BufRead;
     let damaged = || "damaged or short index file".to_string();
-    if !text.starts_with(&format!("{FORMAT}\n")) {
+    let mut handle = std::fs::File::open(file).map_err(|err| err.to_string())?;
+    // Identity of the file actually opened, so the bytes checked below and
+    // the cache key describe the same inode.
+    let identity = FileIdentity::of(&handle).map_err(|err| err.to_string())?;
+    let mut head = std::io::BufReader::with_capacity(8 * 1024, &mut handle);
+    let mut line = Vec::new();
+    head.read_until(b'\n', &mut line)
+        .map_err(|err| err.to_string())?;
+    if line != format!("{FORMAT}\n").as_bytes() {
+        // A first-format file has no checksum: parse it whole, as before.
+        drop(head);
+        let bytes = std::fs::read(file).map_err(|err| err.to_string())?;
+        let text = std::str::from_utf8(&bytes).map_err(|err| err.to_string())?;
+        let root = text
+            .split('\n')
+            .nth(1)
+            .and_then(|line| line.strip_prefix("root\t"))
+            .ok_or("no root line")?;
         return parse_saved(text, root)
             .map(|saved| saved.generation)
             .ok_or_else(damaged);
     }
-    verify_footer(text).ok_or_else(damaged)
+    line.clear();
+    head.read_until(b'\n', &mut line)
+        .map_err(|err| err.to_string())?;
+    if !line.starts_with(b"root\t") {
+        return Err("no root line".to_string());
+    }
+    line.clear();
+    head.read_until(b'\n', &mut line)
+        .map_err(|err| err.to_string())?;
+    let generation: u64 = std::str::from_utf8(&line)
+        .ok()
+        .and_then(|l| l.strip_suffix('\n'))
+        .and_then(|l| l.strip_prefix("gen\t"))
+        .and_then(|g| g.parse().ok())
+        .ok_or_else(damaged)?;
+    drop(head);
+    if check_cache::hit(file, generation, &identity) {
+        return Ok(generation);
+    }
+    check_cache::count_hash();
+    let checked = verify_footer_streaming(&mut handle, identity.size).ok_or_else(damaged)?;
+    if checked != generation {
+        return Err(damaged());
+    }
+    check_cache::store(file, generation, identity);
+    Ok(generation)
 }
 
-/// The generation of a current-format file whose footer length and checksum
-/// match its body; the directory lines are not parsed.
-fn verify_footer(text: &str) -> Option<u64> {
-    let trimmed = text.strip_suffix('\n')?;
-    let start = trimmed.rfind('\n')? + 1;
-    let mut footer = trimmed[start..].strip_prefix("end\t")?.splitn(2, '\t');
-    let len: usize = footer.next()?.parse().ok()?;
-    let sum = footer.next()?;
-    if len != start || sha256_hex(&text.as_bytes()[..start]) != sum {
+/// Bytes of the file tail read to find the footer line: `end\t` + up to 20
+/// length digits + `\t` + 64 hex digits + `\n` is at most 90 bytes.
+const FOOTER_TAIL: u64 = 128;
+/// Chunk size for hashing a saved file; the body is never held whole.
+const HASH_CHUNK: usize = 64 * 1024;
+
+/// Check the footer of an open current-format file of `size` bytes (its
+/// length is the footer's offset and its SHA-256 covers every byte before it), reading the footer
+/// from the tail and hashing the body in [`HASH_CHUNK`] pieces. Returns the
+/// generation in the hashed header.
+fn verify_footer_streaming(handle: &mut std::fs::File, size: u64) -> Option<u64> {
+    use sha2::Digest;
+    use std::io::{Read, Seek, SeekFrom};
+    let tail_len = size.min(FOOTER_TAIL);
+    let mut tail = vec![0u8; tail_len as usize];
+    handle.seek(SeekFrom::Start(size - tail_len)).ok()?;
+    handle.read_exact(&mut tail).ok()?;
+    let trimmed = tail.strip_suffix(b"\n")?;
+    let footer_at = trimmed.iter().rposition(|&b| b == b'\n')? + 1;
+    let start = size - tail_len + footer_at as u64;
+    let footer = std::str::from_utf8(&trimmed[footer_at..]).ok()?;
+    let mut parts = footer.strip_prefix("end\t")?.splitn(2, '\t');
+    let len: u64 = parts.next()?.parse().ok()?;
+    let sum = parts.next()?;
+    if len != start || sum.len() != 64 {
         return None;
     }
-    let mut lines = text[..start].splitn(4, '\n');
-    lines.next()?;
+    handle.seek(SeekFrom::Start(0)).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    let mut chunk = vec![0u8; HASH_CHUNK];
+    let mut header = Vec::with_capacity(256);
+    let mut left = start;
+    while left > 0 {
+        let want = left.min(HASH_CHUNK as u64) as usize;
+        let got = handle.read(&mut chunk[..want]).ok()?;
+        if got == 0 {
+            return None; // shrank under us
+        }
+        hasher.update(&chunk[..got]);
+        if header.len() < 4096 && header.iter().filter(|&&b| b == b'\n').count() < 3 {
+            header.extend_from_slice(&chunk[..got.min(4096)]);
+        }
+        left -= got as u64;
+    }
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if digest != sum {
+        return None;
+    }
+    // The hashed bytes are exactly what the writer wrote (it renders UTF-8
+    // text), so the header parsed from them is the trusted generation.
+    let header = std::str::from_utf8(&header).ok().or_else(|| {
+        let valid = std::str::from_utf8(&header).err()?.valid_up_to();
+        std::str::from_utf8(&header[..valid]).ok()
+    })?;
+    let mut lines = header.splitn(4, '\n');
+    if lines.next()? != FORMAT {
+        return None;
+    }
     lines.next()?.strip_prefix("root\t")?;
     lines.next()?.strip_prefix("gen\t")?.parse().ok()
+}
+
+/// What makes an opened file the same file as one checked before.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+}
+
+impl FileIdentity {
+    #[cfg(unix)]
+    fn of(handle: &std::fs::File) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = handle.metadata()?;
+        Ok(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            size: meta.size(),
+            mtime_ns: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+            ctime_ns: i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn of(handle: &std::fs::File) -> std::io::Result<Self> {
+        let meta = handle.metadata()?;
+        Ok(Self {
+            dev: 0,
+            ino: 0,
+            size: meta.len(),
+            mtime_ns: 0,
+            ctime_ns: 0,
+        })
+    }
+}
+
+/// Skip re-hashing a slot already verified, but only when nothing about it
+/// can have changed: same path, same generation in its header, and the same
+/// device, inode, size, mtime and ctime. A slot renamed over (new inode) or
+/// rewritten in place (new ctime) is hashed again, so a stale or damaged
+/// file is never served from the cache.
+///
+/// Inode times are kept at the kernel's timestamp granularity, so a rewrite
+/// in the same tick as the check could keep its ctime; a file is only
+/// remembered once its ctime is `MIN_AGE_NS` (2 s) old. Off Unix there
+/// is no inode identity and nothing is cached.
+mod check_cache {
+    use super::FileIdentity;
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    pub(super) const MIN_AGE_NS: i128 = 2_000_000_000;
+
+    static VERIFIED: Mutex<Option<HashMap<PathBuf, (u64, FileIdentity)>>> = Mutex::new(None);
+
+    thread_local! {
+        static HASHES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn count_hash() {
+        HASHES.with(|h| h.set(h.get() + 1));
+    }
+
+    pub(super) fn hashes_on_this_thread() -> u64 {
+        HASHES.with(Cell::get)
+    }
+
+    pub(super) fn hit(file: &Path, generation: u64, identity: &FileIdentity) -> bool {
+        if !cfg!(unix) {
+            return false;
+        }
+        let guard = VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .and_then(|map| map.get(file))
+            .is_some_and(|(g, id)| *g == generation && id == identity)
+    }
+
+    pub(super) fn store(file: &Path, generation: u64, identity: FileIdentity) {
+        let mut guard = VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        let now = i128::from(super::now_ns());
+        if cfg!(unix) && now - identity.ctime_ns >= MIN_AGE_NS {
+            map.insert(file.to_path_buf(), (generation, identity));
+        } else {
+            map.remove(file);
+        }
+    }
+}
+
+/// How many full checksum passes [`check_saved_file`] has made on the
+/// calling thread. For tests that check the verified-slot cache.
+#[doc(hidden)]
+pub fn check_hashes_on_this_thread() -> u64 {
+    check_cache::hashes_on_this_thread()
 }
 
 fn is_index_name(file: &Path) -> bool {
@@ -883,4 +1067,133 @@ fn parse_saved(text: &str, root: &str) -> Option<Saved> {
         dirs.insert(relative, record);
     }
     Some(Saved { generation, dirs })
+}
+
+#[cfg(test)]
+mod check_cache_tests {
+    use super::*;
+
+    fn body(generation: u64, name: &str) -> Vec<u8> {
+        let mut dirs = BTreeMap::new();
+        dirs.insert(
+            String::new(),
+            DirRecord {
+                mtime_ns: 1,
+                listed_ns: 2,
+                entries: vec![(name.to_string(), false)],
+            },
+        );
+        render_saved("/lib", generation, &dirs)
+    }
+
+    /// Write `bytes` as a new inode renamed over `path`, like `save`.
+    fn replace(path: &Path, bytes: &[u8]) {
+        let partial = path.with_extension("partial");
+        std::fs::write(&partial, bytes).unwrap();
+        std::fs::rename(&partial, path).unwrap();
+    }
+
+    /// Check twice after the ctime ages past the cache's minimum, so the
+    /// second check is a cache hit. Returns the hashes the two checks made.
+    fn check_aged(path: &Path) -> (Result<u64, String>, u64) {
+        std::thread::sleep(std::time::Duration::from_millis(2_100));
+        let before = check_hashes_on_this_thread();
+        let first = check_saved_file(path);
+        let second = check_saved_file(path);
+        assert_eq!(first, second);
+        (first, check_hashes_on_this_thread() - before)
+    }
+
+    fn corrupt(mut bytes: Vec<u8>) -> Vec<u8> {
+        let at = bytes.iter().position(|&b| b == b'f').unwrap() + 2;
+        bytes[at] ^= 0x01;
+        bytes
+    }
+
+    #[test]
+    fn unchanged_slot_is_hashed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        replace(&path, &body(5, "one.jpg"));
+        assert_eq!(check_aged(&path), (Ok(5), 1));
+    }
+
+    #[test]
+    fn changed_generation_is_always_rehashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        replace(&path, &body(5, "one.jpg"));
+        assert_eq!(check_aged(&path), (Ok(5), 1));
+        let before = check_hashes_on_this_thread();
+        replace(&path, &body(6, "one.jpg"));
+        assert_eq!(check_saved_file(&path), Ok(6));
+        assert_eq!(check_hashes_on_this_thread() - before, 1);
+    }
+
+    #[test]
+    fn replaced_file_with_same_generation_is_rehashed_or_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        replace(&path, &body(5, "one.jpg"));
+        assert_eq!(check_aged(&path), (Ok(5), 1));
+        // Same generation, different content, new inode: hashed again.
+        let before = check_hashes_on_this_thread();
+        replace(&path, &body(5, "two.jpg"));
+        assert_eq!(check_saved_file(&path), Ok(5));
+        assert_eq!(check_hashes_on_this_thread() - before, 1);
+        // Same generation, damaged, new inode: rejected.
+        assert_eq!(check_aged(&path).0, Ok(5));
+        replace(&path, &corrupt(body(5, "one.jpg")));
+        assert!(check_saved_file(&path).is_err());
+    }
+
+    #[test]
+    fn corrupt_bytes_under_a_new_generation_are_caught() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        replace(&path, &body(5, "one.jpg"));
+        assert_eq!(check_aged(&path), (Ok(5), 1));
+        replace(&path, &corrupt(body(6, "one.jpg")));
+        assert!(check_saved_file(&path).is_err());
+    }
+
+    #[test]
+    fn same_size_rewrite_in_place_is_caught() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        replace(&path, &body(5, "one.jpg"));
+        assert_eq!(check_aged(&path), (Ok(5), 1));
+        // Same inode, same size, same generation: ctime moves, so not a hit.
+        std::fs::write(&path, corrupt(body(5, "one.jpg"))).unwrap();
+        assert!(check_saved_file(&path).is_err());
+    }
+
+    #[test]
+    fn large_body_is_hashed_in_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.idx.a");
+        let mut dirs = BTreeMap::new();
+        dirs.insert(
+            String::new(),
+            DirRecord {
+                mtime_ns: 1,
+                listed_ns: 2,
+                entries: (0..20_000)
+                    .map(|i| (format!("f{i:06}.jpg"), false))
+                    .collect(),
+            },
+        );
+        let bytes = render_saved("/lib", 9, &dirs);
+        assert!(bytes.len() > 3 * HASH_CHUNK);
+        replace(&path, &bytes);
+        assert_eq!(check_saved_file(&path), Ok(9));
+        let mut bad = bytes.clone();
+        let mid = bad.len() / 2;
+        bad[mid] ^= 0x01;
+        replace(&path, &bad);
+        assert!(check_saved_file(&path).is_err());
+        // A truncated file and one with a footer length that lies.
+        replace(&path, &bytes[..bytes.len() - 10]);
+        assert!(check_saved_file(&path).is_err());
+    }
 }

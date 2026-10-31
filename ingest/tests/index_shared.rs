@@ -748,7 +748,13 @@ impl ReadProbe {
         let mut line = [0u8; 256];
         let n = stat.read_at(&mut line, 0).ok()?;
         let text = std::str::from_utf8(&line[..n]).ok()?;
-        let steal_ticks = text.lines().next()?.split_whitespace().nth(8)?.parse().ok()?;
+        let steal_ticks = text
+            .lines()
+            .next()?
+            .split_whitespace()
+            .nth(8)?
+            .parse()
+            .ok()?;
         Some(ProbeSample {
             on_cpu_ns,
             runq_ns,
