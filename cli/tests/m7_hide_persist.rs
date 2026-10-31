@@ -2155,7 +2155,7 @@ fn a_corrupted_tombstone_is_in_the_note_within_one_poll() {
 /// tombstone gets its own handle stamp, and the test proves no listing
 /// stamp is used). The in-place corruption must still be in the note on the next poll.
 #[test]
-fn a_corrupted_tombstone_in_a_listed_folder_is_in_the_note_within_one_poll() {
+fn a_corrupted_tombstone_among_70_shows_is_in_the_note_within_one_poll() {
     corrupted_tombstone_note_case(70, false);
 }
 
@@ -2283,20 +2283,40 @@ fn a_hide_landing_during_a_rewalk_is_absent_from_the_walk_thread_view() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
-    // Let the walk thread finish its pre-filter after publishing.
-    std::thread::sleep(Duration::from_millis(500));
+    // Product Lead 0951Z D1: gated, not timed. Wait until the walk
+    // thread's pre-filter for this generation has finished, then prove each
+    // request was served that cached view (hide_view_same rises), so a late
+    // pre-filter can't let a request build its own view (a false pass).
+    let g1 = gen();
+    let num = |k: &str| found_page(&l.addr)[k].as_u64().unwrap();
+    while num("hide_walk_prefiltered") < g1 {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the walk thread never finished its pre-filter"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let v0 = found_page(&l.addr)["hide_version"].clone();
-    for _ in 0..3 {
+    let same0 = num("hide_view_same");
+    for i in 0..3 {
+        let before = num("hide_view_same");
         assert_eq!(
             set(),
             want,
             "a hide that landed during the re-walk showed in the walk thread's view"
         );
+        assert!(
+            num("hide_view_same") > before,
+            "request {i} was not served the walk thread's cached view"
+        );
     }
     println!(
-        "M7 WALK_PREFILTER generation={} hide_version_before={v0} hide_version_after={}",
+        "M7 WALK_PREFILTER generation={} prefiltered={} hide_version_before={v0} \
+         hide_version_after={} served_cached={}",
         gen(),
-        found_page(&l.addr)["hide_version"]
+        num("hide_walk_prefiltered"),
+        found_page(&l.addr)["hide_version"],
+        num("hide_view_same") - same0
     );
 }
 
@@ -2387,6 +2407,12 @@ fn an_untrusted_real_tombstone_reread_cost_is_measured() {
             "expected each of the {N} untrusted shows re-read once per request and \
              the hidden tombstone not at all"
         );
+        // Product Lead 0951Z D2 / XO 09:53Z (3): the re-read cost bar,
+        // p95 over the 10 requests (= the max at n=10) <= 5 ms at 256.
+        assert!(
+            worst <= 5.0,
+            "untrusted re-read cost over the bar: max_request_ms={worst:.2} (bar 5 ms at {N})"
+        );
     } else {
         assert!(
             reads <= 10 * N as u64,
@@ -2449,9 +2475,9 @@ fn a_show_tombstone_rewritten_to_hidden_held_open_hides_on_the_next_request() {
         !next.iter().any(|p| p == "IMG_0002.JPG"),
         "A8: a show rewritten to hidden (writer open) was served on the next request"
     );
-    assert_ne!(
+    assert_eq!(
         get(&addr, "/img?p=IMG_0002.JPG").0,
-        200,
+        404,
         "A8: /img served it"
     );
     for k in 0..5 {
@@ -2477,7 +2503,7 @@ fn a_show_tombstone_rewritten_to_hidden_held_open_hides_on_the_next_request() {
 /// (NTFS may update a listing's times lazily while a writer holds the
 /// file). The hide note must still name it on the next poll (A8 first).
 #[test]
-fn a_corrupted_tombstone_held_open_in_a_listed_folder_is_in_the_note_within_one_poll() {
+fn a_corrupted_tombstone_held_open_among_70_shows_is_in_the_note_within_one_poll() {
     corrupted_tombstone_note_case(70, true);
 }
 
@@ -2563,6 +2589,21 @@ fn corrupted_tombstone_note_case(extra: usize, hold_open: bool) {
         reads(&polled)
     );
     assert!(note.contains("IMG_0002.JPG.albumen-tombstone"), "{polled}");
+    // Product Lead 0951Z D3: visibility on the same poll, writer still
+    // open in the held case: the corrupted (hidden) photo is not listed
+    // and /img does not serve it.
+    let shown = listed(&addr);
+    assert!(
+        !shown.iter().any(|p| p == "IMG_0002.JPG"),
+        "the corrupted tombstone's photo was listed: {shown:?}"
+    );
+    assert!(shown.iter().any(|p| p == "IMG_0001.JPG"), "{shown:?}");
+    assert_eq!(
+        get(&addr, "/img?p=IMG_0002.JPG").0,
+        404,
+        "/img served the corrupted tombstone's photo"
+    );
+    assert_eq!(get(&addr, "/img?p=IMG_0001.JPG").0, 200);
     if hold_open {
         // Reads may include the writer-open retry; the note is the bar.
         return;

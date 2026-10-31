@@ -567,8 +567,17 @@ fn publish_library(
         if let Some(v) = cur.filter(|v| v.generation == gen) {
             current_view(s, v).count_full_len();
         }
+        // Product Lead 0951Z D1: the walk test waits on this (not a timer)
+        // before it asks for the view the walk thread filtered.
+        WALK_PREFILTERED.store(gen, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+/// The generation whose walk-thread pre-filter last finished
+/// (`hide_walk_prefiltered`).
+static WALK_PREFILTERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Requests served the cached filtered view (`hide_view_same`).
+static VIEW_SAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn run(args: GuiArgs) -> Result<(), IngestError> {
     let max_age_secs = crate::status::parse_max_age(&args.max_age)
@@ -1546,8 +1555,9 @@ fn mtime(p: &Path) -> Option<(SystemTime, u64)> {
     stamp_of(p, &m)
 }
 
-/// The stamp from metadata already in hand (a folder listing's entry: free
-/// on Windows, where a stat costs a file open on NTFS).
+/// The stamp from metadata already in hand: its mtime plus the change key
+/// (ctime on Unix; on Windows the ChangeTime from the file's own handle,
+/// `change_time`, never a folder listing).
 fn stamp_of(p: &Path, m: &std::fs::Metadata) -> Option<(SystemTime, u64)> {
     let key = os_key(p, m)?;
     Some((m.modified().ok()?, key))
@@ -3270,6 +3280,7 @@ fn current_view(server: &Server, v: Arc<LibraryView>) -> Arc<LibraryView> {
             *ver == version && w.upgrade().is_some_and(|f| Arc::ptr_eq(&f, &v))
         }) {
             hide_diag::finish("same");
+            VIEW_SAME.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return v;
         }
     }
@@ -3576,6 +3587,8 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_key": key_kind().name(),
         "hide_changetime_keys": CHANGETIME_KEYS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_dir_listed": DIR_LISTED.load(std::sync::atomic::Ordering::Relaxed),
+        "hide_walk_prefiltered": WALK_PREFILTERED.load(std::sync::atomic::Ordering::SeqCst),
+        "hide_view_same": VIEW_SAME.load(std::sync::atomic::Ordering::SeqCst),
         "hide_stamp_panics": STAMP_PANICS.load(std::sync::atomic::Ordering::Relaxed),
         "hide_req": req_stats::json(),
         "hide_key_failures": KEY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
