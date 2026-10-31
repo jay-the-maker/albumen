@@ -157,13 +157,17 @@ fn gui_and_search_tool_share_one_index() {
             let mut slow_at = Vec::new();
             let start = Instant::now();
             let slots = slot_files(&file);
+            // Opened here, so the fd stays bound to this reader thread's task.
+            let sched_fd = SchedStat::open();
             while !stop.load(Ordering::Relaxed) {
-                // Diagnostics around (not inside) the timed read: this
-                // thread's scheduler counters and both slots' mtimes.
-                let sched0 = thread_schedstat();
-                let mtimes0 = slot_mtimes(&slots);
+                // Before-sample: one pread(2) on a kept-open fd (no open,
+                // close or stat per read). It is the only per-read
+                // diagnostic syscall; slot mtimes are read only after a
+                // slow read, against the read's start time.
+                let sched0 = sched_fd.as_ref().and_then(SchedStat::sample);
                 let t = Instant::now();
-                let wall = std::time::SystemTime::now()
+                let wall_st = std::time::SystemTime::now();
+                let wall = wall_st
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis());
                 let checked = check_saved_file(&file);
@@ -171,9 +175,11 @@ fn gui_and_search_tool_share_one_index() {
                 times_us.push(us);
                 max_read_us.fetch_max(us, Ordering::Relaxed);
                 if us > 100_000 {
+                    // The fail bar: unchanged.
                     slow_reads.fetch_add(1, Ordering::Relaxed);
-                    let sched1 = thread_schedstat();
-                    let mtimes1 = slot_mtimes(&slots);
+                }
+                if us > SLOW_READ_PRINT_US {
+                    let sched1 = sched_fd.as_ref().and_then(SchedStat::sample);
                     slow_at.push(SlowRead {
                         offset_ms: (t - start).as_millis(),
                         wall_ms: wall,
@@ -185,7 +191,7 @@ fn gui_and_search_tool_share_one_index() {
                                 b.2.saturating_sub(a.2),
                             )
                         }),
-                        slot_renamed: mtimes0 != mtimes1,
+                        slot_renamed: slot_saved_since(&slots, wall_st),
                         generation: checked.as_ref().ok().copied(),
                     });
                 }
@@ -323,29 +329,56 @@ fn gui_and_search_tool_share_one_index() {
     }
 }
 
-/// One X2 read over 100 ms, with what it was waiting on.
+/// One X2 read over 50 ms (SLOW_READ_PRINT_US), with what it was waiting on.
 struct SlowRead {
     offset_ms: u128,
     wall_ms: u128,
     us: u64,
     /// Deltas of this thread's (on-CPU ns, runqueue-wait ns, timeslices).
     sched: Option<(u64, u64, u64)>,
-    /// A slot's mtime changed between just before and just after the read,
-    /// i.e. a writer's save landed while it ran.
+    /// A slot's mtime is at or after the read's start: a writer's save
+    /// landed while it ran (or just after).
     slot_renamed: bool,
     generation: Option<u64>,
 }
 
-/// `/proc/thread-self/schedstat` (Linux): on-CPU ns, runqueue-wait ns,
-/// timeslices. None elsewhere.
-fn thread_schedstat() -> Option<(u64, u64, u64)> {
-    let text = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
-    let mut it = text.split_whitespace().map(|v| v.parse::<u64>().ok());
-    Some((it.next()??, it.next()??, it.next()??))
+/// SLOW_READ lines print for reads over 50 ms; only reads over 100 ms
+/// count against the bar.
+const SLOW_READ_PRINT_US: u64 = 50_000;
+
+/// This thread's `/proc/thread-self/schedstat` (Linux), kept open and read
+/// with pread: on-CPU ns, runqueue-wait ns, timeslices. None elsewhere.
+struct SchedStat(std::fs::File);
+
+impl SchedStat {
+    fn open() -> Option<Self> {
+        std::fs::File::open("/proc/thread-self/schedstat").ok().map(Self)
+    }
+
+    #[cfg(unix)]
+    fn sample(&self) -> Option<(u64, u64, u64)> {
+        use std::os::unix::fs::FileExt;
+        let mut buf = [0u8; 96];
+        let n = self.0.read_at(&mut buf, 0).ok()?;
+        let text = std::str::from_utf8(&buf[..n]).ok()?;
+        let mut it = text.split_whitespace().map(|v| v.parse::<u64>().ok());
+        Some((it.next()??, it.next()??, it.next()??))
+    }
+
+    #[cfg(not(unix))]
+    fn sample(&self) -> Option<(u64, u64, u64)> {
+        None
+    }
 }
 
-fn slot_mtimes(slots: &[std::path::PathBuf; 2]) -> [Option<std::time::SystemTime>; 2] {
-    [0, 1].map(|i| std::fs::metadata(&slots[i]).and_then(|m| m.modified()).ok())
+/// A slot's mtime is at or after the read's start: a writer's save landed
+/// during (or just after) the read. Checked only after a slow read.
+fn slot_saved_since(slots: &[std::path::PathBuf; 2], since: std::time::SystemTime) -> bool {
+    slots.iter().any(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .is_ok_and(|m| m >= since)
+    })
 }
 
 /// D1: a writer that loaded the index before another saved merges that save

@@ -10,7 +10,7 @@ name: m6 shared index
 on:
   push:
     branches: [m6-shared-index, m6-x2-slow-read]
-    # m6-x2-slow-read: X2 10k seeds 4-9 on f5b69a7's source, no diagnostics (XO 23:49Z)
+    # m6-x2-slow-read: diagnostics-only rerun of X2 10k seeds 1-3 (XO 23:16Z)
   workflow_dispatch:
     inputs:
       files:
@@ -42,19 +42,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
-        with:
-          # Full history so the f5b69a7 baseline source below is reachable.
-          fetch-depth: 0
-
-      - name: Baseline source (m6-x2-slow-read only)
-        # Builds and tests f5b69a7's tree exactly (no diagnostics, its
-        # m6-one.sh and bars); the workflow itself is this branch's.
-        if: github.ref_name == 'm6-x2-slow-read'
-        run: |
-          git checkout --detach f5b69a7c23aac1f22d95ef98e996eaa07518c8bf
-          test "$(git rev-parse HEAD^{tree})" = 3ace4bc08f4b39c03338c2231cc12e2bf666a084
-          if [ -n "$(git status --porcelain)" ]; then echo "::error::tree not clean"; exit 1; fi
-          echo "M6 BASELINE_SOURCE sha=$(git rev-parse HEAD) tree=$(git rev-parse HEAD^{tree})"
 
       - uses: dtolnay/rust-toolchain@1.99.1
 
@@ -66,11 +53,9 @@ jobs:
           cargo test --release --locked -p albumen-ingest --test index_shared --no-run
           cargo test --release --locked -p albumen --test gui_index_x1 --no-run
 
-      - name: X2 at 10,000 files, seeds 1-3 (read bars; seeds 4-9 on m6-x2-slow-read)
+      - name: X2 at 10,000 files, seeds 1-3 (read bars)
         run: |
-          seeds="1 2 3"
-          [ "$GITHUB_REF_NAME" = m6-x2-slow-read ] && seeds="4 5 6 7 8 9"
-          for seed in $seeds; do
+          for seed in 1 2 3; do
             ALBUMEN_M6_FILES=10000 ALBUMEN_M6_ITERS=1000 ALBUMEN_M6_SEED=$seed ALBUMEN_M6_READ_BARS=1 \
               bash .github/m6-one.sh gui_and_search_tool_share_one_index X2
           done
