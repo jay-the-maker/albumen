@@ -20,6 +20,8 @@ pub static NEW_DIRS: AtomicU64 = AtomicU64::new(0);
 /// Events discarded silently by the blind test hook.
 pub static BLINDED: AtomicU64 = AtomicU64::new(0);
 pub static EVENTS: AtomicU64 = AtomicU64::new(0);
+/// The OS error code of the last `io_error` loss (0: none yet).
+pub static IO_LAST_CODE: AtomicU64 = AtomicU64::new(0);
 
 /// Why each loss was reported (XO 14:14Z: show whether a full stamp
 /// followed a real overflow): counts by reason, in WHY_NAMES order.
@@ -78,7 +80,23 @@ pub fn json() -> serde_json::Value {
         "watches": WATCHES.load(Relaxed),
         "stops": STOPS.load(Relaxed),
         "blinded": BLINDED.load(Relaxed),
+        "io_error_last_code": IO_LAST_CODE.load(Relaxed),
     })
+}
+
+/// `ALBUMEN_TEST_MUTATE=gui-arm-on-caller` (test-hooks/debug only): the
+/// Windows read is started on the calling (connection) thread again, as
+/// before the fix; its exit cancels the read.
+#[allow(dead_code)] // Windows only
+fn arm_on_caller_mutant() -> bool {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    {
+        std::env::var("ALBUMEN_TEST_MUTATE").is_ok_and(|v| v == "gui-arm-on-caller")
+    }
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+    {
+        false
+    }
 }
 
 /// Off with ALBUMEN_FOUND_NOTIFY=0 (every poll a full stamp, as before).
@@ -437,6 +455,65 @@ mod imp {
 
     const BUF_WORDS: usize = 16 * 1024; // 64 KiB, DWORD aligned
 
+    /// One read to start: (handle, buffer, OVERLAPPED) as addresses, and
+    /// where to send whether it started.
+    type Job = (usize, usize, usize, std::sync::mpsc::SyncSender<bool>);
+
+    /// Windows cancels a thread's pending I/O when that thread exits. The
+    /// GUI answers each connection on its own short-lived thread, so a read
+    /// started there was cancelled as soon as the answer was sent and the
+    /// next drain saw ERROR_OPERATION_ABORTED, a reported loss and a full
+    /// stamp on most polls (CI 1471012: io_error 16-18 per silent-miss test,
+    /// 687 at 10k). Every read is started on this one thread instead, which
+    /// lives as long as the process.
+    fn armer() -> Option<&'static std::sync::Mutex<std::sync::mpsc::Sender<Job>>> {
+        static A: std::sync::OnceLock<Option<std::sync::Mutex<std::sync::mpsc::Sender<Job>>>> =
+            std::sync::OnceLock::new();
+        A.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("found-watch-arm".into())
+                .spawn(move || {
+                    for (h, buf, ov, done) in rx {
+                        // SAFETY: the caller holds the watcher (handle, boxed
+                        // buffer and OVERLAPPED) until `done` answers, and
+                        // they outlive the read (Drop cancels and waits).
+                        let ok = unsafe {
+                            start_read(h as HANDLE, buf as *mut u32, ov as *mut OVERLAPPED)
+                        };
+                        let _ = done.send(ok);
+                    }
+                })
+                .ok()
+                .map(|_| std::sync::Mutex::new(tx))
+        })
+        .as_ref()
+    }
+
+    /// SAFETY: `h` an open directory handle (overlapped), `buf` BUF_WORDS
+    /// words and `ov` an idle OVERLAPPED, both valid until the read ends.
+    unsafe fn start_read(h: HANDLE, buf: *mut u32, ov: *mut OVERLAPPED) -> bool {
+        // SAFETY: as the function's contract.
+        unsafe {
+            ReadDirectoryChangesW(
+                h,
+                buf.cast(),
+                (BUF_WORDS * 4) as u32,
+                1,
+                FILE_NOTIFY_CHANGE_FILE_NAME
+                    | FILE_NOTIFY_CHANGE_DIR_NAME
+                    | FILE_NOTIFY_CHANGE_ATTRIBUTES
+                    | FILE_NOTIFY_CHANGE_SIZE
+                    | FILE_NOTIFY_CHANGE_LAST_WRITE
+                    | FILE_NOTIFY_CHANGE_CREATION
+                    | FILE_NOTIFY_CHANGE_SECURITY,
+                std::ptr::null_mut(),
+                ov,
+                None,
+            ) != 0
+        }
+    }
+
     /// One subtree watch on the library root (every folder at once).
     pub struct Watcher {
         h: HANDLE,
@@ -489,27 +566,26 @@ mod imp {
         }
 
         fn arm(&mut self) -> bool {
-            // SAFETY: our handle; the buffer and OVERLAPPED are boxed (fixed
-            // address) and outlive the read (Drop waits for it).
-            let ok = unsafe {
-                ReadDirectoryChangesW(
-                    self.h,
-                    self.buf.as_mut_ptr().cast(),
-                    (BUF_WORDS * 4) as u32,
-                    1,
-                    FILE_NOTIFY_CHANGE_FILE_NAME
-                        | FILE_NOTIFY_CHANGE_DIR_NAME
-                        | FILE_NOTIFY_CHANGE_ATTRIBUTES
-                        | FILE_NOTIFY_CHANGE_SIZE
-                        | FILE_NOTIFY_CHANGE_LAST_WRITE
-                        | FILE_NOTIFY_CHANGE_CREATION
-                        | FILE_NOTIFY_CHANGE_SECURITY,
-                    std::ptr::null_mut(),
-                    &mut *self.ov,
-                    None,
-                )
+            let (h, buf, ov) = (
+                self.h as usize,
+                self.buf.as_mut_ptr() as usize,
+                &mut *self.ov as *mut OVERLAPPED as usize,
+            );
+            let ok = if super::arm_on_caller_mutant() {
+                // SAFETY: our handle; the buffer and OVERLAPPED are boxed
+                // (fixed address) and outlive the read (Drop waits for it).
+                unsafe { start_read(self.h, self.buf.as_mut_ptr(), &mut *self.ov) }
+            } else if let Some(a) = armer() {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let sent = a
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .send((h, buf, ov, tx));
+                sent.is_ok() && rx.recv().unwrap_or(false)
+            } else {
+                false
             };
-            self.armed = ok != 0;
+            self.armed = ok;
             self.armed
         }
 
@@ -538,6 +614,9 @@ mod imp {
                     if unsafe { GetLastError() } == ERROR_IO_INCOMPLETE {
                         break;
                     }
+                    // SAFETY: plain call.
+                    let code = unsafe { GetLastError() };
+                    super::IO_LAST_CODE.store(code as u64, std::sync::atomic::Ordering::Relaxed);
                     self.armed = false;
                     super::why(super::W_IO);
                     return None;
