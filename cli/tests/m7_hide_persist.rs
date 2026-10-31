@@ -1096,11 +1096,23 @@ fn listed(addr: &str) -> Vec<String> {
     p
 }
 
+/// Sets a file's or folder's mtime, as `rsync -t` would. Windows opens a
+/// folder only with FILE_FLAG_BACKUP_SEMANTICS, and set_times needs write
+/// access there.
 fn set_mtime(path: &Path, t: SystemTime) {
-    fs::File::open(path)
-        .unwrap()
-        .set_times(fs::FileTimes::new().set_modified(t))
-        .unwrap();
+    #[cfg(windows)]
+    let f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .unwrap()
+    };
+    #[cfg(not(windows))]
+    let f = fs::File::open(path).unwrap();
+    f.set_times(fs::FileTimes::new().set_modified(t)).unwrap();
 }
 
 /// M7 mtime race (XO 00:18Z): a tombstone written in the same mtime tick as
@@ -1215,5 +1227,49 @@ fn an_rsync_style_hide_with_the_old_folder_mtime_restored_still_applies() {
     let shown = listed(&addr);
     println!("M7 A8 rsync-style next request: {shown:?}");
     assert_eq!(shown, ["sub/IMG_0001.JPG"], "rsync-style hide missed");
+    assert_eq!(get(&addr, "/img?p=sub/IMG_0003.JPG").0, 404);
+}
+
+/// A tombstone rewritten in place at the same size (hidden false -> true),
+/// with its own and its folder's old mtimes set back, as `rsync -a` can,
+/// must still hide the photo on the next request, on every OS.
+#[test]
+fn a_same_size_tombstone_swap_with_old_mtimes_restored_still_applies() {
+    let library = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let sub = library.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    for name in ["sub/IMG_0001.JPG", "sub/IMG_0003.JPG"] {
+        fs::write(
+            library.path().join(name),
+            format!("synthetic-m7-swap-{name}"),
+        )
+        .unwrap();
+    }
+    let tomb = sub.join("IMG_0003.JPG.albumen-tombstone");
+    let shown_body: &[u8] = br#"{"hidden":false,"reason":"hide"}"#;
+    let hidden_body: &[u8] = br#"{"hidden":true ,"reason":"hide"}"#;
+    assert_eq!(shown_body.len(), hidden_body.len());
+    fs::write(&tomb, shown_body).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    for p in [tomb.as_path(), sub.as_path(), library.path()] {
+        set_mtime(p, old);
+    }
+    let (_gui, addr) = start(library.path(), work.path(), index.path(), home.path());
+    ready_found(&addr);
+    assert_eq!(listed(&addr), ["sub/IMG_0001.JPG", "sub/IMG_0003.JPG"]);
+    fs::write(&tomb, hidden_body).unwrap();
+    set_mtime(&tomb, old);
+    set_mtime(&sub, old);
+    assert_eq!(fs::metadata(&tomb).unwrap().len(), shown_body.len() as u64);
+    let shown = listed(&addr);
+    println!("M7 same-size swap next request: {shown:?}");
+    assert_eq!(
+        shown,
+        ["sub/IMG_0001.JPG"],
+        "same-size tombstone swap missed"
+    );
     assert_eq!(get(&addr, "/img?p=sub/IMG_0003.JPG").0, 404);
 }
