@@ -2484,3 +2484,51 @@ fn a_panic_while_stamping_a_tombstone_fails_closed() {
         n(&f, "hide_tombstone_reads")
     );
 }
+/// XO FRAGO 10:42Z (1): the applier stamps outside the lock; a re-walk
+/// (new generation) landing between its stamps and the lock makes it apply
+/// nothing and run again. Hides and synced-in photos race a 300 ms gap: a
+/// hidden photo, once gone, never comes back, and the final set is exact.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+#[test]
+fn m7_applier_stamps_outside_the_lock_race() {
+    let (l, all) = open_small(4, &[], &[("ALBUMEN_TEST_PRESTAMP_DELAY_MS", "300")]);
+    let _ = &l.gui;
+    let mut want: std::collections::HashSet<String> = all.iter().cloned().collect();
+    let mut gone: Vec<String> = Vec::new();
+    for n in 0..6 {
+        let h = format!("d0{}/IMG_000{}.JPG", n % 4, n % 3 + 1);
+        if !want.contains(&h) {
+            continue;
+        }
+        fs::write(
+            l.path().join(format!("{h}.albumen-tombstone")),
+            br#"{"hidden":true,"reason":"hide"}"#,
+        )
+        .unwrap();
+        let s = format!("d0{}/SYNC_{n:04}.JPG", (n + 1) % 4);
+        fs::write(l.path().join(&s), format!("synthetic-m7-race-{s}")).unwrap();
+        want.remove(&h);
+        want.insert(s);
+        l.until(10, "a hidden photo stayed shown", |set| !set.contains(&h));
+        gone.push(h);
+        for _ in 0..8 {
+            let set = l.set();
+            for g in &gone {
+                assert!(!set.contains(g), "{g} came back after it was hidden");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    l.until(10, "final set", |set| *set == want);
+    let f = settled(&l.addr);
+    assert_eq!(l.set(), want, "final set");
+    println!(
+        "M7 APPLY_RACE hidden={} apply_stale={}",
+        gone.len(),
+        f["hide_apply_stale"]
+    );
+    assert!(
+        f["hide_apply_stale"].as_u64() >= Some(1),
+        "the race never hit the stale-generation path: {f}"
+    );
+}

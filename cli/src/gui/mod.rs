@@ -2110,6 +2110,20 @@ fn hidden_for(
     }
     hide_diag::mark("init");
     let f = fresh.as_mut().unwrap();
+    if APPLY_ONLY.get()
+        && PRESTAMP.with(|p| {
+            p.borrow()
+                .as_ref()
+                .is_some_and(|p| p.generation != f.generation)
+        })
+    {
+        // The stamps are for another generation: apply nothing and run
+        // again with new ones (fail closed; never a mismatched view).
+        PRESTAMP.with(|p| *p.borrow_mut() = None);
+        APPLY_STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        APPLY_AGAIN.store(true, std::sync::atomic::Ordering::SeqCst);
+        return (Arc::clone(&f.hidden), f.version);
+    }
     let v = Arc::clone(&f.base);
     let checked_at = SystemTime::now();
     let primed = f.primed;
@@ -2125,10 +2139,7 @@ fn hidden_for(
                 if t.verdict == Ok(true) {
                     continue;
                 }
-                if t.trusted && t.stamp.is_some() && {
-                    tomb_io();
-                    mtime(&lib.join(rel)) == t.stamp
-                } {
+                if t.trusted && t.stamp.is_some() && stamp_rel(lib, rel, true) == t.stamp {
                     if key_kind() == KeyKind::Portable {
                         // mtime() hashed the bytes off Unix.
                         TOMB_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2157,7 +2168,7 @@ fn hidden_for(
     changed |= drain_relists(f);
     let req_drain_us = drain_t0.elapsed().as_micros() as u64;
     hide_diag::mark("drain");
-    let sts: Vec<_> = f.dirs.iter().map(|d| mtime(&lib.join(d))).collect();
+    let sts: Vec<_> = f.dirs.iter().map(|d| stamp_rel(lib, d, false)).collect();
     hide_diag::mark("dirst");
     let mut jobs: Vec<RelistJob> = Vec::new();
     // Pending folders that changed after they were handed over: their
@@ -2182,7 +2193,7 @@ fn hidden_for(
                 let still: Vec<_> = ds
                     .sent_shows
                     .iter()
-                    .filter(|(rel, s)| mtime(&lib.join(rel)) == Some(*s))
+                    .filter(|(rel, s)| stamp_rel(lib, rel, false) == Some(*s))
                     .cloned()
                     .collect();
                 if still.len() != ds.sent_shows.len() {
@@ -3034,7 +3045,14 @@ fn apply_landed() {
         };
         let cur = s.library.lock().unwrap().clone();
         if let Some(v) = cur {
+            // XO FRAGO 10:42Z (1): the applier's tombstone and folder stamps
+            // are taken here, outside FRESH; under the lock it uses them
+            // only if the generation is unchanged (else it applies nothing
+            // and runs again: fail closed, no mismatched view is built).
+            let pre = prestamp_snapshot(&s.config.library);
+            PRESTAMP.with(|p| *p.borrow_mut() = pre);
             current_view(&s, v);
+            PRESTAMP.with(|p| *p.borrow_mut() = None);
         }
     }
     APPLYING.store(false, SeqCst);
@@ -3042,6 +3060,66 @@ fn apply_landed() {
     if APPLY_AGAIN.load(SeqCst) {
         apply_landed();
     }
+}
+
+/// Stamps the applier took outside FRESH for one pass: the generation they
+/// belong to and each folder's and tombstone's stamp by relative path.
+struct Prestamp {
+    generation: u64,
+    stamps: std::collections::HashMap<String, Option<(SystemTime, u64)>>,
+}
+
+thread_local! {
+    static PRESTAMP: std::cell::RefCell<Option<Prestamp>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Applier passes that found the generation changed between their stamps
+/// and the lock and applied nothing (`hide_apply_stale`).
+static APPLY_STALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What the applier will stamp, listed under FRESH (no I/O), then stamped
+/// with the lock released, on the hide threads. None before the first
+/// request built the state.
+fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
+    let (generation, rels) = {
+        let fresh = FRESH.lock().unwrap();
+        let f = fresh.as_ref()?;
+        let mut rels: Vec<String> = f.dirs.clone();
+        for ds in &f.state {
+            rels.extend(ds.sent_shows.iter().map(|(r, _)| r.clone()));
+            rels.extend(
+                ds.tombs
+                    .iter()
+                    .filter(|(_, t)| t.verdict != Ok(true) && t.trusted && t.stamp.is_some())
+                    .map(|(r, _)| r.clone()),
+            );
+        }
+        (f.generation, rels)
+    };
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Some(ms) = std::env::var_os("ALBUMEN_TEST_PRESTAMP_DELAY_MS") {
+        let ms: u64 = ms.to_string_lossy().parse().unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    let stamps = par_map(&rels, |r| mtime(&lib.join(r)), |_| None);
+    Some(Prestamp {
+        generation,
+        stamps: rels.into_iter().zip(stamps).collect(),
+    })
+}
+
+/// A stamp for `rel`: the applier's pre-taken one when it has it, else
+/// one stat now (counted in the lock-held I/O).
+fn stamp_rel(lib: &Path, rel: &str, count: bool) -> Option<(SystemTime, u64)> {
+    if let Some(st) =
+        PRESTAMP.with(|p| p.borrow().as_ref().and_then(|p| p.stamps.get(rel).copied()))
+    {
+        return st;
+    }
+    if count {
+        tomb_io();
+    }
+    mtime(&lib.join(rel))
 }
 
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3869,7 +3947,7 @@ fn hide_status_json(server: &Server) -> serde_json::Value {
 
 fn found_json(server: &Server) -> serde_json::Value {
     let paths = server.found_paths.lock().unwrap().clone();
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "found": server.found.load(std::sync::atomic::Ordering::Relaxed),
         "paths": paths,
         "index_note": server.index_note.lock().unwrap().clone(),
@@ -3911,7 +3989,11 @@ fn found_json(server: &Server) -> serde_json::Value {
         "hide_build_max_ms": BUILD_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0,
         "hide_inline": inline_t::json(),
         "lib_req_last": LIB_REQ_LAST.lock().unwrap().clone(),
-    })
+    });
+    out["hide_apply_stale"] = APPLY_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out
 }
 
 /// [`library_files_indexed`] with an explicit index directory.
