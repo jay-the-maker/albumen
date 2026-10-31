@@ -682,6 +682,15 @@ fn serve(listener: TcpListener, config: Config, port: u16) {
         );
     }
     refresh_thumbs(&server);
+    // XO 14:22Z (c): when serving ends the found watcher is stopped (no
+    // process-wide watch left alive past the library).
+    struct StopWatch;
+    impl Drop for StopWatch {
+        fn drop(&mut self) {
+            found_watch::stop();
+        }
+    }
+    let _stop = StopWatch;
     for stream in listener.incoming().flatten() {
         let server = Arc::clone(&server);
         std::thread::spawn(move || {
@@ -3629,13 +3638,129 @@ static APPLY_GAVE_UP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// What the applier will stamp, listed under FRESH (no I/O), then stamped
 /// with the lock released, on the hide threads. None before the first
 /// request built the state.
+/// XO 14:00Z: the request prestamp's stamps without a stat per path on
+/// every request (Windows 8855148: prestamp 207 ms at 1k right after a
+/// sync, one `byname::stamp` per tombstone and folder). A path is stamped
+/// again only if a change notification (`found_watch`, the same watcher
+/// as the note) named it, its folder or any folder above it, or if its
+/// cached stamp is missing, absent or inside the trust window; every
+/// other path keeps the stamp cached at its last stat. Any doubt (no
+/// watcher, overflow, a folder watched only from now, a lost folder,
+/// ALBUMEN_FOUND_NOTIFY=0) stamps everything, as before. One prestamp at
+/// a time, so a drained notification is never skipped by a request
+/// reusing a cache another request has not updated yet.
+fn prestamp_stamps(
+    lib: &Path,
+    rels: Vec<String>,
+    n_dirs: usize,
+    taken_at: SystemTime,
+) -> std::collections::HashMap<String, Option<(SystemTime, u64)>> {
+    type Cache = std::collections::HashMap<String, Option<(SystemTime, u64)>>;
+    static RUN: Mutex<Option<(std::path::PathBuf, Cache)>> = Mutex::new(None);
+    let mut run = RUN.lock().unwrap_or_else(|e| e.into_inner());
+    if run.as_ref().is_none_or(|(l, _)| l != lib) {
+        *run = Some((lib.to_path_buf(), Cache::new()));
+    }
+    let cache = &mut run.as_mut().unwrap().1;
+    let parent = |r: &str| r.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+    // Every followed folder (`rels[..n_dirs]`) and every folder above a
+    // followed path is watched: an entry made or removed in a folder moves
+    // its stamp, and a folder's own change is seen in it and its parent.
+    let mut dirs: std::collections::HashSet<String> =
+        rels[..n_dirs.min(rels.len())].iter().cloned().collect();
+    // A followed file (tombstone or shown photo) is in a followed folder;
+    // its parent is checked anyway, and only folders walk up.
+    for r in rels[n_dirs.min(rels.len())..].iter() {
+        let d = parent(r);
+        if !dirs.contains(&d) {
+            dirs.insert(d);
+        }
+    }
+    for r in rels[..n_dirs.min(rels.len())].iter() {
+        let mut d = parent(r);
+        loop {
+            dirs.insert(d.clone());
+            if d.is_empty() {
+                break;
+            }
+            d = parent(&d);
+        }
+    }
+    let dset: std::collections::HashSet<&str> = dirs.iter().map(String::as_str).collect();
+    let dirty = found_watch::take_req(lib, &dset);
+    let todo: Vec<bool> = rels
+        .iter()
+        .map(|r| {
+            let Some(dirty) = &dirty else { return true };
+            // Untrusted, absent or never stamped: stat again (as before).
+            let Some(Some(st)) = cache.get(r) else {
+                return true;
+            };
+            if !trusted_at(&Some(*st), taken_at) {
+                return true;
+            }
+            // The path, anything in it (a folder), or a folder above it.
+            if dirty.contains(r.as_str()) {
+                return true;
+            }
+            let mut d = r.as_str();
+            while let Some((up, _)) = d.rsplit_once('/') {
+                if dirty.contains(up) {
+                    return true;
+                }
+                d = up;
+            }
+            false
+        })
+        .collect();
+    let todo: Vec<bool> = match &dirty {
+        // A folder's stamp moves when an entry in it changes.
+        Some(d) if !d.is_empty() => {
+            let touched: std::collections::HashSet<String> = d.iter().map(|p| parent(p)).collect();
+            rels.iter()
+                .zip(todo)
+                .map(|(r, t)| t || touched.contains(r.as_str()))
+                .collect()
+        }
+        _ => todo,
+    };
+    let picked: Vec<&String> = rels
+        .iter()
+        .zip(&todo)
+        .filter(|(_, t)| **t)
+        .map(|(r, _)| r)
+        .collect();
+    PRESTAMP_STATS.fetch_add(picked.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    PRESTAMP_REUSED.fetch_add(
+        (rels.len() - picked.len()) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let got = par_map(&picked, |r| mtime(&lib.join(r)), |_| None);
+    if dirty.is_none() {
+        cache.clear();
+    }
+    for (r, st) in picked.iter().zip(got) {
+        cache.insert((*r).clone(), st);
+    }
+    rels.into_iter()
+        .map(|r| {
+            let st = cache.get(&r).copied().flatten();
+            (r, st)
+        })
+        .collect()
+}
+
+/// Paths the request prestamp stat'ed / reused from its cache.
+static PRESTAMP_STATS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRESTAMP_REUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
     type Pend = (
         String,
         Option<(SystemTime, u64)>,
         Arc<Vec<(String, (SystemTime, u64))>>,
     );
-    let (generation, rels, pend, cand) = {
+    let (generation, rels, pend, cand, n_dirs) = {
         let fresh = FRESH.lock().unwrap();
         let f = fresh.as_ref()?;
         let mut rels: Vec<String> = f.dirs.clone();
@@ -3660,7 +3785,7 @@ fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
                     .map(|(r, _)| r.clone()),
             );
         }
-        (f.generation, rels, pend, cand)
+        (f.generation, rels, pend, cand, f.dirs.len())
     };
     #[cfg(any(debug_assertions, feature = "test-hooks"))]
     if let Some(ms) = std::env::var_os("ALBUMEN_TEST_PRESTAMP_DELAY_MS") {
@@ -3668,9 +3793,7 @@ fn prestamp_snapshot(lib: &Path) -> Option<Prestamp> {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     let taken_at = SystemTime::now();
-    let stamps = par_map(&rels, |r| mtime(&lib.join(r)), |_| None);
-    let stamps: std::collections::HashMap<String, Option<(SystemTime, u64)>> =
-        rels.into_iter().zip(stamps).collect();
+    let stamps = prestamp_stamps(lib, rels, n_dirs, taken_at);
     // The same "moved" test hidden_for applies under the lock, on these
     // stamps; each moved folder is listed here (fail closed: a listing
     // error withholds the folder, a mismatch under the lock lists inline).
@@ -4765,6 +4888,12 @@ fn found_json(server: &Server) -> serde_json::Value {
     out["hide_dirst"] = dirst_t::json();
     out["hide_stat_byname"] = byname::json();
     out["hide_req_retake_stale"] = REQ_RETAKE_STALE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_prestamp_stats"] = PRESTAMP_STATS
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .into();
+    out["hide_prestamp_reused"] = PRESTAMP_REUSED
         .load(std::sync::atomic::Ordering::Relaxed)
         .into();
     out["hide_gen_backwards"] = GEN_BACKWARDS

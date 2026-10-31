@@ -255,6 +255,11 @@ jobs:
           # 50k with 10k tombstones, >= 100 samples, p95 <= 20 ms, max <= 100 ms.
           awk '/^M7 POLL files=50000 tombstones=10000 samples=[0-9]+ path=\/api\/found /{n++; for(i=1;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]} if(v["samples"]<100||v["p95_ms"]>20||v["max_ms"]>100) bad++} END{exit !(n>=1 && bad==0)}' m7-found-50k.log \
             || { echo "::error::/api/found bar missed (50k/10k: samples >= 100, p95 <= 20 ms, max <= 100 ms)"; grep -E '^M7 POLL' m7-found-50k.log; exit 1; }
+          # XO 14:22Z (b): the 10k-tombstone /api/found poll used notifications
+          # (incr > 0) and lost none (lost == 0).
+          grep -E '^M7 POLL .*tombstones=10000 .*path=/api/found .*watch=\{[^ ]*"incr":[1-9][0-9]*[,}][^ ]*' m7-found-50k.log \
+            | grep -Eq 'watch=\{[^ ]*"lost":0[,}]' \
+            || { echo "::error::found watcher at 10k: need incr>0 and lost==0"; grep -E '^M7 POLL .*path=/api/found' m7-found-50k.log; exit 1; }
           bash .github/m7-recheck-bar.sh m7-found-50k.log
 
       - name: S3 export against MinIO (scripts/with-minio.sh)
@@ -395,8 +400,9 @@ jobs:
             || { echo "::error::paused_writer_takes_the_newer_listing did not run exactly 1 green (13 filtered)"; exit 1; }
           cargo test --release --locked -p albumen-ingest --features test-hooks --lib index::vanish_tests \
             -- --nocapture 2>&1 | tee m6w-vanish.log
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out' m6w-vanish.log \
-            || { echo "::error::index::vanish_tests did not run exactly 1 green"; exit 1; }
+          # XO 14:22Z (g): exact count (3d785bd Windows: 123 filtered out).
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out' m6w-vanish.log \
+            || { echo "::error::index::vanish_tests did not run exactly 1 green (123 filtered)"; exit 1; }
           bad=0; caught=0
           for pair in \
             "ours-always paused_writer_takes_the_newer_listing" \
@@ -573,6 +579,11 @@ jobs:
           # 50k with 10k tombstones, >= 100 samples, p95 <= 20 ms, max <= 100 ms.
           awk '/^M7 POLL files=50000 tombstones=10000 samples=[0-9]+ path=\/api\/found /{n++; for(i=1;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]} if(v["samples"]<100||v["p95_ms"]>20||v["max_ms"]>100) bad++} END{exit !(n>=1 && bad==0)}' m7-recheck.log \
             || { echo "::error::/api/found bar missed (50k/10k: samples >= 100, p95 <= 20 ms, max <= 100 ms)"; grep -E '^M7 POLL' m7-recheck.log; exit 1; }
+          # XO 14:22Z (b): the 10k-tombstone /api/found poll used notifications
+          # (incr > 0) and lost none (lost == 0).
+          grep -E '^M7 POLL .*tombstones=10000 .*path=/api/found .*watch=\{[^ ]*"incr":[1-9][0-9]*[,}][^ ]*' m7-recheck.log \
+            | grep -Eq 'watch=\{[^ ]*"lost":0[,}]' \
+            || { echo "::error::found watcher at 10k: need incr>0 and lost==0"; grep -E '^M7 POLL .*path=/api/found' m7-recheck.log; exit 1; }
           # XO 03:36Z (3): withheld time (server, and as the page sees it
           # through its 200 ms poll) p95 and max <= 1 s, checked by the bar
           # script on every M7 WITHHELD line (no line fails it).

@@ -2307,8 +2307,12 @@ fn m7_recheck_and_img_diagnostics() {
             let extra = if path == "/api/found" {
                 let f = found_page(&addr);
                 format!(
-                    " found_note={} hide_lock_hold={} dirst={}",
-                    f["hide_found_note"], f["hide_lock_hold"], f["hide_dirst"]
+                    " found_note={} hide_lock_hold={} dirst={} watch={}",
+                    f["hide_found_note"],
+                    f["hide_lock_hold"],
+                    f["hide_dirst"],
+                    // XO 14:22Z (b): watcher counters (CI: incr > 0, lost == 0 at 10k).
+                    f["hide_found_notify"]
                 )
             } else {
                 String::new()
@@ -2365,6 +2369,27 @@ fn m7_recheck_and_img_diagnostics() {
                 Some(m) if m.4 >= x.4 => Some(m),
                 _ => Some(x),
             });
+        // XO 14:22Z (d): watcher idle cost. No thread: over 2 s with no
+        // request it runs nothing (takes unchanged); per poll it costs the
+        // drain (take_us / takes).
+        let w0 = found_page(&addr)["hide_found_notify"].clone();
+        std::thread::sleep(Duration::from_secs(2));
+        let w1 = found_page(&addr)["hide_found_notify"].clone();
+        let g = |w: &serde_json::Value, k: &str| w[k].as_u64().unwrap_or(0);
+        println!(
+            "M7 WATCH_IDLE files={files} tombstones={written} idle_ms=2000 takes_idle={} \
+             take_us_per_poll={:.1} watches={} stops={}",
+            // w1's own page poll is one take.
+            g(&w1, "takes").saturating_sub(g(&w0, "takes") + 1),
+            g(&w1, "take_us") as f64 / g(&w1, "takes").max(1) as f64,
+            g(&w1, "watches"),
+            g(&w1, "stops")
+        );
+        // XO 14:00Z: show whether the request prestamp reused cached stamps.
+        println!(
+            "M7 RECHECK_PRESTAMP files={files} tombstones={written} stats={} reused={} req_incr={} req_full={}",
+            f["hide_prestamp_stats"], f["hide_prestamp_reused"], f["hide_found_notify"]["req_incr"], f["hide_found_notify"]["req_full"]
+        );
         println!(
             "M7 RECHECK_SYNC_REQ files={files} tombstones={written} samples={} lock_wait_max_ms={:.2} \
              drain_max_ms={:.2} tomb_io_max={} keep_dirs_max={} slowest_ms={} slowest_lock_wait_ms={} \

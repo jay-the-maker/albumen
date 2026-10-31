@@ -19,7 +19,48 @@ pub static UNAVAILABLE: AtomicU64 = AtomicU64::new(0);
 pub static NEW_DIRS: AtomicU64 = AtomicU64::new(0);
 pub static EVENTS: AtomicU64 = AtomicU64::new(0);
 
+/// Why each loss was reported (XO 14:14Z: show whether a full stamp
+/// followed a real overflow): counts by reason, in WHY_NAMES order.
+pub static WHY: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+const WHY_NAMES: [&str; 9] = [
+    "overflow",
+    "short_record",
+    "io_error",
+    "arm_failed",
+    "read_error",
+    "self_gone",
+    "unknown_wd",
+    "watch_failed",
+    "drop_hook",
+];
+pub(crate) fn why(i: usize) {
+    WHY[i].fetch_add(1, Relaxed);
+}
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_OVERFLOW: usize = 0;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_SHORT: usize = 1;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_IO: usize = 2;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_ARM: usize = 3;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_READ: usize = 4;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_GONE: usize = 5;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_WD: usize = 6;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_WATCH: usize = 7;
+#[allow(dead_code)] // each target uses its own reasons
+pub(crate) const W_DROP: usize = 8;
+
 pub fn json() -> serde_json::Value {
+    let why: serde_json::Map<_, _> = WHY_NAMES
+        .iter()
+        .zip(&WHY)
+        .map(|(n, c)| (n.to_string(), c.load(Relaxed).into()))
+        .collect();
     serde_json::json!({
         "incr": INCR.load(Relaxed),
         "full": FULL.load(Relaxed),
@@ -27,6 +68,13 @@ pub fn json() -> serde_json::Value {
         "unavailable": UNAVAILABLE.load(Relaxed),
         "new_dirs": NEW_DIRS.load(Relaxed),
         "events": EVENTS.load(Relaxed),
+        "req_incr": REQ_INCR.load(Relaxed),
+        "req_full": REQ_FULL.load(Relaxed),
+        "lost_why": why,
+        "takes": TAKES.load(Relaxed),
+        "take_us": TAKE_NS.load(Relaxed) / 1000,
+        "watches": WATCHES.load(Relaxed),
+        "stops": STOPS.load(Relaxed),
     })
 }
 
@@ -47,12 +95,66 @@ fn drop_hook(_: &Path) -> bool {
     false
 }
 
-static W: Mutex<Option<(std::path::PathBuf, Option<imp::Watcher>)>> = Mutex::new(None);
+/// The consumers of one watcher: the `/api/found` note and the request
+/// prestamp (XO 14:00Z). Every drain feeds both; any doubt marks both
+/// full, so neither can miss an event the other drained.
+pub const NOTE: usize = 0;
+pub const REQ: usize = 1;
+
+#[derive(Default)]
+struct Sink {
+    dirty: HashSet<String>,
+    full: bool,
+}
+
+struct State {
+    lib: std::path::PathBuf,
+    w: Option<imp::Watcher>,
+    sinks: [Sink; 2],
+}
+
+static W: Mutex<Option<State>> = Mutex::new(None);
+
+/// XO 14:22Z (c): the library is closed (the server stops serving it):
+/// drop the watcher (its handle, buffer and watches) and both consumers'
+/// state. The next take for any library starts over with full stamps.
+pub fn stop() {
+    let old = W.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if old.is_some() {
+        STOPS.fetch_add(1, Relaxed);
+    }
+    drop(old);
+}
+
+/// XO 14:22Z (d) (DESIGN_PHILOSOPHY:63, measured): the watcher has no
+/// thread; between polls it costs no CPU, only kernel state (Windows one
+/// 64 KiB buffer, Linux one inotify watch per folder). Each poll pays the
+/// drain, timed here.
+pub static TAKE_NS: AtomicU64 = AtomicU64::new(0);
+pub static TAKES: AtomicU64 = AtomicU64::new(0);
+pub static STOPS: AtomicU64 = AtomicU64::new(0);
+pub static WATCHES: AtomicU64 = AtomicU64::new(0);
+
+struct Timed(std::time::Instant);
+impl Drop for Timed {
+    fn drop(&mut self) {
+        TAKE_NS.fetch_add(self.0.elapsed().as_nanos() as u64, Relaxed);
+        TAKES.fetch_add(1, Relaxed);
+    }
+}
+
+/// Polls of the request prestamp answered from notifications / in full.
+pub static REQ_INCR: AtomicU64 = AtomicU64::new(0);
+pub static REQ_FULL: AtomicU64 = AtomicU64::new(0);
 
 /// The tombstones (library-relative, `/`) changed since the last call, or
 /// None: stamp them all. `watch` is every tombstone the note follows.
 pub fn take(lib: &Path, watch: &[String]) -> Option<HashSet<String>> {
-    let r = take_inner(lib, watch);
+    let dirs: HashSet<&str> = watch
+        .iter()
+        .map(|r| r.rsplit_once('/').map_or("", |(d, _)| d))
+        .collect();
+    let r = take_inner(lib, &dirs, NOTE);
     if r.is_some() {
         INCR.fetch_add(1, Relaxed);
     } else {
@@ -61,51 +163,82 @@ pub fn take(lib: &Path, watch: &[String]) -> Option<HashSet<String>> {
     r
 }
 
-fn take_inner(lib: &Path, watch: &[String]) -> Option<HashSet<String>> {
+/// For the request prestamp: the paths changed (each library-relative,
+/// `/`, a folder's own change as its bare path) since its last call, or
+/// None: stamp everything. `dirs` must hold the parent of every path the
+/// caller follows (and of every folder it stamps).
+pub fn take_req(lib: &Path, dirs: &HashSet<&str>) -> Option<HashSet<String>> {
+    let r = take_inner(lib, dirs, REQ);
+    if r.is_some() {
+        REQ_INCR.fetch_add(1, Relaxed);
+    } else {
+        REQ_FULL.fetch_add(1, Relaxed);
+    }
+    r
+}
+
+fn take_inner(lib: &Path, dirs: &HashSet<&str>, who: usize) -> Option<HashSet<String>> {
+    let _t = Timed(std::time::Instant::now());
     if !on() {
         UNAVAILABLE.fetch_add(1, Relaxed);
         return None;
     }
     let mut g = W.lock().unwrap_or_else(|e| e.into_inner());
-    if g.as_ref().is_none_or(|(l, _)| l != lib) {
-        *g = Some((lib.to_path_buf(), imp::Watcher::new(lib)));
-        // Nothing before the watch was seen: this poll stamps everything.
-        if let Some((_, Some(w))) = g.as_mut() {
-            let dirs: HashSet<&str> = watch
-                .iter()
-                .map(|r| r.rsplit_once('/').map_or("", |(d, _)| d))
-                .collect();
-            w.ensure(lib, &dirs);
-            NEW_DIRS.fetch_add(1, Relaxed);
-            return None;
+    if g.as_ref().is_none_or(|s| s.lib != lib) {
+        // Nothing before the watch was seen: both consumers stamp all.
+        let mut st = State {
+            lib: lib.to_path_buf(),
+            w: imp::Watcher::new(lib),
+            sinks: Default::default(),
+        };
+        for k in &mut st.sinks {
+            k.full = true;
         }
+        if let Some(w) = st.w.as_mut() {
+            w.ensure(lib, dirs);
+            NEW_DIRS.fetch_add(1, Relaxed);
+        }
+        *g = Some(st);
     }
-    let (_, w) = g.as_mut()?;
-    let Some(w) = w.as_mut() else {
+    let st = g.as_mut()?;
+    let Some(w) = st.w.as_mut() else {
         UNAVAILABLE.fetch_add(1, Relaxed);
         return None;
     };
-    let dirs: HashSet<&str> = watch
-        .iter()
-        .map(|r| r.rsplit_once('/').map_or("", |(d, _)| d))
-        .collect();
     // A folder watched only from now: its earlier changes were never seen.
-    let new = w.ensure(lib, &dirs);
+    let new = w.ensure(lib, dirs);
+    WATCHES.store(w.count(), Relaxed);
     let got = w.drain();
     let dropped = drop_hook(lib);
+    if dropped {
+        why(W_DROP);
+    }
     match got {
         Some(paths) if !new && !dropped => {
             EVENTS.fetch_add(paths.len() as u64, Relaxed);
-            Some(paths)
+            for k in &mut st.sinks {
+                k.dirty.extend(paths.iter().cloned());
+            }
         }
         Some(_) if new && !dropped => {
             NEW_DIRS.fetch_add(1, Relaxed);
-            None
+            for k in &mut st.sinks {
+                k.full = true;
+            }
         }
         _ => {
             LOST.fetch_add(1, Relaxed);
-            None
+            for k in &mut st.sinks {
+                k.full = true;
+            }
         }
+    }
+    let k = &mut st.sinks[who];
+    let dirty = std::mem::take(&mut k.dirty);
+    if std::mem::take(&mut k.full) {
+        None
+    } else {
+        Some(dirty)
     }
 }
 
@@ -186,10 +319,17 @@ mod imp {
             new
         }
 
+        pub fn count(&self) -> u64 {
+            self.wds.len() as u64
+        }
+
         /// Every queued event, as library-relative paths; None if any was lost.
         pub fn drain(&mut self) -> Option<HashSet<String>> {
             let mut out = HashSet::new();
             let mut lost = std::mem::take(&mut self.broken);
+            if lost {
+                super::why(super::W_WATCH);
+            }
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 // SAFETY: reading into our own buffer.
@@ -197,6 +337,7 @@ mod imp {
                 if n < 0 {
                     let e = std::io::Error::last_os_error();
                     if e.kind() != std::io::ErrorKind::WouldBlock {
+                        super::why(super::W_READ);
                         lost = true;
                     }
                     break;
@@ -216,6 +357,7 @@ mod imp {
                     let name = name.split(|&b| b == 0).next().unwrap_or(&[]);
                     off += head + len;
                     if ev.mask & libc::IN_Q_OVERFLOW != 0 {
+                        super::why(super::W_OVERFLOW);
                         lost = true;
                         continue;
                     }
@@ -225,16 +367,21 @@ mod imp {
                         if let Some(d) = self.wds.remove(&ev.wd) {
                             self.dirs.remove(&d);
                         }
+                        super::why(super::W_GONE);
                         lost = true;
                         continue;
                     }
                     let Some(d) = self.wds.get(&ev.wd) else {
+                        super::why(super::W_WD);
                         lost = true;
                         continue;
                     };
                     let name = String::from_utf8_lossy(name);
                     out.insert(if d.is_empty() {
                         name.into_owned()
+                    } else if name.is_empty() {
+                        // The watched folder itself (IN_ATTRIB on it).
+                        d.clone()
                     } else {
                         format!("{d}/{name}")
                     });
@@ -339,6 +486,10 @@ mod imp {
             self.armed
         }
 
+        pub fn count(&self) -> u64 {
+            1
+        }
+
         /// The subtree watch covers every folder from the start.
         pub fn ensure(&mut self, _lib: &Path, _dirs: &HashSet<&str>) -> bool {
             false
@@ -349,6 +500,7 @@ mod imp {
             let mut lost = false;
             loop {
                 if !self.armed && !self.arm() {
+                    super::why(super::W_ARM);
                     return None;
                 }
                 let mut n = 0u32;
@@ -360,17 +512,25 @@ mod imp {
                         break;
                     }
                     self.armed = false;
+                    super::why(super::W_IO);
                     return None;
                 }
                 self.armed = false;
                 if n == 0 {
                     // The system's buffer overflowed: changes were lost.
+                    super::why(super::W_OVERFLOW);
                     lost = true;
                 } else {
                     let bytes: &[u8] = bytemuck_bytes(&self.buf[..], n as usize);
                     let mut off = 0usize;
                     loop {
-                        if off + std::mem::size_of::<FILE_NOTIFY_INFORMATION>() > bytes.len() {
+                        // The fixed header is 12 bytes (offset of FileName); a
+                        // record with a one-character name is 14 bytes, shorter
+                        // than size_of (16, padded), and was wrongly reported
+                        // lost. Bound the header and the name separately.
+                        const HEAD: usize = std::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
+                        if off + HEAD > bytes.len() {
+                            super::why(super::W_SHORT);
                             lost = true;
                             break;
                         }
@@ -379,6 +539,11 @@ mod imp {
                             &*(bytes.as_ptr().add(off) as *const FILE_NOTIFY_INFORMATION)
                         };
                         let len = fni.FileNameLength as usize / 2;
+                        if off + HEAD + len * 2 > bytes.len() {
+                            super::why(super::W_SHORT);
+                            lost = true;
+                            break;
+                        }
                         // SAFETY: FileName holds `len` UTF-16 units inside the buffer.
                         let name =
                             unsafe { std::slice::from_raw_parts(fni.FileName.as_ptr(), len) };
@@ -390,6 +555,7 @@ mod imp {
                     }
                 }
                 if !self.arm() {
+                    super::why(super::W_ARM);
                     return None;
                 }
             }
@@ -410,6 +576,9 @@ mod imp {
     use std::path::Path;
     pub struct Watcher;
     impl Watcher {
+        pub fn count(&self) -> u64 {
+            0
+        }
         pub fn new(_: &Path) -> Option<Self> {
             None
         }
