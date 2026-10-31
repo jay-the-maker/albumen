@@ -448,6 +448,21 @@ fn peak_rss_kb(pid: u32) -> Option<u64> {
     }
 }
 
+/// A scale or diagnostic test with its env var missing skips locally, but
+/// FAILS in CI (`CI=true` or `GITHUB_ACTIONS=true`) so a skip never counts
+/// as a pass there.
+fn skip_or_fail_in_ci(what: &str, var: &str) {
+    let ci = ["CI", "GITHUB_ACTIONS"].iter().any(|k| {
+        std::env::var(k)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
+    if ci {
+        panic!("{what}: {var} is unset or not a number in CI; a skip must not count as a pass");
+    }
+    println!("{what} skipped: set {var} (e.g. 380000)");
+}
+
 /// Scale run. Off unless `ALBUMEN_M7_FILES` is set (garage PC, ubuntu CI
 /// via .github/m6-one.sh). The bars are asserted only with
 /// `ALBUMEN_M7_BARS=1`: box timing is not evidence.
@@ -457,7 +472,7 @@ fn hidden_photos_stay_hidden_at_scale() {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
     else {
-        println!("M7 scale skipped: set ALBUMEN_M7_FILES (e.g. 380000)");
+        skip_or_fail_in_ci("M7 scale", "ALBUMEN_M7_FILES");
         return;
     };
     let bars = std::env::var("ALBUMEN_M7_BARS").as_deref() == Ok("1");
@@ -1295,7 +1310,7 @@ fn m7_recheck_and_img_diagnostics() {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
     else {
-        println!("M7 RECHECK_DIAG skipped: set ALBUMEN_M7_RECHECK_FILES (e.g. 380000)");
+        skip_or_fail_in_ci("M7 RECHECK_DIAG", "ALBUMEN_M7_RECHECK_FILES");
         return;
     };
     let levels: Vec<usize> = std::env::var("ALBUMEN_M7_RECHECK_TOMBSTONES")
@@ -1386,6 +1401,12 @@ fn m7_recheck_and_img_diagnostics() {
             pct(&mut img.clone(), 0.95),
             recheck.len(),
             img.len(),
+        );
+        // Criterion 2 (planned, not asserted): binds only after 100+ CI
+        // samples per level at 380k on Linux and Windows.
+        println!(
+            "M7 RECHECK_DIAG_PLANNED_BAR tombstones={written} recheck_p95_ms<=10 img_p95_ms<=20 \
+             (pending 100 samples; print-only)"
         );
     }
 }

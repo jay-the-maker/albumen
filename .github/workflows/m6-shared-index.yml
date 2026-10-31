@@ -83,6 +83,8 @@ jobs:
             bash .github/m6-one.sh readers_keep_answering_while_one_writer_saves X1
 
       - name: M7 hidden photos stay hidden at ${{ github.event.inputs.files || '380000' }} files (M6 bars)
+        # Runs even when an X2/X3/X1 step failed; the job still fails on them.
+        if: always()
         run: |
           # hide_poll_ms (one /api/found hide-line refresh after the listing) is
           # PROVISIONAL and non-blocking: printed ("M7 HIDE_POLL_BAR PROVISIONAL
@@ -94,16 +96,20 @@ jobs:
             bash .github/m6-one.sh hidden_photos_stay_hidden_at_scale M7
 
       - name: The rest of the M7 hide tests
+        if: always()
         run: |
           set -o pipefail
-          cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
-          # 19 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
-          grep -Eq '^test result: ok\. 19 passed; 0 failed; 0 ignored' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 19 tests green"; exit 1; }
+          # The scale and RECHECK_DIAG tests fail in CI without their env var,
+          # so they are filtered out here and run in their own steps: 17 + 2 = 19.
+          cargo test --release --locked -p albumen --test m7_hide_persist -- \
+            --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
+          grep -Eq '^test result: ok\. 17 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 17 tests green (2 filtered out)"; exit 1; }
 
       - name: M7 re-check and /img diagnostics at ${{ github.event.inputs.files || '380000' }} files (print-only)
         # Non-blocking: prints "M7 RECHECK_DIAG tombstones=N ... recheck_p95_ms ... img_p95_ms"
         # for 0, 1k and 10k tombstones; nothing is gated on it.
+        if: always()
         continue-on-error: true
         run: |
           ALBUMEN_M7_RECHECK_FILES=$FILES ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
@@ -180,15 +186,18 @@ jobs:
       - name: M7 hide tests
         run: |
           set -o pipefail
-          cargo test --release --locked -p albumen --test m7_hide_persist 2>&1 | tee m7.log
-          # 19 tests: the scale test skips here (no ALBUMEN_M7_FILES) and counts as passed.
-          grep -Eq '^test result: ok\. 19 passed; 0 failed; 0 ignored' m7.log \
-            || { echo "::error::m7_hide_persist did not run exactly 19 tests green on Windows"; exit 1; }
+          # The scale and RECHECK_DIAG tests fail in CI without their env var,
+          # so they are filtered out here and run in their own steps: 17 + 2 = 19.
+          cargo test --release --locked -p albumen --test m7_hide_persist -- \
+            --skip hidden_photos_stay_hidden_at_scale --skip m7_recheck_and_img_diagnostics 2>&1 | tee m7.log
+          grep -Eq '^test result: ok\. 17 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out' m7.log \
+            || { echo "::error::m7_hide_persist did not run exactly 17 tests green (2 filtered out) on Windows"; exit 1; }
 
       - name: M7 re-check and /img diagnostics at 50,000 files (print-only)
         # Non-blocking. 50k, not 380k: writing and listing 380k files on a
         # Windows runner would take a large share of the job; 50k keeps it
         # short. Raise it once a run shows the time.
+        if: always()
         continue-on-error: true
         run: |
           ALBUMEN_M7_RECHECK_FILES=50000 ALBUMEN_M7_RECHECK_TOMBSTONES=0,1000,10000 \
