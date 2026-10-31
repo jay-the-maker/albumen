@@ -3031,8 +3031,10 @@ fn silent_miss(case: &str) {
     let f = found_page(&l.addr);
     let w1 = f["hide_found_notify"].clone();
     let g = |w: &serde_json::Value, k: &str| w[k].as_u64().unwrap_or(0);
+    // Leading newline: under --nocapture the harness has already printed
+    // "test <name> ... " on this line, and CI counts lines starting "M7".
     println!(
-        "M7 SILENT_MISS case={case} ms={ms:.1} h_shown={h_shown} blinded={} lost={}->{} reverified={} \
+        "\nM7 SILENT_MISS case={case} ms={ms:.1} h_shown={h_shown} blinded={} lost={}->{} reverified={} \
          prestamp_stats={} folder_stats={}",
         g(&w1, "blinded"),
         g(&w0, "lost"),
