@@ -139,6 +139,25 @@ albumen verify-manifest --manifest ./library-manifest.txt --against s3://my-buck
 
 The manifest lists SHA-256, byte length, and the relative path. `verify-manifest` hashes the destination bytes and fails if a file is missing, extra, or different. S3 uses the same `ALBUMEN_S3_*` variables as ingest.
 
+### Try it on the fixtures
+
+From the repository root, with `albumen` and the pinned ExifTool on your `PATH`,
+try a complete scan, export, and verification using the included CC0 fixtures:
+
+```bash
+demo_dir="$(mktemp -d)"
+albumen scan fixtures --manifest "$demo_dir/scan.jsonl"
+albumen verify-manifest --manifest "$demo_dir/scan.jsonl" --against fixtures
+albumen export --from fixtures --to "$demo_dir/export" --apply
+albumen verify-manifest --manifest "$demo_dir/export/ALBUMEN-MANIFEST.txt" --against "$demo_dir/export"
+```
+
+The scan records the source checksums, and each verification command confirms
+that the files still match its manifest. `--apply` is needed to perform the
+export; without it, `albumen export` only prints a plan. Both manifests and
+the exported copies are written under the temporary directory, never into
+`fixtures/`.
+
 ### Shell completions
 
 `albumen completions <bash|zsh|fish|powershell|elvish>` prints a completion script to stdout and writes nothing else. Install it once per shell:
