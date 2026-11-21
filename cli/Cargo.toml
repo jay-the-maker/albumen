@@ -20,12 +20,14 @@ albumen-ingest = { path = "../ingest" }
 albumen-receive = { path = "../receive" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
 serde_json = "1"
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(unix)'.dev-dependencies]

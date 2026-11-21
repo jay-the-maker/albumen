@@ -19,6 +19,7 @@ use albumen_ingest::{IngestError, SourceRoot};
 
 pub mod demo;
 pub mod http;
+pub mod thumb;
 
 const PAGE: &str = include_str!("page.html");
 
@@ -44,6 +45,15 @@ pub struct Config {
     /// Folder for scan manifests and backup state, outside the library.
     pub state: PathBuf,
     pub max_age_secs: u64,
+    /// True for `--demo`: the page shows the synthetic-images banner.
+    pub demo: bool,
+}
+
+impl Config {
+    /// Grid previews are cached here, inside the work folder only.
+    pub fn thumbs(&self) -> PathBuf {
+        self.state.join("thumbs")
+    }
 }
 
 #[derive(Default)]
@@ -77,6 +87,7 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
             card: Some(built.card),
             state: built.state,
             max_age_secs,
+            demo: true,
         }
     } else {
         let library = args.library.clone().ok_or_else(|| IngestError::Usage {
@@ -92,9 +103,14 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
             card: args.card.clone(),
             state,
             max_age_secs,
+            demo: false,
         }
     };
-    SourceRoot::open(&config.library)?.refuse_destination(&config.state)?;
+    // Scan state and the preview cache both live in the work folder, and
+    // neither may be inside (or hard-linked into) the library.
+    let thumbs = config.thumbs();
+    SourceRoot::open(&config.library)?.refuse_destinations(&[&config.state, &thumbs])?;
+    thumb::refuse_cache_in_library(&config.library, &thumbs)?;
     albumen_ingest::dest::create_dir_all(&config.state)?;
     let listener = TcpListener::bind(("127.0.0.1", args.port))
         .map_err(|err| io_err(Path::new("127.0.0.1"), err))?;
@@ -176,7 +192,8 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             PAGE.as_bytes(),
         ),
         ("GET", "/api/library") => {
-            let body = library_json(&server.config.library).to_string();
+            let scan = server.last_scan.lock().unwrap().clone();
+            let body = library_view(&server.config, scan.as_deref()).to_string();
             http::respond(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/status") => {
@@ -188,6 +205,22 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
             match read_image(&server.config.library, &rel) {
                 Some((bytes, mime)) => http::respond(&mut stream, 200, mime, &bytes),
                 None => http::respond(&mut stream, 404, "text/plain", b"not found"),
+            }
+        }
+        ("GET", "/thumb") => {
+            let rel = http::query_param(&req.target, "p").unwrap_or_default();
+            if image_path(&server.config.library, &rel).is_none() {
+                return http::respond(&mut stream, 404, "text/plain", b"not found");
+            }
+            match thumb::preview(&server.config.library, &server.config.thumbs(), &rel) {
+                Ok(thumb::Preview::Jpeg(bytes)) => {
+                    http::respond(&mut stream, 200, "image/jpeg", &bytes)
+                }
+                Ok(thumb::Preview::Original) => match read_image(&server.config.library, &rel) {
+                    Some((bytes, mime)) => http::respond(&mut stream, 200, mime, &bytes),
+                    None => http::respond(&mut stream, 404, "text/plain", b"not found"),
+                },
+                Err(message) => http::respond(&mut stream, 422, "text/plain", message.as_bytes()),
             }
         }
         ("GET", "/api/proof") => {
@@ -280,31 +313,159 @@ fn is_image(rel: &str) -> bool {
     ext.is_some_and(|e| IMAGE_EXT.contains(&e.as_str()))
 }
 
-pub fn library_json(library: &Path) -> serde_json::Value {
-    let files = library_files(library);
-    let mut bytes = 0u64;
-    let items: Vec<serde_json::Value> = files
-        .iter()
-        .filter(|rel| is_image(rel))
-        .map(|rel| {
-            let len = std::fs::metadata(library.join(rel))
-                .map(|m| m.len())
-                .unwrap_or(0);
-            bytes += len;
-            serde_json::json!({ "path": rel, "bytes": len })
+/// What a scan manifest knows about one file.
+struct Scanned {
+    bytes: u64,
+    /// ExifTool's DateTimeOriginal, or the next best date tag, as ISO.
+    date: Option<String>,
+    camera: Option<String>,
+}
+
+/// Capture dates and cameras from a scan manifest, by path.
+fn scan_dates(manifest: &Path) -> std::collections::HashMap<String, Scanned> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(file) = std::fs::File::open(manifest) else {
+        return out;
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let (Some(path), Some(bytes)) = (v["path"].as_str(), v["bytes"].as_u64()) else {
+            continue;
+        };
+        let date = v["metadata"]["captured"].as_str().and_then(exif_date);
+        let camera = v["metadata"]["camera"].as_str().map(str::to_string);
+        out.insert(
+            path.to_string(),
+            Scanned {
+                bytes,
+                date,
+                camera,
+            },
+        );
+    }
+    out
+}
+
+/// `2015:06:20 14:33:10[+offset]` as `2015-06-20T14:33:10`. Zero dates
+/// (`0000:00:00`) give `None`.
+pub fn exif_date(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    if b.len() < 19
+        || !b[..19].iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b':' || *c == b'-',
+            10 => *c == b' ' || *c == b'T',
+            13 | 16 => *c == b':',
+            _ => c.is_ascii_digit(),
         })
-        .collect();
+        || text.starts_with("0000")
+    {
+        return None;
+    }
+    Some(format!(
+        "{}-{}-{}T{}",
+        &text[0..4],
+        &text[5..7],
+        &text[8..10],
+        &text[11..19]
+    ))
+}
+
+/// A file time as `YYYY-MM-DDTHH:MM:SSZ` (UTC). The page shows it in the
+/// viewer's local time.
+fn utc_iso(t: SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil from days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// The newest `scan-*.jsonl` in the work folder, if any.
+fn newest_scan(state: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(state)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("scan-") && n.ends_with(".jsonl")
+        })
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .map(|e| e.path())
+}
+
+/// What the photos screen shows: the library summary and every grid image
+/// with its folder and date. Dates come from the last scan's EXIF when it
+/// has one (`date_source: "photo"`), else the file's modified time
+/// (`"file"`). Read-only: the library is only listed and stat-ed.
+pub fn library_view(config: &Config, scan: Option<&Path>) -> serde_json::Value {
+    let library = &config.library;
+    let files = library_files(library);
+    let manifest = scan
+        .map(Path::to_path_buf)
+        .or_else(|| newest_scan(&config.state));
+    let dates = manifest.as_deref().map(scan_dates).unwrap_or_default();
+    let mut all_bytes = 0u64;
+    let mut image_bytes = 0u64;
+    let mut items = Vec::new();
+    for rel in &files {
+        let meta = std::fs::symlink_metadata(library.join(rel)).ok();
+        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        all_bytes += len;
+        if !is_image(rel) {
+            continue;
+        }
+        image_bytes += len;
+        let mtime = meta.as_ref().and_then(|m| m.modified().ok()).map(utc_iso);
+        // Scan facts count only while the file's size still matches.
+        let scanned = dates.get(rel).filter(|s| s.bytes == len);
+        let (date, source) = match scanned.and_then(|s| s.date.clone()) {
+            Some(date) => (Some(date), "photo"),
+            None => (mtime.clone(), "file"),
+        };
+        let camera = scanned.and_then(|s| s.camera.clone());
+        let folder = rel.rsplit_once('/').map(|(f, _)| f).unwrap_or("");
+        items.push(serde_json::json!({
+            "path": rel, "bytes": len, "folder": folder,
+            "date": date, "date_source": source, "mtime": mtime, "camera": camera,
+        }));
+    }
+    let name = library
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| library.display().to_string());
     serde_json::json!({
         "library": library.display().to_string(),
+        "name": name,
+        "demo": config.demo,
         "files": files.len(),
+        "bytes": all_bytes,
         "images": items,
-        "image_bytes": bytes,
+        "image_bytes": image_bytes,
+        "dates_from_scan": !dates.is_empty(),
     })
 }
 
-/// A library image by its relative path. `..`, absolute paths, and anything
-/// that resolves outside the library are refused.
-pub fn read_image(library: &Path, rel: &str) -> Option<(Vec<u8>, &'static str)> {
+/// The checked full path of a grid image, or `None` for `..`, absolute
+/// paths, non-images, and anything that resolves outside the library.
+fn image_path(library: &Path, rel: &str) -> Option<PathBuf> {
     let rel_path = Path::new(rel);
     if rel.is_empty()
         || rel_path.is_absolute()
@@ -317,9 +478,13 @@ pub fn read_image(library: &Path, rel: &str) -> Option<(Vec<u8>, &'static str)> 
     }
     let root = library.canonicalize().ok()?;
     let full = root.join(rel_path).canonicalize().ok()?;
-    if !full.starts_with(&root) {
-        return None;
-    }
+    full.starts_with(&root).then_some(full)
+}
+
+/// A library image by its relative path. `..`, absolute paths, and anything
+/// that resolves outside the library are refused.
+pub fn read_image(library: &Path, rel: &str) -> Option<(Vec<u8>, &'static str)> {
+    let full = image_path(library, rel)?;
     let mime = match rel.rsplit_once('.')?.1.to_ascii_lowercase().as_str() {
         "png" => "image/png",
         "gif" => "image/gif",
@@ -580,6 +745,42 @@ mod tests {
     }
 
     #[test]
+    fn exif_and_file_dates_are_iso() {
+        assert_eq!(
+            exif_date("2015:06:20 14:33:10").as_deref(),
+            Some("2015-06-20T14:33:10")
+        );
+        assert_eq!(
+            exif_date("2015:06:20 14:33:10-07:00").as_deref(),
+            Some("2015-06-20T14:33:10")
+        );
+        assert_eq!(exif_date("0000:00:00 00:00:00"), None);
+        assert_eq!(exif_date("June 2015"), None);
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_443_399_020);
+        assert_eq!(utc_iso(t), "2015-09-28T00:10:20Z");
+        assert_eq!(utc_iso(std::time::UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    }
+
+    /// A preview cache inside the library is refused before the original is
+    /// read, and nothing is written into the library.
+    #[test]
+    fn preview_cache_inside_the_library_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        albumen_ingest::dest::create_dir_all(&lib).unwrap();
+        let mut f = albumen_ingest::dest::create_file(&lib.join("a.jpg")).unwrap();
+        f.write_all(b"\xFF\xD8 not really a jpeg").unwrap();
+        drop(f);
+        let inside = lib.join("thumbs");
+        assert!(thumb::refuse_cache_in_library(&lib, &inside).is_err());
+        assert!(thumb::refuse_cache_in_library(&lib, &lib).is_err());
+        assert!(thumb::preview(&lib, &inside, "a.jpg").is_err());
+        assert!(!inside.exists(), "no cache folder was made in the library");
+        let outside = dir.path().join("work").join("thumbs");
+        assert!(thumb::refuse_cache_in_library(&lib, &outside).is_ok());
+    }
+
+    #[test]
     fn job_args_only_known_kinds_and_folders() {
         let config = Config {
             library: "/lib".into(),
@@ -587,6 +788,7 @@ mod tests {
             card: None,
             state: "/state".into(),
             max_age_secs: 1,
+            demo: false,
         };
         assert!(job_args(&config, "rm", None, None).is_err());
         assert!(job_args(&config, "backup", Some("/elsewhere"), None).is_err());
