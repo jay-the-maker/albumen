@@ -89,6 +89,18 @@ A 380,000-item run is local only: `ALBUMEN_BENCH_ITEMS=380000 cargo run --releas
 - Nothing runs on a user's Mac, RAID, or other personal storage without that person's explicit consent. Tests and trials, including [docs/trial-macos.md](docs/trial-macos.md), run on CI runners. A trial on a person's own machine happens only after they approve it.
 - Keep the tone positive. Describe what Albumen does and how it does it. Do not criticize other products or projects in the repository, issues, or pull requests.
 
+## GUI rules and what enforces them
+
+`albumen gui` (`cli/src/gui/`) is driven and screenshotted with the project skill [.cursor/skills/verify-albumen-gui](.cursor/skills/verify-albumen-gui/SKILL.md); its feature map is the list of what the GUI does and what proves it. Each rule below is enforced by the check next to it, all in `cargo test --locked -p albumen --test gui_lessons`:
+
+| Rule | Enforced by |
+| --- | --- |
+| The GUI never writes inside `--library`; every endpoint leaves it byte-identical | `no_state_is_written_inside_the_library` (fingerprint before and after every GET and POST the page makes) |
+| Only `gui/work.rs` and `gui/thumb.rs` call the write API | `only_the_work_folder_modules_write` |
+| UI text names no other company or product | `ui_text_names_no_other_company_or_product` (scans every file in `cli/src/gui/`) |
+| Dates are ISO 8601 (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM`) | `page_dates_are_iso_only`, `api_dates_are_iso` |
+| A symlink or unsafe name in the library is skipped and counted, never an empty grid | `odd_entries_are_skipped_and_counted_never_an_empty_grid`, `gui::listing` unit tests |
+
 ## How to contribute
 
 You are a contributor. Read [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs `Signed-off-by`. Keep a pull request to one concern. The pull request body checks the philosophy box, checks `Sane defaults`, `No account required`, and `No nags`, and explains how the change upholds [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). The `philosophy-ack` workflow fails unless those boxes are checked, the explanation is at least 20 characters and is not the template placeholder, and every commit in the pull request has `Signed-off-by`.
