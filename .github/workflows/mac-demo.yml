@@ -1,0 +1,77 @@
+# Private demo build for one Mac. Runs only on the mac-demo-2026-11-21 branch.
+# It builds the albumen CLI + local GUI for Apple silicon and Intel, joins them
+# into one universal binary, ad-hoc signs it, runs the GUI tests, smoke-tests
+# `albumen gui --demo`, and keeps the result as a workflow artifact for 7 days.
+# It creates no release and no tag.
+name: mac-demo
+
+on:
+  push:
+    branches: [mac-demo-2026-11-21]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac-demo:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: GUI tests on macOS (arm64)
+        run: cargo test --locked -p albumen --test gui --test gui_stdout_closed
+
+      - name: Build arm64 and x86_64
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin -p albumen
+          cargo build --release --locked --target x86_64-apple-darwin -p albumen
+
+      - name: Universal binary, ad-hoc signed
+        run: |
+          mkdir -p out/albumen-mac-demo
+          lipo -create \
+            target/aarch64-apple-darwin/release/albumen \
+            target/x86_64-apple-darwin/release/albumen \
+            -output out/albumen-mac-demo/albumen
+          codesign --force --sign - out/albumen-mac-demo/albumen
+          lipo -info out/albumen-mac-demo/albumen
+          codesign -dv out/albumen-mac-demo/albumen
+          git rev-parse HEAD > out/albumen-mac-demo/COMMIT
+          ./out/albumen-mac-demo/albumen gui --help > /dev/null
+
+      - name: Smoke test albumen gui --demo
+        run: |
+          work="$RUNNER_TEMP/gui-demo"
+          ./out/albumen-mac-demo/albumen gui --demo --no-open --port 18765 --work "$work" > gui.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18765/ -o page.html && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18765/api/library -o library.json && head -c 400 library.json; echo
+          curl -fsS http://127.0.0.1:18765/api/status -o status.json && head -c 400 status.json; echo
+          grep -qi "<html" page.html
+          kill "$pid"
+          cat gui.log
+
+      - name: Pack
+        run: |
+          cd out
+          tar -czf albumen-mac-demo-universal.tar.gz albumen-mac-demo
+          shasum -a 256 albumen-mac-demo-universal.tar.gz | tee albumen-mac-demo-universal.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: albumen-mac-demo-universal
+          path: |
+            out/albumen-mac-demo-universal.tar.gz
+            out/albumen-mac-demo-universal.tar.gz.sha256
+          retention-days: 7
