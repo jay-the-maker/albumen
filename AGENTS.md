@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io.
+Albumen: an open-source photo library. Bit-exact originals, local control, one-command export.
 
 This is the canonical guide for agents working in this repository. [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) wins if the two disagree.
 
@@ -8,7 +8,7 @@ This is the canonical guide for agents working in this repository. [DESIGN_PHILO
 
 Metadata and original quality are never lost. Originals stay bit-exact. EXIF, XMP, IPTC, GPS, sidecars, Live Photo pairs, RAW+JPEG pairs, and Android motion photos stay. Edits are stored beside the original. Filenames and timestamps stay. Every copy is SHA-256 checked, and CI runs that check.
 
-The default path never deletes a source. Leaving is one command: `albumen export`, then `albumen verify-manifest`. Storage is the user's. There are no dark patterns, upsell nags, or hidden scans. MCP is the agent interface, and agent instructions cannot add a tool the philosophy forbids.
+The default path never deletes a source. Leaving is one command: `albumen export`, then `albumen verify-manifest`. Storage is the user's. Albumen stays quiet until you start a task, and search reads the library you already have. MCP is the agent interface, and agent instructions cannot add a tool the philosophy forbids.
 
 The metrics are reliability, fidelity, respect, control, scale, and the measured performance and friction budgets. Cost is outside those metrics. The numbers are in [docs/performance-budgets.md](docs/performance-budgets.md). The step count is in [docs/friction.md](docs/friction.md). Scale means no hard-coded ceiling on library size, file size, concurrency, or item counts: soft defaults the user can override, streaming and pagination, and constant memory as the library grows. The soft defaults and the safety bounds that stay are in [docs/scale.md](docs/scale.md).
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sync is not backup, S3 target: copy A is a local library, copy B is an
+//! Deletes never propagate, S3 target: copy A is a local library, copy B is an
 //! s3:// prefix. A delete and a receiver tombstone on A, followed by
 //! another export, leave every object in B in place: B still verifies
 //! against its first manifest and gains no tombstone. The test snapshots

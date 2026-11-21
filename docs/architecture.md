@@ -64,7 +64,7 @@ A stored original is not unlinked after that check. The two guarantees below say
 
 ## Guarantees
 
-### Sync is not backup
+### Deletes never propagate
 
 Deletes never propagate. Library content is append-only. A removal is a tombstone or a hide, and the stored original stays. A new file arrives through `copy_verify`. An existing stored original is left as it is.
 
@@ -99,9 +99,9 @@ Two-copy tests run on ubuntu-24.04, windows-2025 and macos-14 with synthetic fix
 
 Current gaps. There is no `albumen family sync` command between two live family libraries yet; the merge test carries new signed files with an additive copy. A copy made with plain `albumen export` records family state but does not interpret it. The library is a directory of ordinary files, so another program that can write the directory can unlink a file. Albumen's own commands leave the stored original in place.
 
-### No account lockout
+### The library stays readable
 
-There is no vendor account. The library is plain files on storage the user already has: originals, sidecars, and tombstones in a directory. Those files are readable without Albumen. Keys and config stay on that machine. Export to a directory needs no service.
+There is no Albumen account. The library is plain files on storage the user already has: originals, sidecars, and tombstones in a directory. Those files are readable without Albumen. Keys and config stay on that machine. Export to a directory needs no service.
 
 `albumen export --apply` copies the library to a directory. `albumen verify-manifest` checks that directory. Neither command contacts a service. The export is the same files. The receiver password is one the user chooses for that process. On a phone it is kept in the Keychain or in Keystore. S3 and rclone use the endpoint and keys the user already holds. Those values stay in the environment or in the local rclone config.
 

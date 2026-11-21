@@ -18,15 +18,15 @@ Shipped. A source is opened read-only. Scan, import, and export read through tha
 
 Synthetic fixtures cover both imports. The throughput bench is 100,000 generated items with a budget of 4 hours. It is [`.github/workflows/takeout-scale.yml`](.github/workflows/takeout-scale.yml), on `workflow_dispatch` and a weekly schedule, not on every pull request.
 
-## Sync is not backup
+## Deletes never propagate
 
 Next, after the importers above. Deletes never propagate. Library content is append-only, and a removal is a tombstone or a hide. The stored original stays. Receivers and importers leave the source and the stored library in place. How that is met, and the gaps that remain, are in [docs/architecture.md](docs/architecture.md).
 
 Test: met on synthetic CI. Two-copy delete-propagation tests run on ubuntu-24.04, windows-2025 and macos-14. They cover a delete, a receiver hide or tombstone, family hides, tombstones and revokes, an additive family update, a live two-library merge, an S3 copy, and MCP. In each, the other copy keeps every original's bytes, name and mtime. `cli/tests/deletes_never_propagate.rs` still rejects an unlink in the receiver, the importers, the CLI and the MCP server. The list of tests and the two kinds of removal are in [docs/architecture.md](docs/architecture.md). Remaining: an `albumen family sync` command, and the real-device soak (XO-52).
 
-## No account lockout
+## The library stays readable
 
-Next, with the item above. There is no vendor account. The library is plain files on the user's own storage, readable without Albumen. Keys and config stay local. Export to a directory needs no service.
+Next, with the item above. There is no Albumen account. The library is plain files on the user's own storage, readable without Albumen. Keys and config stay local. Export to a directory needs no service.
 
 Test idea: an offline/no-account restore test. `cli/tests/offline_restore.rs` is that test and runs in CI. It exports a synthetic library and runs `verify-manifest` with a cleared environment, and on Linux with `connect()` blocked.
 

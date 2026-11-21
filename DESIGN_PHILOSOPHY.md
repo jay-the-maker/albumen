@@ -24,7 +24,7 @@ The default path never removes or alters a source. There is no delete tool, no C
 
 A sidecar is replaced by writing a temp file, fsyncing it, and renaming it over the old sidecar. The previous sidecar is not unlinked first. The first `source_mtime` recorded at commit is write-once. A later conflicting time is appended. It does not replace the first.
 
-## No lock-in
+## Leave with your files
 
 Leaving is one command. `albumen export` prints the plan and writes nothing unless `--apply` or `--execute` is passed. With that flag it copies the whole library, including sidecars and pairs, through `copy_verify`, to a directory or an `s3://` prefix. The source is not modified. A destination that resolves inside the source, or is the same directory, is refused. There is no override. A destination file with the same SHA-256 is left in place, so the command can be run again. A different file at that relative path is an error and is not overwritten.
 
@@ -46,9 +46,9 @@ Each connector refuses to overwrite, preserves the filename and mtime, and repor
 
 Behavior is transparent. A backup that would strip GPS does not start, and the message says why. A checksum mismatch names both hashes. A derivative is not uploaded in place of an original, and that refusal is logged.
 
-Albumen does not use dark patterns. It does not nag, upsell, or scan the library in the background for a purpose the user did not start. Search reads the files and sidecars already in the library when you run it. It does not phone home, and it does not build a second catalog that becomes the only copy of a caption or a GPS point.
+Albumen stays quiet until you start a task. Search reads the files and sidecars already in the library when you run it. Captions and GPS stay in those files, so an index is only a cache the library can rebuild. Work runs locally.
 
-Funding is [GitHub Sponsors](https://github.com/sponsors/jay-the-maker), and no other platforms. There is no paid tier that unlocks fidelity, export, or the original file.
+Funding is [GitHub Sponsors](https://github.com/sponsors/jay-the-maker), and no other platforms. Fidelity, export, and the original file are part of the project for everyone.
 
 ## Agent-native
 

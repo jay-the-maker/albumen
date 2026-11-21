@@ -238,4 +238,4 @@ The pull-request suite uses a small synthetic library. A large shared library is
 - Treat a hide, a tombstone, or an unshare as a delete of bytes.
 - Overwrite an object because a filename collided.
 - Build a catalog that is the only copy of a caption, a GPS point, or an album.
-- Nag, upsell, or scan storage the member did not ask to sync.
+- Scan or sync storage a member did not ask to include.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sync is not backup: two copies of one synthetic library. A delete at the
+//! Deletes never propagate: two copies of one synthetic library. A delete at the
 //! source, or in one copy, never removes an original from the other copy,
 //! and never touches the source library. Fixtures only; no network.
 

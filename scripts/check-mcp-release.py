@@ -17,7 +17,7 @@ from pathlib import Path
 
 SCHEMA_URL = "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
 TAGLINE = (
-    "Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io."
+    "Albumen: an open-source photo library. Bit-exact originals, local control, one-command export."
 )
 NAME = "io.github.jay-the-maker/albumen"
 IMAGE = "ghcr.io/jay-the-maker/albumen-mcp"

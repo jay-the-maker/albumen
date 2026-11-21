@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sync is not backup, MCP surface: hide- and remove-style tool calls made
+//! Deletes never propagate, MCP surface: hide- and remove-style tool calls made
 //! against copy A through `albumen-mcp` never delete or change anything on
 //! copy B, and A's originals stay bit-exact. The server has no delete,
 //! remove, hide or move tool; every such call is refused. Synthetic bytes

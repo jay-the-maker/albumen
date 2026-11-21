@@ -62,7 +62,7 @@ A library on disk is readable and exportable with no network and no service. `al
 
 ### No nags
 
-Albumen does not nag, upsell, or ask for a rating. There is no paid tier that unlocks the original, export, or fidelity. Search does not scan the library in the background for a purpose you did not start.
+Albumen stays quiet until you start a task. Fidelity, export, and the original file are part of the project for everyone. Search reads the files and sidecars already in the library when you run it.
 
 The pull request checklist uses these exact lines:
 

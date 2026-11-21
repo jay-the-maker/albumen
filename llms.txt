@@ -1,4 +1,4 @@
-# Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io.
+# Albumen: an open-source photo library. Bit-exact originals, local control, one-command export.
 
 > Open-source, bring-your-own-storage, MCP-native photo library. Originals are bit-exact, metadata is never lost, and a full export is one command.
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sync is not backup, second half: a hide, a tombstone, or a removed family
+//! Deletes never propagate, second half: a hide, a tombstone, or a removed family
 //! member's view on copy A never removes anything from copy B, and A keeps
 //! its originals. Covers the receiver path and the family manifest merge.
 //! Synthetic bytes only; no network.

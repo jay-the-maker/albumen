@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sync is not backup, live family libraries: copy A and copy B are both
+//! Deletes never propagate, live family libraries: copy A and copy B are both
 //! full family libraries. Signed records made on one (a hide, a
 //! tombstone, a revoke, a new photo) reach the other by adding the new
 //! signed files only. The other copy's merged manifest then shows them,

@@ -1,6 +1,6 @@
 # Albumen
 
-Albumen: the open-source alternative to iCloud Photos, Google Photos and Frame.io.
+Albumen: an open-source photo library. Bit-exact originals, local control, one-command export.
 
 The commitment is [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md). Read it before changing this repository.
 
