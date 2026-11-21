@@ -1,4 +1,5 @@
-# Private demo build for one Mac. Runs only on the mac-demo-2026-11-21 branch.
+# Private demo build for one Mac. Runs only on the mac-demo-2026-11-21 and
+# gui-feedback-r1-2026-11-21 branches.
 # It builds the albumen CLI + local GUI for Apple silicon and Intel, joins them
 # into one universal binary, ad-hoc signs it, runs the GUI tests, smoke-tests
 # `albumen gui --demo`, and keeps the result as a workflow artifact for 7 days.
@@ -7,7 +8,7 @@ name: mac-demo
 
 on:
   push:
-    branches: [mac-demo-2026-11-21]
+    branches: [mac-demo-2026-11-21, gui-feedback-r1-2026-11-21]
   workflow_dispatch:
 
 permissions:

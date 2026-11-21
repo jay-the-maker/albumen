@@ -13,8 +13,13 @@ impl Drop for Gui {
 }
 
 fn start(work: &std::path::Path) -> (Gui, String) {
+    start_with(&["gui", "--demo"], work)
+}
+
+fn start_with(args: &[&str], work: &std::path::Path) -> (Gui, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_albumen"))
-        .args(["gui", "--demo", "--no-open", "--port", "0", "--work"])
+        .args(args)
+        .args(["--no-open", "--port", "0", "--work"])
         .arg(work)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -47,6 +52,25 @@ fn request(addr: &str, raw: &str) -> (u16, String) {
         .map(|(_, b)| b.to_string())
         .unwrap_or_default();
     (code, body)
+}
+
+/// Status, Content-Type, and raw body bytes.
+fn get_bytes(addr: &str, path: &str) -> (u16, String, Vec<u8>) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&raw[..split]).to_string();
+    let code = head[9..12].parse().unwrap();
+    let mime = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Type: "))
+        .unwrap_or("")
+        .to_string();
+    (code, mime, raw[split + 4..].to_vec())
 }
 
 fn get(addr: &str, path: &str) -> (u16, String) {
@@ -235,4 +259,180 @@ fn ok_card_says_match_what_was_backed_up_not_your_originals() {
         "{card}"
     );
     assert!(!status.contains("all match your originals"));
+}
+
+/// A listing of every file under `dir`: path, size, mtime, mode. Equal
+/// before and after means nothing in the tree was written.
+fn tree_state(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                stack.push(e.path());
+            }
+            #[cfg(unix)]
+            let mode = std::os::unix::fs::PermissionsExt::mode(&m.permissions());
+            #[cfg(not(unix))]
+            let mode = 0;
+            out.push(format!(
+                "{} {} {:?} {mode}",
+                e.path().display(),
+                m.len(),
+                m.modified().unwrap()
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+fn pct(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+fn write_jpeg(path: &std::path::Path, w: u32, h: u32) {
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+    });
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+        .encode_image(&img)
+        .unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A real (non-demo) library: no demo banner flag, the folder name for the
+/// title, folder and date for each photo, a size summary, and small JPEG
+/// previews cached only in the work folder. The library is unchanged.
+#[test]
+fn real_library_groups_photos_and_serves_previews_from_the_work_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("2015");
+    let event = lib.join("2015 06 Family Reunion");
+    std::fs::create_dir_all(&event).unwrap();
+    write_jpeg(&event.join("1443399020047.jpg"), 1600, 1200);
+    write_jpeg(&lib.join("top.jpeg"), 800, 600);
+    std::fs::write(lib.join("IMG_0001.HEIC"), b"heic bytes").unwrap();
+    let before = tree_state(&lib);
+    let work = dir.path().join("work");
+    let (_gui, addr) = start_with(&["gui", "--library", lib.to_str().unwrap()], &work);
+
+    let (code, page) = get(&addr, "/");
+    assert_eq!(code, 200);
+    assert!(page.contains("id=\"real-note\""));
+    assert!(page.contains("<details class=\"dev\"><summary>Command details</summary><p class=\"runs\" id=\"runs-photos\">"));
+    assert!(page.contains("i.loading='lazy'") && page.contains("'/thumb?p='"));
+    assert!(
+        page.contains("id=\"src\"")
+            && page.contains("id=\"size\"")
+            && page.contains("id=\"viewer\"")
+    );
+    for name in ["iphoto", "apple", "google", "icloud"] {
+        // `-apple-system` is the CSS keyword for the system font, not a name.
+        let text = page.to_lowercase().replace("-apple-system", "");
+        assert!(!text.contains(name), "page names {name}");
+    }
+
+    let (code, body) = get(&addr, "/api/library");
+    assert_eq!(code, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["demo"], false);
+    assert_eq!(v["name"], "2015");
+    assert_eq!(v["files"], 3);
+    let images = v["images"].as_array().unwrap();
+    assert_eq!(images.len(), 2, "HEIC is counted but not in the grid");
+    let ev = images
+        .iter()
+        .find(|i| i["path"] == "2015 06 Family Reunion/1443399020047.jpg")
+        .unwrap();
+    assert_eq!(ev["folder"], "2015 06 Family Reunion");
+    assert_eq!(ev["date_source"], "file", "no scan yet: file dates");
+    assert!(ev["date"].as_str().unwrap().ends_with('Z'));
+    let top = images.iter().find(|i| i["path"] == "top.jpeg").unwrap();
+    assert_eq!(top["folder"], "");
+    let original = std::fs::metadata(event.join("1443399020047.jpg"))
+        .unwrap()
+        .len();
+    assert!(v["bytes"].as_u64().unwrap() > original);
+
+    let q = "/thumb?p=2015%2006%20Family%20Reunion%2F1443399020047.jpg";
+    let (code, mime, thumb) = get_bytes(&addr, q);
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&thumb));
+    assert_eq!(mime, "image/jpeg");
+    assert!(
+        (thumb.len() as u64) < original,
+        "preview is smaller than the original"
+    );
+    let (w, h) = image::load_from_memory(&thumb)
+        .unwrap()
+        .into_rgb8()
+        .dimensions();
+    assert_eq!((w, h), (480, 360));
+    let cached: Vec<_> = tree_state(&work.join("thumbs"))
+        .into_iter()
+        .filter(|l| l.contains(".jpg "))
+        .collect();
+    assert_eq!(cached.len(), 1, "one preview cached in --work/thumbs");
+    let (code, _, again) = get_bytes(&addr, q);
+    assert_eq!(code, 200);
+    assert_eq!(again, thumb, "second request is the cached preview");
+
+    for bad in [
+        "/thumb?p=..%2Fwork%2Fx.jpg",
+        "/thumb?p=IMG_0001.HEIC",
+        "/thumb?p=%2Fetc%2Fpasswd",
+    ] {
+        let (code, _) = get(&addr, bad);
+        assert_eq!(code, 404, "{bad}");
+    }
+    let (code, _, full) = get_bytes(&addr, "/img?p=top.jpeg");
+    assert_eq!(code, 200, "the viewer still gets the full original");
+    assert_eq!(full, std::fs::read(lib.join("top.jpeg")).unwrap());
+
+    assert_eq!(tree_state(&lib), before, "the library is unchanged");
+}
+
+/// The work folder, and so the preview cache, may not be inside the library.
+#[test]
+fn work_folder_inside_the_library_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    write_jpeg(&lib.join("a.jpg"), 64, 48);
+    let before = tree_state(&lib);
+    let out = Command::new(env!("CARGO_BIN_EXE_albumen"))
+        .args(["gui", "--library"])
+        .arg(&lib)
+        .args(["--no-open", "--port", "0", "--work"])
+        .arg(lib.join("albumen-work"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!lib.join("albumen-work").exists());
+    assert_eq!(tree_state(&lib), before);
+}
+
+#[test]
+fn demo_library_says_it_is_the_demo() {
+    let work = tempfile::tempdir().unwrap();
+    let (_gui, addr) = start(work.path());
+    let (_, body) = get(&addr, "/api/library");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["demo"], true);
+    let (code, mime, _) = get_bytes(
+        &addr,
+        &format!("/thumb?p={}", pct(v["images"][0]["path"].as_str().unwrap())),
+    );
+    assert_eq!(code, 200);
+    assert_eq!(mime, "image/png", "non-JPEG previews are the original");
 }
