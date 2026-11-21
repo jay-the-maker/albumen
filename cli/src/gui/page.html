@@ -2,6 +2,7 @@
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Albumen</title>
+<link rel="icon" href="data:,">
 <style>
 :root{--ink:#1d1f23;--mute:#6b7078;--line:#d9dbdf;--bg:#f4f4f2;--ok:#1f7a3f;--stale:#b26a00;--bad:#b3261e;--none:#6b7078;--accent:#2b5fd9;
  --src:#3b3e44;--src-ink:#d7d9dd;--src-head:#9a9ea6;--src-on:#5b7fc7;--bar:#e3e4e6;--tile:170px}
@@ -9,6 +10,7 @@
 body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg);display:flex;flex-direction:column;overflow:hidden}
 .demo{background:#fff4d6;border-bottom:1px solid #ecd9a0;padding:5px 16px;font-size:13px;color:#6b5100}
 .note{background:#eef5f0;border-bottom:1px solid #cfe5d6;padding:5px 16px;font-size:13px;color:#24553a}
+.note.warn{background:#fff6e5;border-color:#f0d9a8;color:#6b4a00}
 .app{flex:1;display:flex;min-height:0}
 /* Source list */
 .src{width:210px;flex:none;background:var(--src);color:var(--src-ink);overflow-y:auto;padding:10px 0 16px;display:flex;flex-direction:column}
@@ -84,6 +86,7 @@ select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:
 <body>
 <div class="demo" id="demo-banner" hidden>DEMO-ONLY window. Synthetic sample images. Runs on this computer; the window listens on 127.0.0.1 only.</div>
 <div class="note" id="real-note" hidden>Viewing your photos read-only, on this computer. Albumen opens files only to read them; this window listens on 127.0.0.1 only.</div>
+<div class="note warn" id="skip-note" role="status" hidden></div>
 <div class="app">
 <nav class="src" id="src" aria-label="Source list">
 <h3>Library</h3>
@@ -165,11 +168,10 @@ function sq(s){return s&&/^[A-Za-z0-9\/._\-:=+@]+$/.test(s)?s:"'"+s.replace(/'/g
 function q(s){return /[\s"'$`\\]/.test(s)?'"'+s.replace(/(["\\$`])/g,'\\$1')+'"':s}
 const nf=new Intl.NumberFormat();
 function size(b){const u=['bytes','KB','MB','GB','TB'];let i=0;while(b>=1000&&i<4){b/=1000;i++;}return (i?b.toFixed(b<10?1:0):b)+' '+u[i];}
-const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-function day(d){return d?MON[+d.slice(5,7)-1]+' '+(+d.slice(8,10))+', '+d.slice(0,4):'';}
+// Dates are ISO 8601 everywhere: YYYY-MM-DD, and YYYY-MM-DD HH:MM for a time.
+function day(d){return d?d.slice(0,10):'';}
 function stamp(d){return d?day(d)+' '+d.slice(11,16):'';}
-function span(a,b){if(!a)return '';if(a.slice(0,10)==b.slice(0,10))return day(a);
- if(a.slice(0,4)==b.slice(0,4))return day(a).replace(/, \d+$/,'')+' – '+day(b);return day(a)+' – '+day(b);}
+function span(a,b){if(!a)return '';return day(a)==day(b)?day(a):day(a)+' to '+day(b);}
 // File dates arrive as UTC (…Z); show them in this computer's time.
 function loc(d){if(!d||!d.endsWith('Z'))return d;const t=new Date(d);const p=n=>String(n).padStart(2,'0');
  return t.getFullYear()+'-'+p(t.getMonth()+1)+'-'+p(t.getDate())+'T'+p(t.getHours())+':'+p(t.getMinutes())+':'+p(t.getSeconds());}
@@ -246,6 +248,10 @@ function show(s){document.querySelectorAll('.src button').forEach(b=>b.classList
  for(const id of ['photos','backup','health','proof'])$(id).hidden=id!=s;
  if(browse){view=s;render();}else{$('back').hidden=true;$('title').textContent={photos:'Check photos',backup:'Back up',health:'Backup health',proof:'Proof'}[s];}
  if(s=='health')health();}
+// Entries the listing left out (symlinks, unsafe names) are counted, never silently dropped.
+function skipNote(k){const n=$('skip-note');if(!k||!k.count){n.hidden=true;return;}
+ const why=Object.entries(k.by_reason).map(([w,c])=>nf.format(c)+' '+w).join(', ');
+ n.textContent=plural(k.count,'item')+' in this folder could not be shown and were skipped ('+why+'): '+k.examples.slice(0,3).map(e=>e.path).join(', ')+(k.count>3?', …':'');n.hidden=false;}
 async function init(){
  const lib=await j('/api/library');$('lib').textContent=lib.library;$('lib-side').textContent=lib.library;
  $('demo-banner').hidden=!lib.demo;$('real-note').hidden=!!lib.demo;
@@ -253,7 +259,7 @@ async function init(){
  const other=lib.files-lib.images.length;
  $('lib-summary').textContent=[plural(lib.files,'file')+', '+size(lib.bytes),nf.format(lib.images.length)+' shown ('+size(lib.image_bytes)+')',
   other?nf.format(other)+' HEIC, RAW, video or other files checked but not previewed yet':''].filter(Boolean).join('  ·  ');
- build(lib);render();
+ build(lib);render();skipNote(lib.skipped);
  const st=await j('/api/status');dests=st.destinations.map(d=>d.dest);
  for(const sel of ['dest-b','dest-v']){$(sel).innerHTML='';for(const d of dests){const o=document.createElement('option');o.value=d;o.textContent=d;$(sel).append(o);}}
  $('runs-photos').textContent='runs: albumen scan '+q(lib.library)+' --manifest … [--previous …]';
@@ -290,8 +296,9 @@ $('go-verify').onclick=async()=>{const b=$('go-verify');b.disabled=true;$('verif
  $('verify-out').textContent='Not verified (exit '+s.exit+').\n'+(bad.length?bad.length+' item(s) no longer match what was backed up:\n'+bad.map(m=>'  '+m[1]+': '+m[2]).join('\n')+'\nverify-manifest only read the backup; your photos folder was not opened\nnext: albumen status '+sq($('dest-v').value):stdout(s).filter(l=>!/^(proof|albumen[^:]*): /.test(l)).join('\n'));}
  b.disabled=false;};
 // #screen or #screen:run opens a screen (and presses its button) for a scripted walk-through.
-init().then(()=>{const [s,r,arg,dn]=location.hash.slice(1).split(':');if(!s)return;
+// <html data-ready="1"> tells a driver (and a screenshot) the first render is done.
+init().then(()=>{const [s,r,arg,dn]=location.hash.slice(1).split(':');if(!s){document.documentElement.dataset.ready='1';return;}
  if(r=='job')attach=Number(arg);
  const i=dests.findIndex(d=>d.endsWith('/'+decodeURIComponent((r=='job'?dn:arg)||'')));if(i>=0){$('dest-b').selectedIndex=i;$('dest-v').selectedIndex=i;runsB();runsV();}
- show(s);if(r=='run'||r=='job')({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]&&$({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]).click());});
+ show(s);if(r=='run'||r=='job')({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]&&$({photos:'go-scan',backup:'go-backup',proof:'go-verify'}[s]).click());document.documentElement.dataset.ready='1';});
 </script></body></html>

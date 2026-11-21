@@ -19,7 +19,9 @@ use albumen_ingest::{IngestError, SourceRoot};
 
 pub mod demo;
 pub mod http;
+pub mod listing;
 pub mod thumb;
+pub mod work;
 
 const PAGE: &str = include_str!("page.html");
 
@@ -111,7 +113,7 @@ pub fn run(args: GuiArgs) -> Result<(), IngestError> {
     let thumbs = config.thumbs();
     SourceRoot::open(&config.library)?.refuse_destinations(&[&config.state, &thumbs])?;
     thumb::refuse_cache_in_library(&config.library, &thumbs)?;
-    albumen_ingest::dest::create_dir_all(&config.state)?;
+    work::ensure(&config.library, &config.state)?;
     let listener = TcpListener::bind(("127.0.0.1", args.port))
         .map_err(|err| io_err(Path::new("127.0.0.1"), err))?;
     let port = listener
@@ -295,17 +297,10 @@ fn handle(server: &Arc<Server>, mut stream: TcpStream, port: u16) -> std::io::Re
     }
 }
 
-/// Relative paths of every file in the library, read-only, sorted.
+/// Relative paths of every file in the library, read-only, sorted. Entries
+/// the walk leaves out are in [`listing::list`]'s `skipped`.
 fn library_files(library: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(root) = SourceRoot::open(library) {
-        let _ = root.walk(None, &mut |relative| {
-            out.push(relative.to_string());
-            true
-        });
-    }
-    out.sort();
-    out
+    listing::list(library).files
 }
 
 fn is_image(rel: &str) -> bool {
@@ -417,7 +412,8 @@ fn newest_scan(state: &Path) -> Option<PathBuf> {
 /// (`"file"`). Read-only: the library is only listed and stat-ed.
 pub fn library_view(config: &Config, scan: Option<&Path>) -> serde_json::Value {
     let library = &config.library;
-    let files = library_files(library);
+    let listing = listing::list(library);
+    let files = listing.files;
     let manifest = scan
         .map(Path::to_path_buf)
         .or_else(|| newest_scan(&config.state));
@@ -460,6 +456,7 @@ pub fn library_view(config: &Config, scan: Option<&Path>) -> serde_json::Value {
         "images": items,
         "image_bytes": image_bytes,
         "dates_from_scan": !dates.is_empty(),
+        "skipped": listing::summary(&listing.skipped),
     })
 }
 
