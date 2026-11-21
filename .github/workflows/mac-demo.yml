@@ -26,6 +26,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.2
 
+      - name: Install pinned ExifTool 13.59 (the demo's backup step needs it)
+        run: bash scripts/install-exiftool.sh
+
       - name: GUI tests on macOS (arm64)
         run: cargo test --locked -p albumen --test gui --test gui_stdout_closed
 
@@ -45,12 +48,27 @@ jobs:
           lipo -info out/albumen-mac-demo/albumen
           codesign -dv out/albumen-mac-demo/albumen
           git rev-parse HEAD > out/albumen-mac-demo/COMMIT
+          exif="$HOME/.cache/albumen/Image-ExifTool-13.59"
+          mkdir -p out/albumen-mac-demo/Image-ExifTool-13.59
+          cp -R "$exif/exiftool" "$exif/lib" out/albumen-mac-demo/Image-ExifTool-13.59/
+          cp "$exif/README" out/albumen-mac-demo/Image-ExifTool-13.59/ 2>/dev/null || true
+          cat > "out/albumen-mac-demo/Albumen Demo.command" <<'SH'
+          #!/bin/bash
+          # Albumen private demo: 12 generated sample photos, no real photos.
+          # Uses the ExifTool bundled next to this file. Ctrl-C stops it.
+          cd "$(dirname "$0")" || exit 1
+          export PATH="$PWD/Image-ExifTool-13.59:$PATH"
+          exec ./albumen gui --demo
+          SH
+          sed -i '' 's/^          //' "out/albumen-mac-demo/Albumen Demo.command"
+          chmod +x "out/albumen-mac-demo/Albumen Demo.command" out/albumen-mac-demo/albumen out/albumen-mac-demo/Image-ExifTool-13.59/exiftool
           ./out/albumen-mac-demo/albumen gui --help > /dev/null
 
       - name: Smoke test albumen gui --demo
         run: |
           work="$RUNNER_TEMP/gui-demo"
-          ./out/albumen-mac-demo/albumen gui --demo --no-open --port 18765 --work "$work" > gui.log 2>&1 &
+          PATH="$PWD/out/albumen-mac-demo/Image-ExifTool-13.59:/usr/bin:/bin:/usr/sbin:/sbin" \
+            ./out/albumen-mac-demo/albumen gui --demo --no-open --port 18765 --work "$work" > gui.log 2>&1 &
           pid=$!
           for i in $(seq 1 30); do
             curl -fsS http://127.0.0.1:18765/ -o page.html && break
